@@ -26,6 +26,12 @@ const fmtDay  = ts => new Date(ts*1000).toLocaleDateString([], {weekday:'short',
 const todayISO = () => new Date().toISOString().slice(0,10);
 const initials = n => (n||'?').split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
 const hrs = h => (h % 1 === 0 ? h : h.toFixed(1)) + (h === 1 ? ' hour' : ' hours');
+/* "2026-09" -> "September". Parsed as a local date, not a UTC one: new
+   Date('2026-09') is midnight UTC and reads as August in Alexandria. */
+const monthName = m => new Date(+m.slice(0,4), +m.slice(5,7)-1, 1)
+  .toLocaleDateString([], {month:'long'});
+const fmtISO = d => d ? new Date(+d.slice(0,4), +d.slice(5,7)-1, +d.slice(8,10))
+  .toLocaleDateString([], {day:'numeric',month:'short'}) : '—';
 
 function avatar(c, big=false){
   const cls = 'avatar' + (big?' lg':'');
@@ -170,6 +176,17 @@ route('/', async () => {
       <div class="box kpi"><div class="k">NEED ATTENTION</div>
         <div class="v" style="color:${d.attention.length?'var(--warn)':'var(--ok)'}">${d.attention.length}</div>
         <div class="n">low, expiring or unassigned</div></div>
+    </div>
+
+    <div class="grid g2" style="margin-top:15px">
+      <div class="box kpi"><div class="k">NEW CLIENTS IN ${esc(monthName(s.mo_month).toUpperCase())}</div>
+        <div class="v" style="color:var(--brand)">${s.mo_new_clients}</div>
+        <div class="n">${s.mo_new_clients_prev} the month before${
+          s.mo_new_plans?` · ${s.mo_new_plans} plan${s.mo_new_plans===1?'':'s'} bought`:''}</div></div>
+      <div class="box kpi"><div class="k">EARNED FROM THEM</div>
+        <div class="v" style="font-size:22px;padding-top:6px;color:var(--brand-deep)">${s.mo_new_revenue.toLocaleString()} <span style="font-size:12px;color:var(--mute)">EGP</span></div>
+        <div class="n">${s.mo_revenue.toLocaleString()} from every plan sold this month${
+          s.mo_unpriced?` · <span style="color:var(--warn)">${s.mo_unpriced} with no price on the sheet</span>`:''}</div></div>
     </div>
 
     <h2>Today's schedule</h2>
@@ -986,6 +1003,16 @@ route('/instructor', async (id) => {
         <div class="v" style="font-size:22px;padding-top:6px;color:var(--brand-deep)">${t.earned.toLocaleString()}</div>
         <div class="n">EGP · ${t.upcoming_value.toLocaleString()} upcoming</div></div>
     </div>
+
+    ${i.logged && i.logged.days ? `
+    <div class="grid g2" style="margin-bottom:16px">
+      <div class="box kpi"><div class="k">HOURS ON THE SALARY SHEET</div>
+        <div class="v" style="color:var(--brand)">${i.logged.hours}</div>
+        <div class="n">${i.logged.days} days worked · ${fmtISO(i.logged.from)} to ${fmtISO(i.logged.to)}</div></div>
+      <div class="box kpi"><div class="k">PAY FOR THOSE HOURS</div>
+        <div class="v" style="font-size:22px;padding-top:6px;color:var(--brand-deep)">${i.logged.pay.toLocaleString()} <span style="font-size:12px;color:var(--mute)">EGP</span></div>
+        <div class="n">at ${t.hourly_rate.toLocaleString()} EGP per hour</div></div>
+    </div>` : ''}
 
     <h2>Upcoming sessions (${upcoming.length})</h2>
     ${upcoming.length?table(upcoming)

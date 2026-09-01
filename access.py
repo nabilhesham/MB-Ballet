@@ -13,7 +13,7 @@ it.
 """
 
 import time
-from datetime import date, datetime, time as _t
+from datetime import date, datetime, timedelta, time as _t
 
 import db
 import tokens
@@ -78,7 +78,22 @@ def plan_state(conn, sub_id: int) -> dict:
     }
 
 
-def active_plan(conn, client_id: int):
+def active_plan(conn, client_id: int, class_id: int = None):
+    """
+    The plan a scan should be read against.
+
+    A client taking two classes holds two cards and two plans, so "their
+    plan" is only answerable once you know which card was presented. Without
+    that -- a member-number lookup, or a card issued before classes were
+    split -- the longest-running plan is still the best guess.
+    """
+    if class_id is not None:
+        sub = conn.execute(
+            "SELECT * FROM subscriptions WHERE client_id=? AND active=1"
+            "   AND class_id=? ORDER BY expires_on DESC LIMIT 1",
+            (client_id, class_id)).fetchone()
+        if sub:
+            return sub
     return conn.execute(
         "SELECT * FROM subscriptions WHERE client_id=? AND active=1"
         " ORDER BY expires_on DESC LIMIT 1", (client_id,)).fetchone()
@@ -179,7 +194,7 @@ def verify(conn, raw_token: str) -> dict:
     if client is None or not client["active"]:
         return _deny("Client is not active")
 
-    sub = active_plan(conn, client["id"])
+    sub = active_plan(conn, client["id"], cred["class_id"])
     base = {
         "client_id": client["id"], "credential_id": cred["id"],
         "name_en": client["name_en"], "photo_path": client["photo_path"],
@@ -215,7 +230,9 @@ def _decide(conn, client, cred, base, t):
         return _deny(f"Already checked in today at {when} for {done['class_name']}",
                      detail="nothing was deducted", **base)
 
-    sub = active_plan(conn, cid)
+    # The card's own plan: freezing the ballet plan must not turn away a
+    # client arriving for the flexibility class she is paid up in.
+    sub = active_plan(conn, cid, cred["class_id"] if cred else None)
     if sub and sub["frozen_on"]:
         until = sub["frozen_until"]
         when = f" until {until}" if until else ""
@@ -348,7 +365,8 @@ def book(conn, client_id: int, session_id: int, subscription_id: int = None) -> 
     if s is None:
         return {"ok": False, "error": "no such session"}
     if subscription_id is None:
-        sub = active_plan(conn, client_id)
+        # Spend the plan bought for this class, not whichever one runs longest.
+        sub = active_plan(conn, client_id, s["class_id"])
         subscription_id = sub["id"] if sub else None
     conn.execute(
         "INSERT INTO bookings (client_id, session_id, subscription_id, status, created_at)"
@@ -423,6 +441,73 @@ def expected_today(conn) -> dict:
     expected, arrived, absent = r["expected"] or 0, r["arrived"] or 0, r["absent"] or 0
     return {"expected": expected, "arrived": arrived, "absent": absent,
             "still_due": max(0, expected - arrived - absent)}
+
+
+def month_of(when: date = None) -> str:
+    """The "YYYY-MM" a date falls in. Today's, unless told otherwise."""
+    return (when or date.today()).strftime("%Y-%m")
+
+
+def prev_month(month: str) -> str:
+    first = date.fromisoformat(month + "-01")
+    return (first - timedelta(days=1)).strftime("%Y-%m")
+
+
+def month_intake(conn, month: str = None) -> dict:
+    """
+    Who joined this month and what they paid.
+
+    Two numbers reception actually asks for at the end of a month, and they
+    are not the same question:
+
+      *New clients* are counted on `joined_on` — the date of their first
+      payment, which is when they became a client.
+
+      *Their revenue* is the plans those same people bought this month. A
+      returning client renewing is real money too, so the month's whole
+      intake is reported alongside it rather than instead of it; the pair is
+      what tells you whether growth came from new faces or from the regulars.
+
+    Plans whose price nobody wrote down are counted separately, never as
+    zero. The roster sheets record "package", "free" and "yes" as often as an
+    amount, and a month's takings reported as a clean total while half its
+    plans carry no figure at all is a lie the shape of a fact.
+    """
+    month = month or month_of()
+    like = month + "-%"
+
+    new_clients = conn.execute(
+        "SELECT COUNT(*) n FROM clients WHERE active=1 AND joined_on LIKE ?",
+        (like,)).fetchone()["n"]
+    before = conn.execute(
+        "SELECT COUNT(*) n FROM clients WHERE active=1 AND joined_on LIKE ?",
+        (prev_month(month) + "-%",)).fetchone()["n"]
+
+    def takings(only_new: bool) -> tuple:
+        joined = " AND c.joined_on LIKE ?" if only_new else ""
+        args = (like, like) if only_new else (like,)
+        r = conn.execute(
+            "SELECT COALESCE(SUM(s.price),0) paid,"
+            "       SUM(CASE WHEN s.price IS NULL THEN 1 ELSE 0 END) unpriced,"
+            "       COUNT(*) plans"
+            "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
+            " WHERE c.active=1 AND s.starts_on LIKE ?" + joined, args).fetchone()
+        return r["paid"] or 0, r["unpriced"] or 0, r["plans"] or 0
+
+    new_paid, new_unpriced, new_plans = takings(True)
+    all_paid, all_unpriced, all_plans = takings(False)
+
+    return {
+        "month": month,
+        "new_clients": new_clients,
+        "new_clients_prev": before,
+        "new_revenue": round(new_paid, 2),
+        "new_plans": new_plans,
+        "new_unpriced": new_unpriced,
+        "revenue": round(all_paid, 2),
+        "plans": all_plans,
+        "unpriced": all_unpriced,
+    }
 
 
 # ======================================================================

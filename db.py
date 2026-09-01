@@ -9,6 +9,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS instructors (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL,
+    name_ar      TEXT,
     phone        TEXT,
     email        TEXT,
     specialty    TEXT,
@@ -22,9 +23,12 @@ CREATE TABLE IF NOT EXISTS instructors (
 CREATE TABLE IF NOT EXISTS classes (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT NOT NULL,
+    name_ar        TEXT,
     description    TEXT,
     colour         TEXT NOT NULL DEFAULT '#87438E',
     duration_hours REAL NOT NULL DEFAULT 1.5,
+    -- "primary", "level 8", "grade 6" -- the wording the roster sheets use.
+    level          TEXT,
     active         INTEGER NOT NULL DEFAULT 1
 );
 
@@ -42,9 +46,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS clients (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name_en     TEXT NOT NULL,
+    name_ar     TEXT,
     phone       TEXT,
     email       TEXT,
-    age         INTEGER,
+    -- REAL, not INTEGER: the roster sheets carry "4.8" and "12.5" for the
+    -- youngest children, and rounding a four-year-old up to five loses the
+    -- distinction the class placement is actually made on.
+    age         REAL,
+    dob         TEXT,
     school      TEXT,
     joined_on   TEXT,
     photo_path  TEXT,
@@ -61,6 +70,15 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     sessions_total  INTEGER NOT NULL,
     sessions_used   INTEGER NOT NULL DEFAULT 0,
     price           REAL,
+    -- What the roster sheet's PAID column actually said: "package", "free",
+    -- "yes", or the amount. Kept verbatim because "package" and a blank price
+    -- mean different things -- one is a bundle billed elsewhere, the other is
+    -- a number nobody wrote down -- and revenue reporting must not confuse them.
+    payment_note    TEXT,
+    -- The ballet sheet sells months; the flexibility sheet sells session packs.
+    months          INTEGER,
+    -- "sunday - thursday", "saturday" -- which weekdays this pack is used on.
+    days_pattern    TEXT,
     starts_on       TEXT NOT NULL,
     expires_on      TEXT NOT NULL,
     active          INTEGER NOT NULL DEFAULT 1,
@@ -117,6 +135,19 @@ CREATE TABLE IF NOT EXISTS credentials (
     revoked_at  INTEGER
 );
 
+-- One row per instructor per working day, straight from the monthly salary
+-- sheet. Hours are what the sheet records; pay is hours x hourly_rate, so a
+-- corrected rate re-prices the month rather than leaving a stale total behind.
+CREATE TABLE IF NOT EXISTS instructor_hours (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    instructor_id INTEGER NOT NULL REFERENCES instructors(id),
+    work_date     TEXT NOT NULL,
+    hours         REAL NOT NULL,
+    source        TEXT,
+    created_at    INTEGER NOT NULL,
+    UNIQUE(instructor_id, work_date)
+);
+
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
 CREATE TABLE IF NOT EXISTS settings (
@@ -148,6 +179,9 @@ CREATE INDEX IF NOT EXISTS ix_bk_client   ON bookings(client_id);
 CREATE INDEX IF NOT EXISTS ix_bk_session  ON bookings(session_id);
 CREATE INDEX IF NOT EXISTS ix_bk_sub      ON bookings(subscription_id);
 CREATE INDEX IF NOT EXISTS ix_frz_sub     ON freezes(subscription_id);
+CREATE INDEX IF NOT EXISTS ix_ih_date     ON instructor_hours(work_date);
+CREATE INDEX IF NOT EXISTS ix_cli_joined  ON clients(joined_on);
+CREATE INDEX IF NOT EXISTS ix_sub_starts  ON subscriptions(starts_on);
 """
 
 
@@ -203,11 +237,15 @@ def migrate(conn) -> None:
         return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
     add = {
-        "clients": [("age", "INTEGER"), ("school", "TEXT"), ("joined_on", "TEXT")],
-        "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0")],
+        "clients": [("age", "REAL"), ("school", "TEXT"), ("joined_on", "TEXT"),
+                    ("name_ar", "TEXT"), ("dob", "TEXT")],
+        "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0"), ("name_ar", "TEXT")],
+        "classes": [("name_ar", "TEXT"), ("level", "TEXT")],
         "credentials": [("class_id", "INTEGER")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
-                          ("frozen_days", "INTEGER NOT NULL DEFAULT 0")],
+                          ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
+                          ("payment_note", "TEXT"), ("months", "INTEGER"),
+                          ("days_pattern", "TEXT")],
     }
     for table, columns in add.items():
         try:

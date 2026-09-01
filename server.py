@@ -446,7 +446,9 @@ def issue_card(cid: int, body: CardIn):
         c = one(conn.execute("SELECT * FROM clients WHERE id=?", (cid,)))
         if not c:
             raise HTTPException(404, "no such client")
-        sub = access.active_plan(conn, cid)
+        # The card prints the plan and its expiry, so it has to be the plan
+        # for the class this card is being issued for.
+        sub = access.active_plan(conn, cid, body.class_id)
         if not sub:
             raise HTTPException(400, "add a plan before issuing a card")
 
@@ -586,7 +588,22 @@ def get_instructor(iid: int):
             "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
             " WHERE instructor_id=? AND status='scheduled' AND starts_at >= ?",
             (iid, db.now())).fetchone()
+        # Hours the salary sheet recorded, which is what payroll is actually
+        # paid on. Sessions taught is the app's own count and the two are
+        # deliberately shown side by side: a gap between them is either a
+        # class that never made it onto the timetable or an hour nobody
+        # billed for, and both are worth seeing.
+        logged = conn.execute(
+            "SELECT COALESCE(SUM(hours),0) h, COUNT(*) days, MIN(work_date) a,"
+            "       MAX(work_date) b FROM instructor_hours WHERE instructor_id=?",
+            (iid,)).fetchone()
         rate = i["hourly_rate"] or 0
+        i["logged"] = {
+            "hours": round(logged["h"], 2),
+            "days": logged["days"],
+            "from": logged["a"], "to": logged["b"],
+            "pay": round(logged["h"] * rate, 2),
+        }
         i["totals"] = {
             "sessions_taught": t["n"],
             "hours_taught": round(t["h"], 2),
@@ -983,8 +1000,10 @@ def dashboard():
             " WHERE e.scanned_at >= ? ORDER BY e.scanned_at DESC LIMIT 60", (midnight,)))
 
         exp = access.expected_today(conn)
+        intake = access.month_intake(conn)
         stats = {
             **{f"exp_{k}": v for k, v in exp.items()},
+            **{f"mo_{k}": v for k, v in intake.items()},
             "scans_today": conn.execute(
                 "SELECT COUNT(*) n FROM access_events WHERE scanned_at>=? AND source='scan'",
                 (midnight,)).fetchone()["n"],

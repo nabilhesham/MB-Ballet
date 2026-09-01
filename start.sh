@@ -2,7 +2,7 @@
 # MB Ballet Academy — setup and start, in one command.
 #
 #   ./start.sh              normal start
-#   ./start.sh --seed       wipe and reload demo data first
+#   ./start.sh --seed       wipe and rebuild from the sheets/ workbooks
 #
 # Safe to run repeatedly: each step is skipped if already done.
 
@@ -87,7 +87,7 @@ ok "Signing secret loaded"
 for arg in "$@"; do
   case "$arg" in
     --seed)
-      step "Reloading demo data…"
+      step "Rebuilding the database from sheets/…"
       "$VPY" seed.py --force
       ;;
   esac
@@ -96,7 +96,7 @@ done
 # ---------------------------------------------------------------- database
 if [ ! -f "academy.db" ]; then
   printf "\n  No database yet.\n"
-  printf "  Load demo data so you can look around? %s[Y/n]%s " "$dim" "$off"
+  printf "  Load it from the workbooks in sheets/? %s[Y/n]%s " "$dim" "$off"
   read -r reply || reply="y"
   case "${reply:-y}" in
     [Nn]*) "$VPY" -c "import db; db.init(); print('  Empty database created.')" ;;

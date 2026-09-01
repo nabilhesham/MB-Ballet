@@ -4,3 +4,7 @@ pydantic
 python-multipart
 qrcode
 pillow
+
+# seed.py only: reads the academy's roster and salary workbooks.
+# The server itself never touches Excel.
+openpyxl
