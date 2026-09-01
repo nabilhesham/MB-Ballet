@@ -5,6 +5,12 @@ academy.db-shm
 cards/
 photos/
 
+# The academy's own workbooks: real names and mobile numbers, same as the
+# database. seed.py reads them from here; copy them in by hand.
+sheets/*.xlsx
+sheets/*.xlsm
+sheets/~$*
+
 # One virtual environment per platform: they hold compiled binaries and
 # cannot be shared between Windows, Linux and macOS.
 .venv/

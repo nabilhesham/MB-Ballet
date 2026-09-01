@@ -54,7 +54,8 @@ tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / manual_check_in.
 cards.py          Member card PNG generation.
 server.py         FastAPI routes. Thin — logic belongs in access.py.
-seed.py           Wipes the DB and seeds a realistic academy. --force required.
+sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
+seed.py           Wipes the DB and rebuilds it from sheets/. --force required.
 static/index.html Admin shell + sidebar.
 static/app.js     SPA: router, all views, all modals.
 static/style.css  Design tokens and components.
@@ -67,6 +68,8 @@ academy.spec      PyInstaller build definition. Hidden imports live here.
 run_app.py        Entry point for the packaged build.
 cleanup.sh        Removes leftovers from earlier versions.
                   (no settings page: the no-show rules it configured are gone)
+sheets/           The academy's own workbooks — the seed reads these.
+                  Real names and numbers, so not in git. See sheets/README.md.
 static/scanner-test.html   Scanner timing diagnostic, for tuning GAP_MS.
 cards/  photos/   Generated assets. Not in git.
 academy.db        The database. Not in git. This IS the business record.
@@ -77,7 +80,7 @@ academy.db        The database. Not in git. This IS the business record.
 
 ```bash
 ./start.sh                  # Mac/Linux, or Git Bash on Windows
-./start.sh --seed           # wipe and reload demo data
+./start.sh --seed           # wipe and rebuild from the sheets/ workbooks
 ./start.sh --reset-admin    # forget all accounts, regenerate a bootstrap admin
 START.bat                   # Windows: double-click, or run from cmd
 BUILD_EXE.bat               # Windows, run once: produces a standalone .exe
@@ -191,7 +194,8 @@ Manual, when working on the code:
 
 ```bash
 set -a; source .env; set +a   # Windows: $env:ENTRY_SECRET="..."
-python seed.py --force        # demo data — NEVER on real data
+python seed.py --force        # rebuild from sheets/ — WIPES the database
+python seed.py --force --dry-run   # parse and report, write nothing
 python server.py
 ```
 
@@ -202,17 +206,22 @@ screen the laptop exists for, and the sidebar links back.
 
 ```
 instructors ─< sessions >─ classes
-                  │
-                  └──< bookings >── clients ──< subscriptions
-                                       └──< credentials (one per class)
+     │            │
+     │            └──< bookings >── clients ──< subscriptions
+     │                                  └──< credentials (one per class)
+     └──< instructor_hours
 ```
 
 **A booking is one paid slot.** Buying a 12-session plan creates 12 bookings
 immediately, each pointing at a specific session. This is the centre of the
 system and everything else follows from it:
 
-- **classes** are the offering (Ballet, Flexibility). They carry a default
-  duration and a colour. They do **not** carry an instructor.
+- **classes** are the offering, at the granularity the roster sheets use:
+  "Ballet Level 8", "Ballet Grade 6", "Evening Flexibility". One block of a
+  roster sheet is one class. They carry a duration, a colour and a level, and
+  they do **not** carry an instructor. Splitting them this finely is what
+  makes one card per class mean something — a Grade 6 card must not check
+  someone into the Level 8 class two hours earlier.
 - **sessions** are dated occurrences. The instructor lives here, per session,
   because who teaches a given date changes often enough that a class-level
   default was more misleading than useful. No capacity field.
@@ -222,6 +231,17 @@ system and everything else follows from it:
   the place was reserved either way.
 - **subscriptions** are plans. `sessions_used` is *not* stored — it is counted
   from the bookings by `access.plan_state()`, so the two can never drift apart.
+  `price` is what was paid, and it is **nullable on purpose**: the ballet sheet
+  records "yes" rather than an amount, and a plan whose price nobody wrote down
+  must not be reported as zero revenue. `payment_note` keeps the cell verbatim
+  ("package", "free", "680") because "package" and a blank mean different
+  things.
+- **instructor_hours** is one row per instructor per working day, from the
+  monthly salary sheet. Pay is `hours x hourly_rate` at read time, never
+  stored, so correcting a rate re-prices the month instead of leaving a stale
+  total behind. It is what payroll is actually paid on; "sessions taught" is
+  the app's own count, and the instructor page shows both because a gap
+  between them is worth seeing.
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
 
@@ -246,6 +266,44 @@ reception wait for the exact start time helps nobody.
 still-`booked` slot absent once its session has ended, and runs on startup,
 hourly, and before every read that touches attendance. Nothing on screen is
 stale.
+
+## Seeding from the academy's spreadsheets
+
+Reception has run this academy out of Excel for years and will keep doing so.
+So the workbooks are the seed's input, not a throwaway import format:
+`sheets.py` parses them into plain dataclasses and `seed.py` inserts. Add a
+term by adding a line to `SHEETS` at the top of `seed.py`.
+
+`sheets.py` never touches the database and `seed.py` holds no parsing. Keep
+that split — it is what lets the reader be reasoned about against a real
+workbook without a database in the loop.
+
+**The reader works from the header row, never from column numbers.** Blocks in
+the same file disagree about whether they have a `school` column and whether
+`NAME` is labelled at all. Attendance columns are found by their `1ST`/`2ND`
+headings, which is what lets the ballet and flexibility sheets share one
+reader. Do not reintroduce fixed column indices.
+
+**Every guess is reported, never applied quietly.** One row is dated 2028 and
+another 2019 in a sheet whose every other date is 2026; one student has the
+same date written into two columns. The reader repairs these and appends a line
+to `warnings`, which `seed.py` prints at the end of the run. `--dry-run` parses
+and prints without writing. If a repair ever becomes silent, the sheet stops
+being auditable.
+
+**Money the sheet does not state is not zero.** The flexibility sheet writes an
+amount; the ballet sheet writes "yes". Unpriced plans are counted and shown as
+their own figure on the dashboard.
+
+**Clients are identified by phone, not by name.** The same student is "rodaina
+hesham" on one sheet and "rodina hesham" on another. Merging on the last ten
+digits of the mobile is what gives her one profile and two cards rather than
+two half-profiles.
+
+**Attendance on a day the group does not normally meet still creates a
+session.** Those are makeup classes and they really happened. The weekly grid
+is generated from the block's own weekdays, then any stray attendance date is
+added to it.
 
 ## No authentication
 
@@ -398,8 +456,11 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 - [ ] Rate limiting on `/api/auth/login`. Currently unlimited attempts; fine on
       a LAN-less laptop, not fine if this is ever exposed.
-- [ ] Payments and revenue reporting — `subscriptions.price` is captured but
-      never reported on.
+- [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
+      those plans import unpriced and the month's revenue figure counts
+      flexibility alone. The dashboard says how many plans carry no price
+      rather than quietly reporting them as zero. Either the sheet starts
+      recording the amount or the fee goes on the class.
 - [ ] Rotating phone tokens: `access.py` has the `kind='phone'` path with a 90s
       freshness window, but nothing generates them client-side.
 - [ ] `settle_past_sessions` runs in-process. If the laptop is off overnight it
