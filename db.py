@@ -9,7 +9,6 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS instructors (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     name         TEXT NOT NULL,
-    name_ar      TEXT,
     phone        TEXT,
     email        TEXT,
     specialty    TEXT,
@@ -23,7 +22,6 @@ CREATE TABLE IF NOT EXISTS instructors (
 CREATE TABLE IF NOT EXISTS classes (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT NOT NULL,
-    name_ar        TEXT,
     description    TEXT,
     colour         TEXT NOT NULL DEFAULT '#87438E',
     duration_hours REAL NOT NULL DEFAULT 1.5,
@@ -46,7 +44,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS clients (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name_en     TEXT NOT NULL,
-    name_ar     TEXT,
     phone       TEXT,
     email       TEXT,
     -- REAL, not INTEGER: the roster sheets carry "4.8" and "12.5" for the
@@ -62,11 +59,16 @@ CREATE TABLE IF NOT EXISTS clients (
     active      INTEGER NOT NULL DEFAULT 1
 );
 
+-- A plan is bought for one class, and that class is the spine of everything
+-- that follows: the sessions it may pay for, the card that proves it, and the
+-- balance a scan is read against. A client taking Ballet and Flexibility holds
+-- two plans, two sets of bookings and two cards, and nothing about one reaches
+-- into the other.
 CREATE TABLE IF NOT EXISTS subscriptions (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     client_id       INTEGER NOT NULL REFERENCES clients(id),
+    class_id        INTEGER REFERENCES classes(id),
     plan            TEXT NOT NULL,
-    class_id    INTEGER REFERENCES classes(id),
     sessions_total  INTEGER NOT NULL,
     sessions_used   INTEGER NOT NULL DEFAULT 0,
     price           REAL,
@@ -174,7 +176,7 @@ CREATE INDEX IF NOT EXISTS ix_cred_token  ON credentials(token);
 
 CREATE INDEX IF NOT EXISTS ix_ev_time     ON access_events(scanned_at);
 CREATE INDEX IF NOT EXISTS ix_sess_start  ON sessions(starts_at);
-CREATE INDEX IF NOT EXISTS ix_sub_client  ON subscriptions(client_id, active);
+CREATE INDEX IF NOT EXISTS ix_sub_client  ON subscriptions(client_id, class_id, active);
 CREATE INDEX IF NOT EXISTS ix_bk_client   ON bookings(client_id);
 CREATE INDEX IF NOT EXISTS ix_bk_session  ON bookings(session_id);
 CREATE INDEX IF NOT EXISTS ix_bk_sub      ON bookings(subscription_id);
@@ -238,12 +240,13 @@ def migrate(conn) -> None:
 
     add = {
         "clients": [("age", "REAL"), ("school", "TEXT"), ("joined_on", "TEXT"),
-                    ("name_ar", "TEXT"), ("dob", "TEXT")],
-        "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0"), ("name_ar", "TEXT")],
-        "classes": [("name_ar", "TEXT"), ("level", "TEXT")],
+                    ("dob", "TEXT")],
+        "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0")],
+        "classes": [("level", "TEXT")],
         "credentials": [("class_id", "INTEGER")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
+                          ("class_id", "INTEGER"),
                           ("payment_note", "TEXT"), ("months", "INTEGER"),
                           ("days_pattern", "TEXT")],
     }

@@ -1,6 +1,13 @@
-import sys; sys.path.insert(0,'/home/claude/academy')
+"""
+Freezing: what it releases, what it refuses, and what it puts back.
+Run after seeding.
+
+The plans are looked up rather than named, because freezing now needs a plan
+of FREEZE_MIN_SESSIONS or more and the seed's plan sizes come from whichever
+workbooks are in sheets/.
+"""
 import db, access
-from datetime import date, timedelta, datetime, time as _t
+from datetime import date, timedelta
 
 conn = db.connect()
 res = []
@@ -8,8 +15,23 @@ def check(label, cond, detail=""):
     res.append(cond)
     print(("  PASS  " if cond else "  FAIL  ") + label + (f" — {detail}" if detail else ""))
 
-cid = 1
-sub = access.active_plan(conn, cid)
+def freezable(exclude=()):
+    """A live plan big enough to freeze, with a card, that is not already frozen."""
+    # "x NOT IN (NULL)" is NULL, never true, so an empty list needs a real value.
+    marks = ",".join("?" * len(exclude)) or "-1"
+    return conn.execute(
+        f"SELECT s.* FROM subscriptions s WHERE s.active=1 AND s.frozen_on IS NULL"
+        f"   AND s.sessions_total >= ? AND s.id NOT IN ({marks})"
+        "  ORDER BY (SELECT COUNT(*) FROM bookings b WHERE b.subscription_id=s.id"
+        "              AND b.status='booked') DESC LIMIT 1",
+        (access.FREEZE_MIN_SESSIONS, *exclude)).fetchone()
+
+
+sub = freezable()
+assert sub is not None, (
+    f"no plan of {access.FREEZE_MIN_SESSIONS}+ sessions in the database — "
+    "re-seed before running this")
+cid = sub["client_id"]
 sid_ = sub["id"]
 
 print("\n1. FREEZING RELEASES FUTURE BOOKINGS")
@@ -58,7 +80,7 @@ check("no longer frozen", not state["frozen"])
 check("frozen days recorded", state["frozen_days"] == u["days"], f"{state['frozen_days']}d total")
 
 print("\n5. A DATED FREEZE LIFTS ITSELF")
-sub2 = access.active_plan(conn, 4)
+sub2 = freezable(exclude=(sid_,)) or sub
 yesterday = (date.today()-timedelta(days=1)).isoformat()
 access.freeze_plan(conn, sub2["id"], until=yesterday,
                    from_date=(date.today()-timedelta(days=8)).isoformat())

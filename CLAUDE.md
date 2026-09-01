@@ -245,6 +245,30 @@ system and everything else follows from it:
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
 
+**The class is the spine.** A plan is bought for one class, may only be
+assigned to that class's sessions, and is proved by that class's card:
+
+```
+class ──< sessions ──< bookings >── subscription (one class) ──< credential (same class)
+```
+
+Every link is enforced server-side, not just in the UI:
+
+- `POST /api/clients/{id}/plan` takes a `class_id` and rejects any chosen
+  session belonging to another class. Renewing deactivates only the previous
+  plan **for that class**, so a client's other class keeps running.
+- `POST /api/clients/{id}/card` requires a `class_id` and refuses when the
+  client has no active plan in it. Issuing a Flexibility card to someone who
+  only takes Ballet would mint a credential that can never check anyone in,
+  and reads at reception as a system fault.
+- `access.active_plan(conn, client_id, class_id)` returns that class's plan or
+  **nothing** — it never falls back to another class. Falling back is worse
+  than "no plan": it lets one card spend another class's balance, which is the
+  exact confusion one card per class exists to prevent.
+
+The plan picker in the UI leads with the class and fetches sessions with
+`?class_id=`, so the wrong session is never on screen to be chosen.
+
 Class membership is derived from bookings. There is no enrolment list, which is
 why the class page shows "students with a booking" rather than a roster.
 
@@ -377,6 +401,14 @@ flipped character fails the signature. Keep this asymmetry.
 
 **`hmac.compare_digest` for signatures.** Never `==`.
 
+**Only plans of 12 sessions or more can be frozen.** `access.FREEZE_MIN_SESSIONS`
+holds the number and `access.can_freeze()` is the single answer to "may this be
+paused?" — the endpoint refuses and the button greys out for the same reason,
+carrying the same sentence. Short packs are meant to be used inside their
+window; freezing a 4-session pack for two months makes the expiry meaningless.
+`plan_state()` returns `can_freeze` and `freeze_blocked_because` so the UI never
+has to re-derive the rule and drift from it.
+
 **Manual check-in deducts a session too.** Marking someone present from the
 session page is the same transaction as a scan, because a client who forgot
 their card still attended. Undoing refunds it.
@@ -425,7 +457,10 @@ presenting the wrong card for today returns "No session booked today for
 Flexibility" rather than silently checking them into the other class.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
-the filename so two cards coexist.
+the filename so two cards coexist. `cards.card_path()` derives that name and is
+the only place that does: the client profile offers the file for download and
+print, and a second copy of the rule drifting from this one is a dead link on
+the one screen that has to work.
 
 ### What a scan shows
 
@@ -472,8 +507,10 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 - [ ] Auto-start on boot, and disable laptop sleep / lid-close suspend.
 - [ ] Key rotation: single secret. Changing it kills every printed card at once.
       Needs an accepted-keys list with an overlap window.
-- [ ] No test suite for the academy logic yet — the old `test_flow.py` covered
-      the simpler entry system. Worth porting.
+- [ ] The test scripts (`test_model.py`, `test_freeze.py`, `test_plan_class.py`)
+      run against the live `academy.db` and mutate it. Re-seed before and
+      between runs. They resolve their subjects from whatever was seeded rather
+      than naming clients or classes, so they survive a new term's workbooks.
 
 ## Conventions
 
@@ -483,7 +520,9 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
   `detail`, which the UI does not show.
 - All user text passes through `esc()` in the frontend. No exceptions.
 - Comments explain *why*, not *what*. Most existing ones record a decision.
-- Arabic names live in `name_ar` and render under the English name.
+- **English only.** There are no Arabic fields anywhere — no `name_ar`, no
+  second name input, no RTL block. The academy works in English and a
+  half-filled translation column was worse than none.
 - Colours come from CSS variables in `style.css`. Never hardcode a hex in a view.
 - No emoji in code or UI.
 

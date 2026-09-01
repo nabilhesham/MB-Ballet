@@ -501,7 +501,6 @@ route('/classes', async () => {
       <div class="box tap" style="border-left:3px solid ${esc(c.colour)}"
            onclick="location.hash='#/class/${c.id}'">
         <div style="font-size:16px;font-weight:600">${esc(c.name)}</div>
-        <div class="sub">${esc(c.name_ar||'')}</div>
         <div class="row" style="margin-top:14px">
           <span class="pill info">${c.students} students</span>
           <span class="pill grey">${hrs(c.duration_hours)}</span>
@@ -521,7 +520,7 @@ route('/class', async (id) => {
     <div class="head"><div>
       <div class="eyebrow">Class</div>
       <h1><span class="dot" style="background:${esc(c.colour)};width:13px;height:13px"></span>${esc(c.name)}</h1>
-      <div class="sub">${esc(c.name_ar||'')} · ${hrs(c.duration_hours)}${c.level?' · '+esc(c.level):''}</div>
+      <div class="sub">${hrs(c.duration_hours)}${c.level?' · '+esc(c.level):''}</div>
     </div><div class="row">
       <button onclick="editClass(${c.id})">Edit class</button>
       <button onclick="newSession(null,${c.id})">Schedule session</button>
@@ -581,10 +580,7 @@ route('/class', async (id) => {
 });
 
 const classForm = (c={}) => `
-  <div class="fieldrow">
-    <div><label>NAME</label><input id="c_n" value="${esc(c.name||'')}" placeholder="Ballet"></div>
-    <div><label>NAME (ARABIC)</label><input id="c_ar" dir="rtl" value="${esc(c.name_ar||'')}"></div>
-  </div>
+  <label>NAME</label><input id="c_n" value="${esc(c.name||'')}" placeholder="Ballet">
   <label>DESCRIPTION</label><textarea id="c_d">${esc(c.description||'')}</textarea>
   <div class="fieldrow">
     <div><label>DEFAULT LENGTH (HOURS)</label>
@@ -600,7 +596,7 @@ window.newClass = () => openModal(`<h3>New class</h3>
 
 window.saveClass = async () => {
   if(!val('c_n')) return toast('Name is required','bad');
-  await api('/classes', {method:'POST', body:{name:val('c_n'), name_ar:val('c_ar'),
+  await api('/classes', {method:'POST', body:{name:val('c_n'),
     description:val('c_d'), colour:val('c_c'),
     duration_hours:Number(val('c_dur')), level:val('c_l')}});
   closeModal(); toast('Class created'); render();
@@ -614,7 +610,7 @@ window.editClass = async (id) => {
 };
 
 window.updateClass = async (id) => {
-  await api('/classes/'+id, {method:'PUT', body:{name:val('c_n'), name_ar:val('c_ar'),
+  await api('/classes/'+id, {method:'PUT', body:{name:val('c_n'),
     description:val('c_d'), colour:val('c_c'),
     duration_hours:Number(val('c_dur')), level:val('c_l')}});
   closeModal(); toast('Saved'); render();
@@ -983,7 +979,7 @@ route('/instructor', async (id) => {
       <span class="avatar lg">${esc(initials(i.name))}</span>
       <div><div class="eyebrow">Instructor</div>
         <h1>${esc(i.name)}</h1>
-        <div class="sub">${esc(i.name_ar||'')}${i.specialty?' · '+esc(i.specialty):''}${i.phone?' · '+esc(i.phone):''}</div></div>
+        <div class="sub">${esc(i.specialty||'')}${i.phone?' · '+esc(i.phone):''}</div></div>
     </div><div class="row">
       <button onclick="editInstructor(${i.id})">Edit</button>
       <button class="danger" onclick="archiveInstructor(${i.id})">Archive</button>
@@ -1024,10 +1020,7 @@ route('/instructor', async (id) => {
 });
 
 const instructorForm = (i={}) => `
-  <div class="fieldrow">
-    <div><label>NAME</label><input id="i_n" value="${esc(i.name||'')}"></div>
-    <div><label>NAME (ARABIC)</label><input id="i_ar" dir="rtl" value="${esc(i.name_ar||'')}"></div>
-  </div>
+  <label>NAME</label><input id="i_n" value="${esc(i.name||'')}">
   <div class="fieldrow">
     <div><label>MOBILE</label><input id="i_ph" type="tel" value="${esc(i.phone||'')}"></div>
     <div><label>RATE (EGP PER HOUR)</label>
@@ -1042,7 +1035,7 @@ window.newInstructor = () => openModal(`<h3>New instructor</h3>
 
 window.saveInstructor = async () => {
   if(!val('i_n')) return toast('Name is required','bad');
-  await api('/instructors', {method:'POST', body:{name:val('i_n'), name_ar:val('i_ar'),
+  await api('/instructors', {method:'POST', body:{name:val('i_n'),
     phone:val('i_ph'), specialty:val('i_sp'), hourly_rate:Number(val('i_rate')||0)}});
   closeModal(); toast('Instructor added'); render();
 };
@@ -1055,7 +1048,7 @@ window.editInstructor = async (id) => {
 };
 
 window.updateInstructor = async (id) => {
-  await api('/instructors/'+id, {method:'PUT', body:{name:val('i_n'), name_ar:val('i_ar'),
+  await api('/instructors/'+id, {method:'PUT', body:{name:val('i_n'),
     phone:val('i_ph'), specialty:val('i_sp'), hourly_rate:Number(val('i_rate')||0)}});
   closeModal(); toast('Saved'); render();
 };
@@ -1110,8 +1103,18 @@ route('/clients', async () => {
 
 route('/client', async (id) => {
   const [c, classes] = await Promise.all([api('/clients/'+id), api('/classes')]);
-  const p = c.active_plan;
   window._client = c;
+  window._allClasses = classes;
+
+  /* The profile is organised by class, because that is how the money works:
+     one plan per class, paying for that class's sessions, proved by that
+     class's card. Totals across the top are the sum of those plans. */
+  const plans = c.active_plans || [];
+  const cardFor = cid => c.cards.find(x => x.class_id === cid);
+  const totalLeft = plans.reduce((n,p)=>n+p.remaining, 0);
+  const totalOf   = plans.reduce((n,p)=>n+p.sessions_total, 0);
+  const attended  = plans.reduce((n,p)=>n+p.present, 0);
+  const absent    = plans.reduce((n,p)=>n+p.absent, 0);
 
   view.innerHTML = `
     <div class="head"><div class="row" style="gap:16px">
@@ -1130,81 +1133,100 @@ route('/client', async (id) => {
       <div class="row">
         <button onclick="uploadPhoto(${c.id})">Photo</button>
         <button onclick="editClient()">Edit</button>
-        ${p && p.sessions_total === 12 ? (p.frozen
-          ? `<button onclick="unfreezePlan(${p.id})">Unfreeze plan</button>`
-          : `<button onclick="freezePlan(${p.id},'${esc(c.name_en)}')">Freeze plan</button>`) : ''}
-        <button class="pri" onclick="newPlan(${c.id})">${p?'Renew plan':'Add plan'}</button>
+        <button class="pri" onclick="newPlan(${c.id})">Add plan</button>
         <button class="danger" onclick="archiveClient(${c.id},'${esc(c.name_en)}')">Archive</button>
       </div></div>
 
-    ${p && p.frozen ? `<div class="frozenline">
-      <b>This plan is frozen</b> since ${esc(p.frozen_on)}${
-        p.frozen_until ? ` — it lifts by itself on <b>${esc(p.frozen_until)}</b>`
-                       : ' — it stays frozen until you lift it'}.
-      Scanning is refused while frozen, and the expiry date moves out by however
-      long the pause lasts.
-      <a href="#" onclick="unfreezePlan(${p.id});return false">Unfreeze now</a>.
-    </div>` : ''}
-
-    ${p && p.unassigned > 0 && !p.frozen ? `<div class="warnline">
-      ${p.unassigned} of this plan's ${p.sessions_total} sessions ${p.unassigned===1?'has':'have'}
-      not been assigned to a date yet.
-      <a href="#" onclick="assignRemaining(${c.id},${p.id});return false"
-         style="color:var(--warn);font-weight:600">Assign them now</a>.</div>` : ''}
-
     <div class="grid g4" style="margin-bottom:22px">
       <div class="box kpi"><div class="k">SESSIONS LEFT</div>
-        <div class="v" style="color:${!p?'var(--mute)':p.remaining<=0?'var(--bad)':p.remaining<=2?'var(--warn)':'var(--ok)'}">${p?p.remaining:'—'}</div>
-        <div class="n">${p?`of ${p.sessions_total}`:'no active plan'}</div></div>
-      <div class="box kpi"><div class="k">PLAN</div>
-        <div class="v" style="font-size:19px;padding-top:9px">${esc(p?p.plan:'—')}
-          ${p&&p.frozen?'<span class="pill info" style="vertical-align:middle">frozen</span>':''}</div>
-        <div class="n">${p?'ends '+p.expires_on+(p.frozen_days?` · ${p.frozen_days}d added`:''):''}</div></div>
+        <div class="v" style="color:${!plans.length?'var(--mute)':totalLeft<=0?'var(--bad)':totalLeft<=2?'var(--warn)':'var(--ok)'}">${plans.length?totalLeft:'—'}</div>
+        <div class="n">${plans.length?`of ${totalOf} across ${plans.length} plan${plans.length===1?'':'s'}`:'no active plan'}</div></div>
+      <div class="box kpi"><div class="k">CLASSES</div><div class="v">${plans.length}</div>
+        <div class="n">${plans.map(p=>esc(p.class_name||'—')).join(', ')||'none'}</div></div>
       <div class="box kpi"><div class="k">ATTENDED</div>
-        <div class="v" style="color:var(--ok)">${p?p.present:0}</div>
-        <div class="n">this plan</div></div>
+        <div class="v" style="color:var(--ok)">${attended}</div>
+        <div class="n">across active plans</div></div>
       <div class="box kpi"><div class="k">ABSENT</div>
-        <div class="v" style="color:${p&&p.absent?'var(--bad)':'var(--ink)'}">${p?p.absent:0}</div>
-        <div class="n">this plan</div></div>
+        <div class="v" style="color:${absent?'var(--bad)':'var(--ink)'}">${absent}</div>
+        <div class="n">across active plans</div></div>
     </div>
 
-    <div class="grid g2">
-      <div>
-        <h2>Cards</h2>
-        <div class="box">
-          <div class="sub" style="margin-bottom:12px">One card per class. Scanning the Ballet
-            card checks them into their Ballet session.</div>
-          ${c.cards.length ? c.cards.map(cd=>`
-            <div class="listrow">
-              <div><span class="dot" style="background:${esc(cd.colour||'#87438E')}"></span>
-                <b>${esc(cd.class_name||'All classes')}</b>
-                <div class="sub" style="font-family:var(--mono);font-size:10.5px">${esc(cd.token.slice(0,24))}…</div></div>
-              <div class="row tight">
-                <a class="btn sm" href="/cards/client_${String(c.id).padStart(5,'0')}_${(cd.class_name||'all').toLowerCase().replace(/[^a-z0-9]/g,'-')}.png"
-                   target="_blank">Card</a>
-                <button class="sm" onclick="issueCard(${c.id},${cd.class_id||'null'})">Reissue</button>
-              </div>
-            </div>`).join('') : '<div class="empty">No cards issued yet.</div>'}
-          <div class="row" style="margin-top:14px">
-            <select id="cardClass" style="flex:1">
-              ${classes.map(k=>`<option value="${k.id}">${esc(k.name)}</option>`).join('')}
-            </select>
-            <button class="pri" onclick="issueCard(${c.id}, Number($('#cardClass').value))">Issue card</button>
+    <h2>Plans and cards</h2>
+    <div class="sub" style="margin-bottom:12px">
+      A plan is bought for one class and pays only for that class's sessions.
+      Its card checks the client into those sessions and nothing else.</div>
+
+    ${plans.length ? plans.map(p => {
+      const card = cardFor(p.class_id);
+      return `<div class="box" style="border-left:3px solid ${esc(p.class_colour||'#87438E')};margin-bottom:14px">
+        <div class="row" style="justify-content:space-between;align-items:flex-start">
+          <div>
+            <div style="font-size:16px;font-weight:600">
+              <span class="dot" style="background:${esc(p.class_colour||'#87438E')}"></span>${esc(p.class_name||'No class')}
+              ${p.frozen?'<span class="pill info">frozen</span>':''}</div>
+            <div class="sub">${esc(p.plan)} · ends ${esc(p.expires_on)}${p.frozen_days?` · ${p.frozen_days}d added by freezes`:''}</div>
+          </div>
+          <div class="row tight">
+            ${p.frozen
+              ? `<button class="sm" onclick="unfreezePlan(${p.id})">Unfreeze</button>`
+              : (p.can_freeze
+                  ? `<button class="sm" onclick="freezePlan(${p.id},'${esc(c.name_en)}','${esc(p.class_name||'')}')">Freeze</button>`
+                  : `<button class="sm" disabled title="${esc(p.freeze_blocked_because)}">Freeze</button>`)}
+            <button class="sm" onclick="newPlan(${c.id},${p.class_id})">Renew</button>
           </div>
         </div>
 
+        <div class="row" style="margin-top:14px;gap:16px">
+          <div><div class="eyebrow" style="margin:0">LEFT</div>
+            <div style="font-size:20px;font-weight:600;color:${p.remaining<=0?'var(--bad)':p.remaining<=2?'var(--warn)':'var(--ok)'}">${p.remaining}<span class="sub"> of ${p.sessions_total}</span></div></div>
+          <div><div class="eyebrow" style="margin:0">ATTENDED</div>
+            <div style="font-size:20px;font-weight:600">${p.present}</div></div>
+          <div><div class="eyebrow" style="margin:0">ABSENT</div>
+            <div style="font-size:20px;font-weight:600">${p.absent}</div></div>
+          <div style="flex:1"></div>
+          <div style="text-align:right">
+            <div class="eyebrow" style="margin:0">CARD</div>
+            ${card ? `<div class="row tight" style="margin-top:5px">
+                <a class="btn sm" href="${esc(card.card_url)}" download>Download</a>
+                <button class="sm" onclick="window.open('${esc(card.card_url)}')">Print</button>
+                <button class="sm" onclick="issueCard(${c.id},${p.class_id})">Reissue</button>
+              </div>`
+              : `<div class="row tight" style="margin-top:5px">
+                <button class="sm pri" onclick="issueCard(${c.id},${p.class_id})">Issue card</button>
+              </div>`}
+          </div>
+        </div>
+
+        ${p.frozen ? `<div class="frozenline" style="margin:14px 0 0">
+          <b>Frozen</b> since ${esc(p.frozen_on)}${
+            p.frozen_until ? ` — lifts on <b>${esc(p.frozen_until)}</b>`
+                           : ' — until you lift it'}.
+          Scanning this card is refused and the expiry moves out by the length of the pause.
+        </div>` : ''}
+
+        ${p.unassigned > 0 && !p.frozen ? `<div class="warnline" style="margin:14px 0 0">
+          ${p.unassigned} of these ${p.sessions_total} sessions ${p.unassigned===1?'has':'have'}
+          no date yet.
+          <a href="#" onclick="assignRemaining(${c.id},${p.id});return false"
+             style="color:var(--warn);font-weight:600">Assign them now</a>.</div>` : ''}
+      </div>`;
+    }).join('') : `<div class="box"><div class="empty">
+      <strong>No active plan</strong>Add one to book sessions and issue a card.</div></div>`}
+
+    <div class="grid g2" style="margin-top:8px">
+      <div>
         <h2>Payment history</h2>
         <div class="sub" style="margin-bottom:10px">Every plan bought. Click a row to see the sessions it paid for.</div>
         <div class="box pad0">
           ${c.plans.length?`<table>
-            <thead><tr><th>PLAN</th><th>PERIOD</th><th>USED</th><th>PRICE</th><th></th></tr></thead>
+            <thead><tr><th>CLASS</th><th>PLAN</th><th class="hide-sm">PERIOD</th><th>USED</th><th>PRICE</th></tr></thead>
             <tbody>${c.plans.map(pl=>`<tr class="click" onclick="planSessions(${c.id},${pl.id},'${esc(pl.plan)}')">
+              <td><span class="dot" style="background:${esc(pl.class_colour||'#ccc')}"></span>${esc(pl.class_name||'—')}</td>
               <td>${esc(pl.plan)}${pl.active?' <span class="pill ok">active</span>':''}${
                 pl.frozen?' <span class="pill info">frozen</span>':''}</td>
-              <td class="mute num">${pl.starts_on} → ${pl.expires_on}</td>
+              <td class="mute num hide-sm">${pl.starts_on} → ${pl.expires_on}</td>
               <td class="num">${pl.used}/${pl.sessions_total}</td>
-              <td class="num mute">${pl.price?pl.price.toLocaleString()+' EGP':'—'}</td>
-              <td class="right" style="color:var(--dim)">›</td>
+              <td class="num mute">${pl.price?pl.price.toLocaleString():'—'}</td>
             </tr>`).join('')}</tbody></table>`
           :'<div class="empty">No plans yet.</div>'}
         </div>
@@ -1314,18 +1336,25 @@ window.issueCard = async (cid, classId) => {
    Selling a plan and scheduling it are one action. A plan whose slots are not
    assigned to real dates is a promise nobody has written down, so Save stays
    disabled until every slot has a session. */
-let planPick = { need: 0, chosen: [], sessions: [], cid: null, existing: [] };
+let planPick = { need: 0, chosen: [], sessions: [], cid: null, classId: null };
 
-window.newPlan = async (cid) => {
-  const [classes, sessions] = await Promise.all([
-    api('/classes'),
-    api(`/sessions?start=${Math.floor(Date.now()/1000)}&end=${Math.floor(Date.now()/1000)+180*86400}&available_for=${cid}`)
-  ]);
-  planPick = { need: 12, chosen: [], sessions, cid, existing: [], classes };
+window.newPlan = async (cid, presetClass=null) => {
+  const classes = await api('/classes');
+  if(!classes.length) return toast('Create a class first','bad');
+  const chosenClass = presetClass || classes[0].id;
+  planPick = { need: 12, chosen: [], sessions: [], cid, classes, classId: chosenClass };
 
   const end = new Date(); end.setMonth(end.getMonth()+3);
-  openModal(`<h3>New plan</h3>
-    <div class="mh">Any active plan is replaced. Unused sessions on the old plan are not carried over.</div>
+  openModal(`<h3>${presetClass?'Renew plan':'New plan'}</h3>
+    <div class="mh">A plan is bought for one class and pays only for that class's
+      sessions. Renewing replaces the previous plan for the same class; plans for
+      other classes are untouched.</div>
+
+    <label>CLASS</label>
+    <select id="p_class" onchange="planClassChanged()">
+      ${classes.map(k=>`<option value="${k.id}" ${k.id===chosenClass?'selected':''}>${esc(k.name)}</option>`).join('')}
+    </select>
+
     <div class="fieldrow">
       <div><label>PLAN NAME</label><input id="p_name" value="12 sessions"></div>
       <div><label>NUMBER OF SESSIONS</label>
@@ -1342,12 +1371,8 @@ window.newPlan = async (cid) => {
       <b style="font-size:14px">Assign the sessions</b>
       <span id="p_count" class="pill warn">0 of 12 chosen</span>
     </div>
-    <div class="sub" style="margin:6px 0 10px">Pick a date for every session in the plan.</div>
+    <div class="sub" style="margin:6px 0 10px" id="p_hint">Pick a date for every session in the plan.</div>
     <div class="row" style="margin-bottom:8px">
-      <select id="p_filter" style="flex:1" onchange="renderPlanSessions()">
-        <option value="">All classes</option>
-        ${classes.map(k=>`<option value="${k.id}">${esc(k.name)}</option>`).join('')}
-      </select>
       <button class="sm" onclick="planAutoFill()">Auto-fill earliest</button>
       <button class="sm" onclick="planClear()">Clear</button>
     </div>
@@ -1357,28 +1382,48 @@ window.newPlan = async (cid) => {
       <button onclick="closeModal()">Cancel</button>
       <button class="pri" id="p_save" disabled onclick="savePlan(${cid})">Save plan</button>
     </div>`, true);
+  await loadPlanSessions();
+};
+
+/* Sessions are always fetched for one class. The picker cannot show a session
+   the plan is not allowed to pay for, which is the same rule the server
+   enforces — the UI just never offers the mistake. */
+async function loadPlanSessions(){
+  const now = Math.floor(Date.now()/1000);
+  planPick.sessions = await api(
+    `/sessions?start=${now}&end=${now+180*86400}` +
+    `&class_id=${planPick.classId}&available_for=${planPick.cid}`);
+  planPick.chosen = [];
+  const k = (planPick.classes||[]).find(x=>x.id===planPick.classId);
+  const hint = $('#p_hint');
+  if(hint) hint.textContent = k
+    ? `Only ${k.name} sessions are offered — a plan pays for its own class.`
+    : 'Pick a date for every session in the plan.';
   renderPlanSessions();
+}
+
+window.planClassChanged = async () => {
+  planPick.classId = Number($('#p_class').value);
+  await loadPlanSessions();
 };
 
 window.assignRemaining = async (cid, planId) => {
-  const [client, classes, sessions] = await Promise.all([
-    api('/clients/'+cid), api('/classes'),
-    api(`/sessions?start=${Math.floor(Date.now()/1000)}&end=${Math.floor(Date.now()/1000)+180*86400}&available_for=${cid}`)
-  ]);
+  const client = await api('/clients/'+cid);
   const plan = client.plans.find(p => p.id === planId);
-  planPick = { need: plan.unassigned, chosen: [], sessions, cid, classes, topUp: planId };
+  const now = Math.floor(Date.now()/1000);
+  const sessions = await api(
+    `/sessions?start=${now}&end=${now+180*86400}&class_id=${plan.class_id}&available_for=${cid}`);
+  planPick = { need: plan.unassigned, chosen: [], sessions, cid,
+               classes: [], classId: plan.class_id, topUp: planId };
 
   openModal(`<h3>Assign remaining sessions</h3>
-    <div class="mh">${esc(plan.plan)} has ${plan.unassigned} session${plan.unassigned===1?'':'s'} without a date.</div>
+    <div class="mh">${esc(plan.plan)} has ${plan.unassigned} session${plan.unassigned===1?'':'s'}
+      without a date. Only ${esc(plan.class_name||'that class')}'s sessions are offered.</div>
     <div class="row" style="justify-content:space-between;align-items:baseline;margin-top:14px">
       <b style="font-size:14px">Pick the dates</b>
       <span id="p_count" class="pill warn">0 of ${plan.unassigned} chosen</span>
     </div>
     <div class="row" style="margin:10px 0 8px">
-      <select id="p_filter" style="flex:1" onchange="renderPlanSessions()">
-        <option value="">All classes</option>
-        ${classes.map(k=>`<option value="${k.id}">${esc(k.name)}</option>`).join('')}
-      </select>
       <button class="sm" onclick="planAutoFill()">Auto-fill earliest</button>
       <button class="sm" onclick="planClear()">Clear</button>
     </div>
@@ -1398,14 +1443,13 @@ window.planNeedChanged = () => {
 };
 
 window.renderPlanSessions = () => {
-  const filter = $('#p_filter') ? $('#p_filter').value : '';
-  const list = planPick.sessions.filter(s => !filter || String(s.class_id) === filter);
+  const list = planPick.sessions;
   const host = $('#p_sessions');
   if(!host) return;
 
   host.innerHTML = list.length ? list.map(s => {
-    const on = planPick.chosen.includes(s.session_id ?? s.id);
     const sid = s.id;
+    const on = planPick.chosen.includes(sid);
     return `<label class="pickrow${on?' on':''}">
       <input type="checkbox" ${on?'checked':''} onchange="planToggle(${sid})">
       <span class="dot" style="background:${esc(s.colour)}"></span>
@@ -1413,7 +1457,7 @@ window.renderPlanSessions = () => {
       <span class="pk-class">${esc(s.class_name)}</span>
       <span class="pk-meta">${esc(s.instructor_name||'no instructor')} · ${s.booked} booked</span>
     </label>`;
-  }).join('') : '<div class="empty">No upcoming sessions. Schedule some first.</div>';
+  }).join('') : '<div class="empty">No upcoming sessions in this class. Schedule some first.</div>';
 
   const n = planPick.chosen.length;
   const cnt = $('#p_count');
@@ -1439,9 +1483,7 @@ window.planToggle = (sid) => {
 };
 
 window.planAutoFill = () => {
-  const filter = $('#p_filter') ? $('#p_filter').value : '';
-  const list = planPick.sessions.filter(s => !filter || String(s.class_id) === filter);
-  planPick.chosen = list.slice(0, planPick.need).map(s => s.id);
+  planPick.chosen = planPick.sessions.slice(0, planPick.need).map(s => s.id);
   renderPlanSessions();
 };
 
@@ -1450,6 +1492,7 @@ window.planClear = () => { planPick.chosen = []; renderPlanSessions(); };
 window.savePlan = async (cid) => {
   try{
     await api(`/clients/${cid}/plan`, {method:'POST', body:{
+      class_id: planPick.classId,
       plan: val('p_name'),
       sessions_total: Number(val('p_n')),
       price: numval('p_price'),
@@ -1457,7 +1500,7 @@ window.savePlan = async (cid) => {
       expires_on: val('p_end'),
       session_ids: planPick.chosen}});
     closeModal();
-    toast('Plan saved — now reissue their card');
+    toast('Plan saved — issue the card for this class next');
     render();
   }catch(e){ toast(e.message,'bad'); }
 };
@@ -1578,12 +1621,12 @@ render();
    A client goes away and asks to pause. Releasing their booked sessions is the
    part that matters: left booked, every one would be swept to absent while they
    are away and the plan would be empty on their return. */
-window.freezePlan = async (planId, name) => {
+window.freezePlan = async (planId, name, className='') => {
   const soon = new Date(); soon.setMonth(soon.getMonth()+1);
-  openModal(`<h3>Freeze this plan</h3>
+  openModal(`<h3>Freeze ${className?esc(className)+' plan':'this plan'}</h3>
     <div class="mh">${esc(name)} keeps every session they have paid for. The dates
       they are booked into during the pause are released, and the expiry moves out
-      by however long the freeze lasts.</div>
+      by however long the freeze lasts. Their other classes carry on as normal.</div>
 
     <label>HOW SHOULD IT END</label>
     <select id="fz_mode" onchange="freezeModeChanged()">

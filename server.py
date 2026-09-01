@@ -59,6 +59,7 @@ class ClientIn(BaseModel):
 
 
 class PlanIn(BaseModel):
+    class_id: int
     plan: str
     sessions_total: int
     price: Optional[float] = None
@@ -69,7 +70,6 @@ class PlanIn(BaseModel):
 
 class InstructorIn(BaseModel):
     name: str
-    name_ar: Optional[str] = None
     phone: Optional[str] = None
     specialty: Optional[str] = None
     hourly_rate: float = 0
@@ -77,7 +77,6 @@ class InstructorIn(BaseModel):
 
 class ClassIn(BaseModel):
     name: str
-    name_ar: Optional[str] = None
     description: Optional[str] = None
     colour: str = "#87438E"
     duration_hours: float = 1.5
@@ -266,14 +265,24 @@ def get_client(cid: int):
         c["plans"] = [access.plan_state(conn, r["id"]) for r in conn.execute(
             "SELECT id FROM subscriptions WHERE client_id=? ORDER BY created_at DESC",
             (cid,)).fetchall()]
-        active = next((p for p in c["plans"] if p["active"]), None)
-        c["active_plan"] = active
+        # One live plan per class. The profile is organised around these: each
+        # gets its own card, its own sessions and its own freeze state.
+        c["active_plans"] = [p for p in c["plans"] if p["active"]]
+        c["active_plan"] = c["active_plans"][0] if c["active_plans"] else None
+        c["classes_enrolled"] = [
+            {"class_id": p["class_id"], "class_name": p["class_name"],
+             "colour": p["class_colour"], "plan_id": p["id"]}
+            for p in c["active_plans"] if p["class_id"]]
 
         c["cards"] = rows(conn.execute(
             "SELECT cr.id, cr.token, cr.class_id, cl.name AS class_name, cl.colour"
             "  FROM credentials cr LEFT JOIN classes cl ON cl.id = cr.class_id"
             " WHERE cr.client_id=? AND cr.revoked_at IS NULL"
             " ORDER BY cl.name", (cid,)))
+        # The PNG the card was written to, so the profile can offer it for
+        # download and print without guessing at the filename in the browser.
+        for cd in c["cards"]:
+            cd["card_url"] = "/" + cards.card_path(cid, cd["class_name"])
 
         now = db.now()
         c["upcoming"] = rows(conn.execute(
@@ -354,8 +363,15 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
 @app.post("/api/clients/{cid}/plan")
 def add_plan(cid: int, body: PlanIn):
     """
-    Sell a plan. Every slot must be assigned to a real session up front —
-    a plan with unassigned slots is a promise nobody has written down.
+    Sell a plan for one class.
+
+    Three rules are enforced here rather than trusted to the UI:
+      - every slot is assigned to a real session up front, because a plan with
+        unassigned slots is a promise nobody has written down;
+      - every one of those sessions belongs to the plan's class, so a Ballet
+        plan cannot quietly pay for a Flexibility session;
+      - only the previous plan *for this class* is replaced, so a client taking
+        two classes keeps the other one running.
     """
     if len(body.session_ids) != body.sessions_total:
         raise HTTPException(
@@ -366,19 +382,31 @@ def add_plan(cid: int, body: PlanIn):
 
     conn = db.connect()
     try:
+        klass = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
+        if not klass:
+            raise HTTPException(404, "no such class")
+
+        marks = ",".join("?" * len(body.session_ids))
+        wrong = conn.execute(
+            f"SELECT COUNT(*) n FROM sessions WHERE id IN ({marks}) AND class_id != ?",
+            (*body.session_ids, body.class_id)).fetchone()["n"]
+        if wrong:
+            raise HTTPException(
+                400, f"{wrong} of the chosen sessions are not {klass['name']} sessions")
+
         clash = conn.execute(
-            "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id IN "
-            f"({','.join('?' * len(body.session_ids))})",
-            (cid, *body.session_ids)).fetchone()["n"] if body.session_ids else 0
+            f"SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id IN ({marks})",
+            (cid, *body.session_ids)).fetchone()["n"]
         if clash:
             raise HTTPException(400, "already booked into one of those sessions")
 
-        conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=?", (cid,))
+        conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
+                     (cid, body.class_id))
         starts = body.starts_on or date.today().isoformat()
         cur = conn.execute(
-            "INSERT INTO subscriptions (client_id, plan, sessions_total, price,"
-            " starts_on, expires_on, created_at) VALUES (?,?,?,?,?,?,?)",
-            (cid, body.plan, body.sessions_total, body.price, starts,
+            "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
+            " starts_on, expires_on, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (cid, body.class_id, body.plan, body.sessions_total, body.price, starts,
              body.expires_on, db.now()))
         sub_id = cur.lastrowid
         for sid in body.session_ids:
@@ -388,7 +416,8 @@ def add_plan(cid: int, body: PlanIn):
                 "INSERT INTO bookings (client_id, session_id, subscription_id, status,"
                 " created_at) VALUES (?,?,?,?,?)", (cid, sid, sub_id, status, db.now()))
         conn.commit()
-        return {"id": sub_id, "booked": len(body.session_ids)}
+        return {"id": sub_id, "booked": len(body.session_ids),
+                "class_id": body.class_id, "class_name": klass["name"]}
     finally:
         conn.close()
 
@@ -446,17 +475,20 @@ def issue_card(cid: int, body: CardIn):
         c = one(conn.execute("SELECT * FROM clients WHERE id=?", (cid,)))
         if not c:
             raise HTTPException(404, "no such client")
-        # The card prints the plan and its expiry, so it has to be the plan
-        # for the class this card is being issued for.
+        if not body.class_id:
+            raise HTTPException(400, "a card belongs to a class — say which")
+        klass = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
+        if not klass:
+            raise HTTPException(404, "no such class")
+
+        # A card is proof of a plan in that class. Issuing a Flexibility card
+        # to someone who only takes Ballet would create a credential that can
+        # never check anyone in, and reads at reception as a system fault.
         sub = access.active_plan(conn, cid, body.class_id)
         if not sub:
-            raise HTTPException(400, "add a plan before issuing a card")
-
-        klass = None
-        if body.class_id:
-            klass = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
-            if not klass:
-                raise HTTPException(404, "no such class")
+            raise HTTPException(
+                400, f"{c['name_en']} has no active {klass['name']} plan — "
+                     f"add one before issuing this card")
 
         old = one(conn.execute(
             "SELECT token FROM credentials WHERE client_id=? AND revoked_at IS NULL"
@@ -476,8 +508,7 @@ def issue_card(cid: int, body: CardIn):
         state = access.plan_state(conn, sub["id"])
         path = cards.build_card(cid, c["name_en"], token, state["plan"],
                                 state["expires_on"],
-                                class_name=klass["name"] if klass else None,
-                                colour=klass["colour"] if klass else None)
+                                class_name=klass["name"], colour=klass["colour"])
         return {"token": token, "card_url": "/" + path,
                 "revoked": old["token"] if old else None}
     finally:
@@ -541,9 +572,9 @@ def create_instructor(body: InstructorIn):
     conn = db.connect()
     try:
         cur = conn.execute(
-            "INSERT INTO instructors (name, name_ar, phone, specialty, hourly_rate)"
-            " VALUES (?,?,?,?,?)",
-            (body.name, body.name_ar, body.phone, body.specialty, body.hourly_rate))
+            "INSERT INTO instructors (name, phone, specialty, hourly_rate)"
+            " VALUES (?,?,?,?)",
+            (body.name, body.phone, body.specialty, body.hourly_rate))
         conn.commit()
         return {"id": cur.lastrowid}
     finally:
@@ -555,9 +586,9 @@ def update_instructor(iid: int, body: InstructorIn):
     conn = db.connect()
     try:
         conn.execute(
-            "UPDATE instructors SET name=?, name_ar=?, phone=?, specialty=?, hourly_rate=?"
+            "UPDATE instructors SET name=?, phone=?, specialty=?, hourly_rate=?"
             " WHERE id=?",
-            (body.name, body.name_ar, body.phone, body.specialty, body.hourly_rate, iid))
+            (body.name, body.phone, body.specialty, body.hourly_rate, iid))
         conn.commit()
         return {"ok": True}
     finally:
@@ -655,10 +686,9 @@ def create_class(body: ClassIn):
     conn = db.connect()
     try:
         cur = conn.execute(
-            "INSERT INTO classes (name, name_ar, description, colour, duration_hours, level)"
-            " VALUES (?,?,?,?,?,?)",
-            (body.name, body.name_ar, body.description, body.colour,
-             body.duration_hours, body.level))
+            "INSERT INTO classes (name, description, colour, duration_hours, level)"
+            " VALUES (?,?,?,?,?)",
+            (body.name, body.description, body.colour, body.duration_hours, body.level))
         conn.commit()
         return {"id": cur.lastrowid}
     finally:
@@ -670,9 +700,9 @@ def update_class(clid: int, body: ClassIn):
     conn = db.connect()
     try:
         conn.execute(
-            "UPDATE classes SET name=?, name_ar=?, description=?, colour=?,"
+            "UPDATE classes SET name=?, description=?, colour=?,"
             " duration_hours=?, level=? WHERE id=?",
-            (body.name, body.name_ar, body.description, body.colour,
+            (body.name, body.description, body.colour,
              body.duration_hours, body.level, clid))
         conn.commit()
         return {"ok": True}

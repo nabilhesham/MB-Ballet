@@ -149,8 +149,21 @@ def _centre(draw, y, text, font, fill):
 
 
 # ---------------------------------------------------------------- the card
+def card_path(client_id: int, class_name: str = None, out_dir="cards") -> str:
+    """
+    Where a client's card for one class lives.
+
+    The class slug is part of the filename so two cards coexist. It is derived
+    here and nowhere else: the profile page offers this file for download, and
+    a second copy of the rule drifting from this one is a dead link on the one
+    screen that has to work.
+    """
+    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in (class_name or "all"))
+    return os.path.join(out_dir, f"client_{client_id:05d}_{slug}.png")
+
+
 def build_card(client_id: int, name: str, token: str, plan: str,
-               expires_on: str, out_dir="cards", name_ar: str = None,
+               expires_on: str, out_dir="cards",
                class_name: str = None, colour: str = None) -> str:
     """
     A client holds one card per class, so the class name is printed prominently
@@ -279,7 +292,6 @@ def build_card(client_id: int, name: str, token: str, plan: str,
     d.rectangle([FRAME + 5, height - FRAME - 11, CARD_W - FRAME - 6, height - FRAME - 6],
                 fill=accent)
 
-    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in (class_name or "all"))
-    path = os.path.join(out_dir, f"client_{client_id:05d}_{slug}.png")
+    path = card_path(client_id, class_name, out_dir)
     card.save(path, dpi=(300, 300))
     return path

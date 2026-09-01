@@ -397,7 +397,7 @@ def archived(user: dict = Depends(admin_only)):
     try:
         return {
             "clients": [dict(r) for r in conn.execute(
-                "SELECT id, name_en, name_ar, phone FROM clients WHERE active=0"
+                "SELECT id, name_en, phone FROM clients WHERE active=0"
                 " ORDER BY name_en").fetchall()],
             "classes": [dict(r) for r in conn.execute(
                 "SELECT id, name, colour FROM classes WHERE active=0 ORDER BY name").fetchall()],
