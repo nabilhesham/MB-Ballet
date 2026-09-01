@@ -1,0 +1,54 @@
+- generate 2 QR for client one for ballet and one for flexibility (the 2 classes in the academy) so we can assign multiple classes with multiple QR code for one client of assigned in the class sessions
+
+- session:
+	1- delete capacity from session
+	2- change duration to be hours not mins
+	3- in add session choose which class, the instructor, the duration, datetime
+	4- the clients will be marked as present or absent and delete excuse
+	5- after the session ends the clients that didn't check in will be considered absent 
+	
+
+- instructor:
+	1- delete classes card
+	2- delete check-ins card
+	3- add number of session she had
+	4- add number of hours based on the sessions duration
+	5- add salary per hour
+	6- the instructor on the level of the session not the class and there is no default session instructor
+
+
+- calendar:
+	1- add feature of filter (month - year)
+	2- display full month or full week
+	3- the week starts from Saturday
+
+- QR Card:
+	1- make the logo a little smaller
+	2- make the QR a little bigger so the biggest thing in the card is the QR
+
+- the reception:
+	1- make the logo whole also make it with the full width of the screen
+	2- make the recent scrollable Y and make dashboard button fixed always show it without scrolling.
+	3- if the client has session today and if he scans in an earlier time in this day check him in his session as attended
+	4- the client scan for one time , if he scan a second in the same day and he is already checked-in in his session the scan will show that he already scanned in a session today and will not deduct from his credit
+	5- remove check-in anyway
+	6- 
+
+
+- the client:
+	1- add/edit client: remove email, add age , add package (number of session) , validity (the date of the end of plan), first date to join, add school / university 
+	2- in client plan switch VALID FOR (MONTHS) to end on (datetime like start on) 
+	4- add payment history (history of the date of the renewal of the plan) (i think it's what we did in the Plan history and if that's the case just change the name to payment history)
+	5- when click on one of the raws of the payment history i will popup with history of the sessions for this client in this plan whether present or absent 
+	6- add upcoming sessions
+	7- in the attendance history add popup to edit the status of the session for this client (change attended or absent)
+	8- in the upcoming sessions we can edit the session of the client and choose another session of the avaiable sessions under the same class
+	9-  if the client didn't show in any of his provious sessions he will be marked as absent and add check for that and change any mark for any session when opening the app 
+	10 - in the client view add ability to add sessions in the renew plan or adding plan for new client based on the number of the sessions in this plan so when assigning the sessions the user will not be able to save till he assign the client to all of his slots in the plan after that reissue the card.
+	11- remove adjust balance 
+	12- delete Enrolled classes because it will be based on the sessions not the class
+
+
+	
+	
+	

@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reception — MB Ballet Academy</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<meta name="theme-color" content="#87438E">
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  /* The kiosk keeps a dark theme: read at a glance, from a distance, often
+     with the studio lights down. Same token names, different values, so it
+     shares every component in style.css. */
+  :root{
+    --paper:#140F19; --surface:#1E1726; --surface-2:#271E31; --surface-3:#31263D;
+    --line:#372B44; --line-soft:#2B2136;
+    --ink:#EFEAF2; --mute:#A497AC; --dim:#6E6178;
+    --brand:#B368BC; --brand-soft:#2C1B31; --brand-deep:#C97FD1;
+    --pink:#EAAECA; --pink-soft:#2E1D28;
+    --ok:#63C784;      --ok-soft:#152519;
+    --bad:#E2604D;     --bad-soft:#2A1519;
+    --warn:#E5A33F;    --warn-soft:#2A2012;
+    --info:#8FB4E8;    --info-soft:#1A2032;
+    --shadow-sm:none; --shadow:none;
+    --shadow-lg:0 20px 50px rgba(0,0,0,.6);
+  }
+
+  body{grid-template-columns:1fr 330px;height:100vh;overflow:hidden}
+  /* main{padding:30px 34px 80px;max-width:1360px;overflow-x:hidden} */
+  main{display:flex;flex-direction:column;align-items:center;justify-content:center;
+       /*padding:30px;overflow-y:auto;*/transition:background .15s}
+  main.ok{background:#12241A} main.bad{background:#2A1419} main.warn{background:#2A2012}
+
+  /* ---------- idle ---------- */
+  .idle{text-align:center;max-width:420px; display:flex;flex-direction:column;align-items:center;justify-content:center;}
+  /* The logo is the whole lockup and spans the scanning area — at a glance
+     from across the desk it should read as the academy, not a small badge. */
+  /* The logo artwork is drawn for a light background, so it sits on its own
+     plate rather than being keyed out — keying leaves a white halo on every
+     antialiased edge, which is very visible against the dark kiosk. */
+  #idleLogo{width:100%;max-width:600px;height:50%;object-fit:contain;display:block;
+            margin:0 auto 26px;padding:26px 34px;border-radius:16px;background:#FBF9FC;
+            box-shadow:0 8px 40px rgba(0,0,0,.45);
+            animation:breathe 3.4s ease-in-out infinite}
+  .idle{/*max-width:none;*/width:100%}
+  @keyframes breathe{0%,100%{transform:scale(1);opacity:.75}50%{transform:scale(1.06);opacity:1}}
+  .idle h2{font-family:var(--serif);font-size:29px;font-weight:600;margin:0 0 8px;color:var(--mute)}
+  .idle p{font-size:13.5px;margin:0;color:var(--dim)}
+  #cam{width:340px;max-width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:12px;
+       border:1px solid var(--line);background:#000;margin-bottom:20px;display:none}
+  #cam.on{display:block}
+  .camhint{font-family:var(--mono);font-size:11px;color:var(--info);margin-top:10px}
+
+  /* ---------- result ---------- */
+  #card{display:none;width:100%;max-width:820px}
+  #card.on{display:block;animation:pop .2s cubic-bezier(.2,.8,.3,1)}
+  @keyframes pop{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+
+  .verdictbar{display:flex;align-items:center;gap:14px;margin-bottom:20px}
+  #verdict{font-family:var(--serif);font-size:44px;font-weight:700;margin:0;line-height:1}
+  #reason{font-size:16px;color:var(--mute);flex:1;text-align:right}
+
+  .who{display:flex;gap:22px;align-items:flex-start;margin-bottom:20px}
+  #photo{width:150px;height:150px;border-radius:14px;object-fit:cover;flex-shrink:0;
+         border:3px solid var(--line);background:var(--surface-2)}
+  #photo.ph{display:flex;align-items:center;justify-content:center;
+            font-size:52px;font-weight:600;color:var(--brand-deep);background:var(--brand-soft)}
+  .whotext{flex:1;min-width:0;text-align:left}
+  #name{font-family:var(--serif);font-size:36px;font-weight:600;line-height:1.1;margin:0}
+  #memberNo{font-family:var(--mono);font-size:15px;color:var(--mute);margin-top:5px;
+            letter-spacing:1.5px}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  .classes{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}
+
+  #sess{border-radius:10px;padding:14px 18px;margin-bottom:18px;display:none;
+        background:var(--surface);border-left:4px solid var(--brand);text-align:left}
+  #sess.on{display:block}
+  #sess .cn{font-family:var(--serif);font-size:22px;font-weight:600}
+  #sess .meta2{font-family:var(--mono);font-size:12px;color:var(--mute);margin-top:5px}
+
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:22px}
+  .stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;
+        padding:13px 14px;text-align:left}
+  .stat .k{font-family:var(--mono);font-size:8.5px;letter-spacing:1.3px;color:var(--dim)}
+  .stat .v{font-size:26px;font-weight:600;margin-top:5px;line-height:1.1;letter-spacing:-.8px}
+  .stat .n{font-size:11px;color:var(--dim);margin-top:2px}
+
+  .recent{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:22px}
+  .rchip{background:var(--surface);border:1px solid var(--line);border-radius:8px;
+         padding:7px 11px;font-size:11.5px;color:var(--mute)}
+  .rchip b{color:var(--ink);font-weight:500}
+
+  .actions{display:flex;gap:12px;align-items:center;justify-content:center;flex-wrap:wrap}
+  #checkin{background:var(--ok);color:#08150D;border:0;padding:20px 60px;
+           font-size:19px;font-weight:700;letter-spacing:.6px;border-radius:10px}
+  #checkin:hover{background:#78D897}
+  #undo{display:none}
+  #undo.on{display:inline-flex}
+  .keys{color:var(--dim);font-size:11px;margin-top:16px;text-align:center}
+
+  /* ---------- sidebar ---------- */
+  aside{border-left:1px solid var(--line);background:#0A0E13;padding:20px 16px;
+        display:flex;flex-direction:column;overflow:hidden}
+  .asidetop{flex-shrink:0}
+  .recentwrap{flex:1;min-height:0;overflow-y:auto;margin-top:4px}
+  .asidefoot{flex-shrink:0;padding-top:14px;border-top:1px solid var(--line);margin-top:12px}
+  .srcpick{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:10px}
+  .srcpick button{flex-direction:column;gap:5px;padding:13px 4px;font-size:11.5px;
+                  border-radius:10px;justify-content:center}
+  .srcpick button .em{font-size:19px}
+  .srcpick button.on{background:var(--brand-soft);border-color:var(--brand);color:var(--brand-deep)}
+  .srcstat{font-family:var(--mono);font-size:10.5px;color:var(--dim);
+           display:flex;align-items:center;gap:7px;padding:9px 2px}
+  .led{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0}
+  .led.live{background:var(--ok);box-shadow:0 0 7px var(--ok)}
+  .led.wait{background:var(--warn)}
+
+  @media(max-width:980px){
+    body{grid-template-columns:1fr;height:auto;overflow:auto}
+    aside{border-left:0;border-top:1px solid var(--line)}
+    main{min-height:66vh;padding:24px 16px}
+    .stats{grid-template-columns:1fr 1fr}
+    #verdict{font-size:34px}
+    #reason{font-size:14px}
+    .who{gap:16px}
+    #photo{width:104px;height:104px}
+    #photo.ph{font-size:36px}
+    #name{font-size:27px}
+    #checkin{width:100%;padding:18px}
+  }
+  @media(max-width:520px){
+    .who{flex-direction:column;align-items:center;text-align:center}
+    .whotext{text-align:center}
+    .meta,.classes{justify-content:center}
+    .verdictbar{flex-direction:column;gap:4px}
+    #reason{text-align:center}
+  }
+</style>
+</head>
+<body>
+
+<main id="stage">
+  <div class="idle" id="idle">
+    <video id="cam" playsinline muted></video>
+    <img src="/static/logo.png" alt="MB Ballet Academy" id="idleLogo">
+    <h2 id="idleTitle">Ready to scan</h2>
+    <p id="idleHint">Hold the member card up to the scanner</p>
+  </div>
+
+  <div id="card">
+    <div class="verdictbar">
+      <h1 id="verdict"></h1>
+      <div id="reason"></div>
+    </div>
+
+    <div class="who">
+      <div id="photo" class="ph"></div>
+      <div class="whotext">
+        <div id="name"></div>
+        <div id="memberNo"></div>
+        <div class="meta" id="meta"></div>
+        <div class="classes" id="classes"></div>
+      </div>
+    </div>
+
+    <div id="sess"><div class="cn" id="sessName"></div><div class="meta2" id="sessMeta"></div></div>
+
+    <div class="stats" id="stats"></div>
+    <div class="recent" id="recent"></div>
+
+    <div class="actions">
+      <button id="checkin">CHECK IN</button>
+      <button id="undo" class="danger">Undo</button>
+    </div>
+    <div class="keys">Enter to check in · Esc to clear</div>
+  </div>
+</main>
+
+<aside>
+  <div class="asidetop">
+  <div class="eyebrow" style="margin-bottom:11px">INPUT</div>
+  <div class="srcpick">
+    <button id="btnScanner" class="on"><span class="em">▤</span> Scanner</button>
+    <button id="btnCam"><span class="em">▣</span> Camera</button>
+    <button id="btnManual"><span class="em">⌨</span> Number</button>
+  </div>
+  <div class="srcstat"><span class="led" id="led"></span><span id="ledText">listening</span></div>
+
+  <div id="manualBox" style="display:none;margin-top:10px">
+    <label style="margin-top:4px">MEMBER NUMBER</label>
+    <input id="manualId" type="text" inputmode="numeric" placeholder="e.g. 7 or 00007"
+           autocomplete="off">
+    <button class="pri sm" id="manualGo" style="width:100%;margin-top:8px;justify-content:center">
+      Look up client</button>
+    <div class="sub" style="margin-top:8px;font-size:11px">
+      It is printed on the member card under the name.</div>
+  </div>
+
+  <div class="eyebrow" style="margin:22px 0 11px">TODAY</div>
+  <div class="box kpi" style="padding:15px">
+    <div class="k">CHECKED IN</div>
+    <div class="v" id="kIn" style="font-size:38px">0</div>
+    <div class="n" id="kInN">&nbsp;</div>
+  </div>
+
+  <div class="eyebrow" style="margin:22px 0 11px">NOW &amp; NEXT</div>
+  <div id="sched"></div>
+
+  <div class="eyebrow" style="margin:22px 0 11px">RECENT</div>
+  </div>
+
+  <div class="recentwrap"><div id="log"></div></div>
+
+  <div class="asidefoot">
+    <a class="btn sm" href="/" style="width:100%;justify-content:center">Dashboard</a>
+  </div>
+</aside>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+const fmtTime = ts => new Date(ts*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+const fmtDay  = ts => new Date(ts*1000).toLocaleDateString([],{day:'numeric',month:'short'});
+const initials = n => (n||'?').split(' ').slice(0,2).map(w=>w[0]).join('').toUpperCase();
+const stage=$('stage'), idle=$('idle'), card=$('card'), cam=$('cam');
+let current=null, clearTimer=null;
+
+/* ---------------------------------------------------------------- audio */
+let actx=null;
+function beep(f,ms,delay=0){
+  if(!actx) actx=new (window.AudioContext||window.webkitAudioContext)();
+  setTimeout(()=>{ const o=actx.createOscillator(), g=actx.createGain();
+    o.frequency.value=f; o.connect(g); g.connect(actx.destination);
+    g.gain.setValueAtTime(.12,actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001,actx.currentTime+ms/1000);
+    o.start(); o.stop(actx.currentTime+ms/1000); }, delay);
+}
+const beepOk=()=>beep(880,140), beepNo=()=>{beep(240,180);beep(240,180,220);};
+
+/* ================================================================
+   INPUT SOURCE — exactly two: the hardware scanner, or the camera.
+   Scanner mode is passive, so it is always listening even while the
+   camera runs; switching only changes what the screen shows.
+   ================================================================ */
+let mode = 'scanner';
+
+function setMode(m){
+  mode = m;
+  $('btnScanner').classList.toggle('on', m==='scanner');
+  $('btnCam').classList.toggle('on', m==='camera');
+  $('btnManual').classList.toggle('on', m==='manual');
+  $('manualBox').style.display = m==='manual' ? 'block' : 'none';
+  if(m==='camera') startCam(); else stopCam();
+  updateIdle();
+  if(m==='manual') setTimeout(()=>$('manualId').focus(), 50);
+}
+$('btnScanner').onclick = ()=>setMode('scanner');
+$('btnCam').onclick = ()=>setMode('camera');
+$('btnManual').onclick = ()=>setMode('manual');
+
+/* ---------------------------------------------------------------- by number
+   The fallback when the scanner is unplugged and the camera will not focus.
+   Runs exactly the same checks as a scan — the card is simply not involved. */
+async function lookupById(){
+  const raw = $('manualId').value.trim();
+  const id = parseInt(raw.replace(/^0+/, ''), 10);
+  if(!id){ $('manualId').select(); return; }
+  clearTimeout(clearTimer);
+  try{
+    const r = await fetch('/api/access/lookup', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:id})});
+    const data = await r.json();
+    $('manualId').value = '';
+    show(data);
+  }catch(e){
+    show({granted:false, message:'System not responding'});
+  }
+}
+$('manualGo').onclick = lookupById;
+$('manualId').addEventListener('keydown', e => {
+  if(e.key === 'Enter'){ e.preventDefault(); e.stopPropagation(); lookupById(); }
+});
+
+function updateIdle(){
+  if(mode==='manual'){
+    $('idleLogo').style.display='none';
+    $('idleTitle').textContent='Look up by number';
+    $('idleHint').textContent='Type the member number on the right, then press Enter';
+    setLed();
+    return;
+  }
+  if(mode==='camera'){
+    $('idleLogo').style.display='none';
+    $('idleTitle').textContent='Camera ready';
+    $('idleHint').textContent='Hold the card or phone in front of the camera';
+  }else{
+    $('idleLogo').style.display='block';
+    $('idleTitle').textContent='Ready to scan';
+    $('idleHint').textContent = scannerSeen
+      ? 'Hold the member card up to the scanner'
+      : 'Waiting for the scanner — switch to Camera if none is connected';
+  }
+  setLed();
+}
+
+/* The browser cannot enumerate HID keyboards, so "connected" is inferred:
+   once a burst of scanner-speed keystrokes arrives, we know one is there. */
+let scannerSeen = false;
+function setLed(){
+  const led=$('led'), t=$('ledText');
+  if(mode==='manual'){ led.className='led live'; t.textContent='manual entry'; return; }
+  if(mode==='camera'){ led.className='led live'; t.textContent='camera active'; return; }
+  if(scannerSeen){ led.className='led live'; t.textContent='scanner connected'; }
+  else{ led.className='led wait'; t.textContent='listening for scanner'; }
+}
+
+/* ---------------------------------------------------------------- scanner */
+const GAP_MS = 80;              // tune with static/scanner-test.html once hardware arrives
+let buf="", lastKey=0;
+window.addEventListener('keydown', e=>{
+  if(e.target.matches('input,textarea,select,button')) return;
+  if(mode === 'manual') return;      // typing a number is not a scan
+  if(e.key==='Escape'){ reset(); return; }
+  const now=performance.now(), gap=now-lastKey; lastKey=now;
+
+  if(e.key==='Enter'){
+    e.preventDefault();
+    if(buf.length>=10 && gap<GAP_MS*3){
+      if(!scannerSeen){ scannerSeen=true; setLed(); updateIdle(); }
+      const t=buf; buf=""; scan(t);
+    } else if(!buf.length && current && current.granted) doCheckIn();
+    buf=""; return;
+  }
+  if(e.key.length===1){ if(gap>GAP_MS) buf=""; buf+=e.key; }
+});
+
+/* ---------------------------------------------------------------- camera */
+let camStream=null, detector=null, camRunning=false;
+
+async function loadJsQR(){
+  if(window.jsQR) return;
+  await new Promise((res,rej)=>{ const s=document.createElement('script');
+    s.src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+    s.onload=res; s.onerror=rej; document.head.appendChild(s); });
+}
+
+async function startCam(){
+  if(camRunning) return;
+  try{
+    camStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    cam.srcObject = camStream; await cam.play();
+    cam.classList.add('on'); camRunning = true;
+    if('BarcodeDetector' in window){
+      const f = await BarcodeDetector.getSupportedFormats();
+      if(f.includes('qr_code')) detector = new BarcodeDetector({formats:['qr_code']});
+    }
+    if(!detector) await loadJsQR();
+    pump();
+  }catch(err){
+    $('idleHint').textContent = 'Camera unavailable: ' + err.message;
+    setMode('scanner');
+  }
+}
+
+function stopCam(){
+  camRunning=false; detector=null;
+  if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream=null; }
+  cam.classList.remove('on');
+}
+
+const canvas=document.createElement('canvas');
+let lastCam="", lastCamAt=0;
+async function pump(){
+  if(!camRunning) return;
+  try{
+    let text=null;
+    if(detector){ const h=await detector.detect(cam); if(h.length) text=h[0].rawValue; }
+    else if(window.jsQR && cam.videoWidth){
+      canvas.width=cam.videoWidth; canvas.height=cam.videoHeight;
+      const ctx=canvas.getContext('2d',{willReadFrequently:true});
+      ctx.drawImage(cam,0,0);
+      const img=ctx.getImageData(0,0,canvas.width,canvas.height);
+      const r=window.jsQR(img.data,img.width,img.height); if(r) text=r.data;
+    }
+    const now=Date.now();
+    if(text && (text!==lastCam || now-lastCamAt>4000)){ lastCam=text; lastCamAt=now; scan(text); }
+  }catch(e){}
+  setTimeout(pump, 200);
+}
+
+/* ================================================================ flow */
+async function scan(token){
+  clearTimeout(clearTimer);
+  try{
+    const r = await fetch('/api/access/verify', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({token})});
+    show(await r.json());
+  }catch(e){
+    show({granted:false, message:'System not responding', detail:'Is the server running?'});
+  }
+}
+
+function show(r){
+  current = r;
+  idle.style.display='none'; card.classList.add('on');
+
+  const soft = r.granted && r.low_balance;
+  stage.className = r.granted ? (soft?'warn':'ok') : 'bad';
+  $('verdict').textContent = r.granted ? 'WELCOME' : 'STOP';
+  $('verdict').style.color = r.granted ? (soft?'var(--warn)':'var(--ok)') : 'var(--bad)';
+
+  let note = '';
+  if(!r.granted) note = r.message;
+  else if(r.low_balance) note = 'Running low — offer a renewal';
+  $('reason').textContent = note;
+
+  /* ---- identity: photo first, it is the real anti-sharing control ---- */
+  const p = $('photo');
+  if(r.photo_path){
+    p.className=''; p.style.cssText='';
+    p.innerHTML = `<img src="${esc(r.photo_path)}" alt=""
+      style="width:100%;height:100%;object-fit:cover;border-radius:11px">`;
+  }else{
+    p.className='ph'; p.textContent = initials(r.name_en);
+  }
+  $('name').textContent = r.name_en || 'Unknown card';
+  $('memberNo').textContent = r.client_id
+    ? 'MEMBER ' + String(r.client_id).padStart(5, '0') : '';
+
+  const meta = [];
+  if(r.phone) meta.push(`<span class="pill grey">${esc(r.phone)}</span>`);
+  if(r.plan) meta.push(`<span class="pill brand">${esc(r.plan)}</span>`);
+  if(r.expires_on) meta.push(`<span class="pill ${r.granted?'grey':'bad'}">until ${esc(r.expires_on)}</span>`);
+  if(r.frozen) meta.push(`<span class="pill info">plan frozen${r.frozen_until?' to '+esc(r.frozen_until):''}</span>`);
+  if(r.absences) meta.push(`<span class="pill ${r.absences>=3?'bad':'warn'}">${r.absences} absence${r.absences===1?'':'s'}</span>`);
+  if(r.card_class) meta.push(`<span class="pill brand">${esc(r.card_class)} card</span>`);
+  $('meta').innerHTML = meta.join('');
+
+  $('classes').innerHTML = (r.school ? `<span class="pill grey">${esc(r.school)}</span>` : '')
+    + (r.age ? `<span class="pill grey">${r.age} years old</span>` : '');
+
+  /* ---- which class are they here for ---- */
+  const s = r.session;
+  if(s){
+    $('sess').classList.add('on');
+    $('sess').style.borderLeftColor = s.colour;
+    $('sessName').textContent = s.class_name;
+    const m = s.minutes_until;
+    const when = m > 90 ? `starts at ${fmtTime(s.starts_at)} — arriving early`
+               : m > 0  ? `starts in ${m} min`
+               : `started ${Math.abs(m)} min ago`;
+    $('sessMeta').textContent =
+      `${when} · ${s.instructor_name||'no instructor'} · ${s.duration_hours} h`;
+  } else $('sess').classList.remove('on');
+
+  /* ---- numbers ---- */
+  const left = r.sessions_remaining;
+  $('stats').innerHTML = `
+    <div class="stat"><div class="k">SESSIONS LEFT</div>
+      <div class="v" style="color:${left===undefined||left===null?'var(--mute)'
+        : left<=0?'var(--bad)' : left<=2?'var(--warn)':'var(--ok)'}">${left ?? '—'}</div>
+      <div class="n">${r.sessions_total ? 'of '+r.sessions_total : 'no plan'}</div></div>
+    <div class="stat"><div class="k">VISITS</div><div class="v">${r.visits ?? 0}</div>
+      <div class="n">${r.last_visit ? 'last '+fmtDay(r.last_visit) : 'first time'}</div></div>
+    <div class="stat"><div class="k">ABSENCES</div>
+      <div class="v" style="color:${r.absences?'var(--warn)':'var(--ink)'}">${r.absences ?? 0}</div>
+      <div class="n">recorded</div></div>
+    <div class="stat"><div class="k">NEXT CLASS</div>
+      <div class="v" style="font-size:15px;padding-top:7px">${r.next_session
+        ? esc(r.next_session.class_name) : '—'}</div>
+      <div class="n">${r.next_session ? fmtDay(r.next_session.starts_at)+' '+fmtTime(r.next_session.starts_at) : 'nothing booked'}</div></div>`;
+
+  $('recent').innerHTML = (r.recent||[]).map(a=>{
+    const tag = a.status==='present' ? '<b style="color:var(--ok)">attended</b>'
+              : '<b style="color:var(--bad)">absent</b>';
+    return `<span class="rchip">${fmtDay(a.starts_at)} · ${esc(a.class_name)} · ${tag}</span>`;
+  }).join('');
+
+  const btn = $('checkin');
+  btn.style.display = r.granted ? 'inline-flex' : 'none';
+  btn.disabled = !r.granted;
+  btn.textContent = 'CHECK IN';
+  btn.style.background = 'var(--ok)';
+  $('undo').classList.remove('on');
+
+  r.granted ? beepOk() : beepNo();
+  if(!r.granted) clearTimer = setTimeout(reset, 10000);
+  refresh();
+}
+
+async function doCheckIn(){
+  if(!current || !current.granted || $('checkin').disabled) return;
+  $('checkin').disabled = true;
+  const r = await (await fetch('/api/access/checkin',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({event_id:current.event_id})})).json();
+  if(r.ok){
+    $('checkin').textContent = 'CHECKED IN — ' + r.sessions_remaining + ' LEFT';
+    $('checkin').style.background = 'var(--ok)';
+    $('undo').classList.add('on');
+    clearTimer = setTimeout(reset, 9000);
+  }else{
+    $('reason').textContent = r.error;
+    $('checkin').disabled = false;
+  }
+  refresh();
+}
+$('checkin').onclick = doCheckIn;
+$('undo').onclick = async () => {
+  await fetch('/api/access/undo',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({event_id:current.event_id})});
+  reset(); refresh();
+};
+
+function reset(){
+  clearTimeout(clearTimer); current=null;
+  card.classList.remove('on'); idle.style.display='block'; stage.className='';
+  updateIdle();
+}
+
+/* ---------------------------------------------------------------- sidebar */
+async function refresh(){
+  try{
+    const r = await fetch('/api/dashboard');
+    const d = await r.json();
+    const st = d.stats;
+    $('kIn').textContent = st.exp_arrived;
+    $('kInN').textContent = st.exp_arrived === 1 ? 'client so far' : 'clients so far';
+
+    const now = Date.now()/1000;
+    $('sched').innerHTML = d.today_sessions.length ? d.today_sessions.map(s=>{
+      const live = s.starts_at <= now && s.starts_at + s.duration_hours*3600 > now;
+      return `<div class="listrow" style="${live?'':'opacity:.5'}">
+        <div><span class="dot" style="background:${esc(s.colour)}"></span>${esc(s.class_name)}
+          <div class="sub">${fmtTime(s.starts_at)}${live?' · now':''}</div></div>
+        <span class="pill ${live?'ok':'grey'}">${s.attended}/${s.booked}</span>
+      </div>`;}).join('') : '<div class="sub">No classes today.</div>';
+
+    $('log').innerHTML = d.recent.slice(0,12).map(x=>`
+      <div class="listrow" style="padding:8px 0;font-size:12px">
+        <span class="sub" style="font-family:var(--mono);margin:0">${fmtTime(x.scanned_at)}</span>
+        <span style="flex:1;margin:0 9px;overflow:hidden;text-overflow:ellipsis;
+              white-space:nowrap;color:var(--mute)">${esc(x.name_en || x.reason || 'unknown')}</span>
+        <span style="color:${x.confirmed_at?'var(--ok)':'var(--bad)'}">${x.confirmed_at?'✓':'×'}</span>
+      </div>`).join('') || '<div class="sub">No scans yet.</div>';
+  }catch(e){}
+}
+
+updateIdle(); refresh(); setInterval(refresh, 20000);
+</script>
+</body>
+</html>

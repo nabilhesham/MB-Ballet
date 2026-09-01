@@ -1,0 +1,23 @@
+.env
+academy.db
+academy.db-wal
+academy.db-shm
+cards/
+photos/
+
+# One virtual environment per platform: they hold compiled binaries and
+# cannot be shared between Windows, Linux and macOS.
+.venv/
+.venv-*/
+
+# Bundled Python fetched by START.bat when the machine has none
+runtime/
+
+# PyInstaller output
+build/
+dist/
+
+__pycache__/
+*.pyc
+.DS_Store
+error.log

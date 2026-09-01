@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scanner diagnostic — MB Ballet Academy</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<meta name="theme-color" content="#87438E">
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body{grid-template-columns:1fr;display:block;padding:28px 20px 60px}
+  .wrap{max-width:820px;margin:0 auto}
+  #stage{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);
+         padding:30px 24px;text-align:center;transition:border-color .15s,background .15s;
+         box-shadow:var(--shadow-sm)}
+  #stage.hit{border-color:var(--ok);background:var(--ok-soft)}
+  #stage.miss{border-color:var(--warn);background:var(--warn-soft)}
+  #verdict{font-family:var(--serif);font-size:24px;font-weight:600;margin-bottom:5px}
+  #raw{background:var(--surface-2);border-radius:var(--r-sm);padding:16px;
+       font-family:var(--mono);font-size:15px;word-break:break-all;min-height:52px;color:var(--ok)}
+  #chars{margin-top:10px;font-family:var(--mono);font-size:11px;color:var(--dim);
+         word-break:break-all;line-height:1.9}
+  .flag{color:var(--bad);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="eyebrow">Setup tool</div>
+  <h1>Scanner diagnostic</h1>
+  <div class="sub" style="margin-bottom:22px">
+    Click once anywhere on this page, then scan a member card.
+    Do not click into any box first.
+  </div>
+
+  <div id="stage">
+    <div id="verdict">Waiting for a scan</div>
+    <div class="sub" id="hint">Keystrokes are captured globally — no focused field needed</div>
+  </div>
+
+  <div class="grid g4" style="margin-top:16px">
+    <div class="box kpi"><div class="k">CHARACTERS</div><div class="v" id="mLen">—</div></div>
+    <div class="box kpi"><div class="k">TOTAL TIME</div><div class="v" id="mTot">—</div></div>
+    <div class="box kpi"><div class="k">AVG GAP</div><div class="v" id="mAvg">—</div></div>
+    <div class="box kpi"><div class="k">MAX GAP</div><div class="v" id="mMax">—</div></div>
+  </div>
+
+  <h2>Raw payload</h2>
+  <div id="raw">—</div>
+  <div id="chars"></div>
+
+  <h2>Session log</h2>
+  <div class="box pad0">
+    <table><thead><tr><th>TIME</th><th>SOURCE</th><th>PAYLOAD</th><th>MAX GAP</th></tr></thead>
+    <tbody id="log"></tbody></table>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button onclick="document.getElementById('log').innerHTML=''">Clear log</button>
+    <a class="btn" href="/reception">Back to reception</a>
+  </div>
+
+  <h2>Reading this</h2>
+  <div class="box" style="color:var(--mute);line-height:1.8;font-size:13.5px">
+    <b style="color:var(--ink)">Max gap under 40ms</b> with a clean payload means the scanner is
+    in keyboard mode and working. Set <code>GAP_MS</code> in
+    <code>static/reception.html</code> to roughly three times the max gap you see here.<br><br>
+    <b style="color:var(--ink)">Max gap above 100ms</b> means the scanner emits slowly. Raise
+    <code>GAP_MS</code>, or the receptionist typing will be mistaken for scans.<br><br>
+    <b style="color:var(--bad)">Red characters</b> below the payload are outside A–Z and 2–7.
+    If you see them the keyboard layout is remapping the scanner — switch Windows to English
+    and scan again to confirm.<br><br>
+    <b style="color:var(--ink)">Nothing appears at all:</b> the scanner is in serial mode.
+    Scan the USB-KBW barcode in its manual to switch it to keyboard mode.
+  </div>
+</div>
+
+<script>
+(function(){
+  const SAFE = /^[A-Za-z2-7]$/;
+  const $ = id => document.getElementById(id);
+  const stage=$('stage'), verdict=$('verdict'), hint=$('hint'),
+        raw=$('raw'), chars=$('chars'), log=$('log');
+
+  let buf=[], times=[], last=0, timer=null;
+  const reset = () => { buf=[]; times=[]; };
+
+  function finish(){
+    if(!buf.length) return;
+    const text = buf.join('');
+    const gaps = [];
+    for(let i=1;i<times.length;i++) gaps.push(times[i]-times[i-1]);
+    const total = times.length>1 ? times[times.length-1]-times[0] : 0;
+    const max = gaps.length ? Math.max(...gaps) : 0;
+    const avg = gaps.length ? gaps.reduce((a,b)=>a+b,0)/gaps.length : 0;
+    const isScan = text.length>=8 && max<80;
+
+    stage.className = isScan ? 'hit' : 'miss';
+    verdict.textContent = isScan ? 'Scan captured' : 'Looks like typing';
+    verdict.style.color = isScan ? 'var(--ok)' : 'var(--warn)';
+    hint.textContent = isScan
+      ? 'Timing is consistent with a hardware scanner'
+      : 'Too slow or too short — if that was a real scan, set GAP_MS above ' + Math.round(max) + 'ms';
+
+    $('mLen').textContent = text.length;
+    $('mTot').textContent = Math.round(total) + 'ms';
+    $('mAvg').textContent = avg.toFixed(1) + 'ms';
+    $('mMax').textContent = Math.round(max) + 'ms';
+
+    raw.textContent = text;
+    chars.innerHTML = text.split('').map(c =>
+      SAFE.test(c) ? c : '<span class="flag">[' + c.charCodeAt(0) + ']</span>').join(' ');
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="num mute">' + new Date().toLocaleTimeString() + '</td>' +
+      '<td><span class="pill ' + (isScan?'ok':'warn') + '">' + (isScan?'SCANNER':'TYPED') + '</span></td>' +
+      '<td class="num" style="word-break:break-all;max-width:300px">' +
+        text.replace(/[<>&]/g,'') + '</td>' +
+      '<td class="num">' + Math.round(max) + 'ms</td>';
+    log.prepend(tr);
+    reset();
+  }
+
+  window.addEventListener('keydown', e => {
+    if(e.key === 'Tab') return;
+    const now = performance.now();
+    if(now - last > 500) reset();
+    last = now;
+    if(e.key === 'Enter'){ clearTimeout(timer); finish(); e.preventDefault(); return; }
+    if(e.key.length === 1){
+      buf.push(e.key); times.push(now);
+      clearTimeout(timer); timer = setTimeout(finish, 600);
+    }
+  });
+})();
+</script>
+</body>
+</html>
