@@ -18,6 +18,11 @@ from datetime import date, datetime, timedelta, time as _t
 import db
 import tokens
 
+# Only plans of this size or larger may be frozen. Short packs are meant to be
+# used inside their window; freezing a 4-session pack for two months makes the
+# expiry date meaningless. Change the number here if the policy changes.
+FREEZE_MIN_SESSIONS = 12
+
 
 # ---------------------------------------------------------------- helpers
 def _log(conn, client_id, credential_id, session_id, decision, reason,
@@ -62,8 +67,15 @@ def plan_state(conn, sub_id: int) -> dict:
         "  FROM bookings WHERE subscription_id=?", (sub_id,)).fetchone()
     present, absent = c["present"] or 0, c["absent"] or 0
     used = present + absent
+    klass = conn.execute("SELECT name, colour FROM classes WHERE id=?",
+                         (sub["class_id"],)).fetchone() if sub["class_id"] else None
+    allowed, why = can_freeze(sub)
     return {
         "id": sub["id"], "plan": sub["plan"],
+        "class_id": sub["class_id"],
+        "class_name": klass["name"] if klass else None,
+        "class_colour": klass["colour"] if klass else None,
+        "can_freeze": allowed, "freeze_blocked_because": why,
         "sessions_total": sub["sessions_total"],
         "assigned": c["assigned"] or 0,
         "present": present, "absent": absent, "used": used,
@@ -80,23 +92,47 @@ def plan_state(conn, sub_id: int) -> dict:
 
 def active_plan(conn, client_id: int, class_id: int = None):
     """
-    The plan a scan should be read against.
+    The client's live plan, for a class if one is given.
 
-    A client taking two classes holds two cards and two plans, so "their
-    plan" is only answerable once you know which card was presented. Without
-    that -- a member-number lookup, or a card issued before classes were
-    split -- the longest-running plan is still the best guess.
+    Asking for a class returns that class's plan or nothing at all — never
+    another class's. Falling back would be worse than answering "no plan":
+    it would let a Ballet card spend the flexibility balance, which is the
+    exact confusion one card per class exists to prevent.
+
+    Asking without a class is only meaningful for someone taking a single
+    class. It returns the soonest to expire, which is the one needing
+    attention.
     """
-    if class_id is not None:
-        sub = conn.execute(
-            "SELECT * FROM subscriptions WHERE client_id=? AND active=1"
-            "   AND class_id=? ORDER BY expires_on DESC LIMIT 1",
-            (client_id, class_id)).fetchone()
-        if sub:
-            return sub
+    if class_id:
+        return conn.execute(
+            "SELECT * FROM subscriptions WHERE client_id=? AND class_id=? AND active=1"
+            " ORDER BY expires_on DESC LIMIT 1", (client_id, class_id)).fetchone()
     return conn.execute(
         "SELECT * FROM subscriptions WHERE client_id=? AND active=1"
-        " ORDER BY expires_on DESC LIMIT 1", (client_id,)).fetchone()
+        " ORDER BY expires_on ASC LIMIT 1", (client_id,)).fetchone()
+
+
+def active_plans(conn, client_id: int):
+    """Every live plan, one per class."""
+    return conn.execute(
+        "SELECT s.*, c.name AS class_name, c.colour FROM subscriptions s"
+        "  LEFT JOIN classes c ON c.id = s.class_id"
+        " WHERE s.client_id=? AND s.active=1 ORDER BY c.name", (client_id,)).fetchall()
+
+
+def can_freeze(sub) -> tuple:
+    """
+    (allowed, reason). Kept here so the API and the UI cannot disagree about
+    it — the button is greyed out for the same reason the endpoint refuses.
+    """
+    if sub is None:
+        return False, "no active plan"
+    if sub["sessions_total"] < FREEZE_MIN_SESSIONS:
+        return False, (f"only plans of {FREEZE_MIN_SESSIONS} sessions or more can be "
+                       f"frozen — this one has {sub['sessions_total']}")
+    if sub["frozen_on"]:
+        return False, "already frozen"
+    return True, ""
 
 
 # ---------------------------------------------------------------- auto-absent
@@ -194,6 +230,8 @@ def verify(conn, raw_token: str) -> dict:
     if client is None or not client["active"]:
         return _deny("Client is not active")
 
+    # The card names a class, so the plan is that class's plan. This is what
+    # stops a Ballet card drawing on a Flexibility balance.
     sub = active_plan(conn, client["id"], cred["class_id"])
     base = {
         "client_id": client["id"], "credential_id": cred["id"],
@@ -201,6 +239,11 @@ def verify(conn, raw_token: str) -> dict:
         "card_class": cred["class_name"], "card_colour": cred["colour"],
         **_client_payload(conn, client, sub),
     }
+    if sub is None and cred["class_id"]:
+        _log(conn, client["id"], cred["id"], None, "deny", "no plan for that class")
+        return _deny(f"No {cred['class_name']} plan",
+                     detail="this card is for a class they are not enrolled in",
+                     **base)
     return _decide(conn, client, cred, base, db.now())
 
 
@@ -548,8 +591,9 @@ def freeze_plan(conn, sub_id: int, until: str = None, reason: str = None,
         return {"ok": False, "error": "no such plan"}
     if not sub["active"]:
         return {"ok": False, "error": "this plan is not active"}
-    if sub["frozen_on"]:
-        return {"ok": False, "error": "this plan is already frozen"}
+    allowed, why = can_freeze(sub)
+    if not allowed:
+        return {"ok": False, "error": why}
 
     start = from_date or date.today().isoformat()
     if until and until <= start:
