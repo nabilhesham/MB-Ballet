@@ -51,10 +51,19 @@ def port_in_use(host: str, port: int) -> bool:
 
 
 def is_our_server(host: str, port: int) -> bool:
-    """Distinguish our own instance from some unrelated program on the port."""
+    """
+    Distinguish our own instance from some unrelated program on the port.
+
+    Probes /reception because that is the one route guaranteed to exist and
+    to be what main() actually opens the browser to. This used to probe
+    /login, a route that belonged to the authentication system removed from
+    this app — the request 404'd, the check always returned False, and a
+    second launch while already running silently started a second instance
+    on the next free port instead of reopening the browser.
+    """
     try:
         import urllib.request
-        with urllib.request.urlopen(f"http://{host}:{port}/login", timeout=2) as r:
+        with urllib.request.urlopen(f"http://{host}:{port}/reception", timeout=2) as r:
             return "MB Ballet" in r.read(4000).decode("utf-8", "ignore")
     except Exception:
         return False

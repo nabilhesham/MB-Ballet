@@ -377,10 +377,14 @@ Consequences to keep in mind:
 Anything with history is **archived** (`active=0`), never deleted. Permanent
 deletion is a separate `?hard=true` call, and the server refuses it when
 attendance records exist. Losing the record of who attended what is worse than
-a cluttered list. Archived records are restorable from the Admin → Archive tab.
+a cluttered list.
 
-Manual balance adjustment exists (`PATCH /api/admin/subscriptions/{id}`) and
-requires a reason, because the alternative is staff inventing workarounds.
+Archiving is currently **one-way**: there is no restore endpoint and no
+"Admin → Archive" screen. An `admin_routes.py` once existed with a restore
+route and a manual-balance-adjustment endpoint, but it was never mounted into
+`server.py` — dead code from the pre-authentication version of the app,
+removed rather than wired in (see Known gaps). If either is wanted, build it
+fresh against the current model rather than reviving that file.
 
 ## Design decisions — do not undo these without asking
 
@@ -515,8 +519,11 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 ## Known gaps / next up
 
-- [ ] Rate limiting on `/api/auth/login`. Currently unlimited attempts; fine on
-      a LAN-less laptop, not fine if this is ever exposed.
+- [ ] No archive-restore UI, and no manual balance adjustment endpoint. An
+      `admin_routes.py` once had both, but it was never mounted into
+      `server.py` — dead, unreachable code from the pre-authentication
+      version of the app, deleted rather than wired in. Building either
+      one for real is separate feature work against the current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
       flexibility alone. The dashboard says how many plans carry no price
