@@ -48,10 +48,128 @@ function toast(msg, kind='ok'){
   toastTimer = setTimeout(()=>t.className='toast', 2800);
 }
 
+/* ---------------------------------------------------------- data tables
+   Every table in the app is plain server-rendered markup. This upgrades it in
+   place: click a header to sort, type to filter, and long tables scroll inside
+   themselves with the header staying put.
+
+   Deliberately not a library. This folder is copied to a reception laptop that
+   may have no internet and nothing installed, so a CDN script tag would mean
+   the admin screens silently lose sorting and searching exactly where they are
+   needed most. It is also the reason the rows keep their own markup — the
+   onclick handlers, pills and hide-sm columns all still work, because nothing
+   here rewrites a cell.
+
+   A table opts into the search box with data-search="placeholder text".
+   Everything else gets sorting and the sticky header for free. */
+
+const DT_SCROLL_ROWS = 12;        // taller than this and the body scrolls
+
+function enhanceTables(root){
+  root.querySelectorAll('table:not([data-dt])').forEach(table => {
+    table.dataset.dt = '1';
+    const body = table.tBodies[0];
+    if(!body || !body.rows.length) return;
+
+    // Wrap: .dt > [.dt-bar] + .dt-scroll > table
+    const wrap = document.createElement('div');
+    wrap.className = 'dt';
+    table.parentNode.insertBefore(wrap, table);
+    const scroll = document.createElement('div');
+    scroll.className = 'dt-scroll';
+    if(body.rows.length > DT_SCROLL_ROWS) scroll.classList.add('capped');
+    wrap.appendChild(scroll);
+    scroll.appendChild(table);
+    if(wrap.parentNode.classList.contains('pad0'))
+      wrap.parentNode.classList.add('dt-host');
+
+    const rows = () => Array.from(body.rows).filter(r => !r.dataset.dtNote);
+    dtSortable(table, body);
+    if(table.dataset.search !== undefined) dtSearchable(table, body, wrap, rows);
+  });
+}
+
+/* The value a cell sorts on. A cell may carry data-sort to override what is
+   printed — the WHEN columns use it so "Wed, Sep 2" orders by its timestamp
+   and not by the letter W. */
+function dtKey(row, i){
+  const cell = row.cells[i];
+  if(!cell) return '';
+  const raw = cell.dataset.sort ?? cell.textContent.trim();
+  const n = Number(String(raw).replace(/[,\s]/g, ''));
+  return (raw !== '' && !Number.isNaN(n)) ? n : String(raw).toLowerCase();
+}
+
+function dtSortable(table, body){
+  const head = table.tHead && table.tHead.rows[0];
+  if(!head) return;
+
+  Array.from(head.cells).forEach((th, i) => {
+    // An empty header is the avatar column; data-nosort marks action columns.
+    if(!th.textContent.trim() || th.dataset.nosort !== undefined) return;
+    th.dataset.sortable = '';
+    th.insertAdjacentHTML('beforeend', '<i class="dt-caret"></i>');
+    th.addEventListener('click', () => {
+      const dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+      Array.from(head.cells).forEach(o => delete o.dataset.dir);
+      th.dataset.dir = dir;
+      const sign = dir === 'asc' ? 1 : -1;
+      // The "nothing matches" row is furniture, not data: it must not be
+      // sorted into the middle of the table, and it stays at the bottom.
+      const note = body.querySelector('tr[data-dt-note]');
+      Array.from(body.rows)
+        .filter(r => !r.dataset.dtNote)
+        .sort((a, b) => {
+          const x = dtKey(a, i), y = dtKey(b, i);
+          return x < y ? -sign : x > y ? sign : 0;
+        })
+        .forEach(r => body.appendChild(r));
+      if(note) body.appendChild(note);
+    });
+  });
+}
+
+function dtSearchable(table, body, wrap, rows){
+  const bar = document.createElement('div');
+  bar.className = 'dt-bar';
+  bar.innerHTML =
+    `<input class="search dt-find" type="search" placeholder="${
+      esc(table.dataset.search || 'Search…')}">` +
+    `<span class="dt-count"></span>`;
+  wrap.insertBefore(bar, wrap.firstChild);
+
+  const note = document.createElement('tr');
+  note.dataset.dtNote = '1';
+  note.hidden = true;
+  note.innerHTML = `<td colspan="${table.tHead ? table.tHead.rows[0].cells.length : 1}"
+                        class="dt-none">Nothing matches that search.</td>`;
+  body.appendChild(note);
+
+  const count = bar.querySelector('.dt-count');
+  const find = bar.querySelector('.dt-find');
+  const all = rows();
+
+  const apply = () => {
+    const q = find.value.trim().toLowerCase();
+    let shown = 0;
+    all.forEach(r => {
+      const hit = !q || r.textContent.toLowerCase().includes(q);
+      r.hidden = !hit;
+      if(hit) shown++;
+    });
+    note.hidden = shown > 0;
+    count.textContent = q ? `${shown} of ${all.length}`
+                          : `${all.length} row${all.length === 1 ? '' : 's'}`;
+  };
+  find.addEventListener('input', apply);
+  apply();
+}
+
 function openModal(html, wide=false){
   modal.innerHTML = html;
   modal.className = 'modal' + (wide ? ' wide' : '');
   veil.classList.add('on');
+  enhanceTables(modal);
   const first = modal.querySelector('input,select,textarea');
   if(first) first.focus();
 }
@@ -114,7 +232,7 @@ async function render(){
 
   const fn = routes[path] || routes['/'];
   view.innerHTML = '<div class="empty">Loading…</div>';
-  try { await fn(param); }
+  try { await fn(param); enhanceTables(view); }
   catch(e){ view.innerHTML = `<div class="empty">Could not load: ${esc(e.message)}</div>`; }
 }
 window.addEventListener('hashchange', render);
@@ -146,7 +264,7 @@ route('/', async () => {
       : (live ? '<span class="pill ok">now</span>' : '');
     const pct = x.booked ? Math.round(100*x.attended/x.booked) : 0;
     return `<tr class="click" onclick="location.hash='#/session/${x.id}'">
-      <td class="num mute">${fmtTime(x.starts_at)}</td>
+      <td class="num mute" data-sort="${x.starts_at}">${fmtTime(x.starts_at)}</td>
       <td><span class="dot" style="background:${esc(x.colour)}"></span>${esc(x.class_name)} ${state}</td>
       <td class="mute hide-sm">${esc(x.instructor_name||'—')}</td>
       <td class="num">${x.attended}/${x.booked}
@@ -217,7 +335,7 @@ route('/', async () => {
           ${d.recent.length ? `<table>
             <thead><tr><th>TIME</th><th>CLIENT</th><th>RESULT</th></tr></thead>
             <tbody>${d.recent.slice(0,12).map(r=>`<tr>
-              <td class="num mute">${fmtTime(r.scanned_at)}</td>
+              <td class="num mute" data-sort="${r.scanned_at}">${fmtTime(r.scanned_at)}</td>
               <td>${esc(r.name_en||'—')}<div class="sub">${esc(r.class_name||r.reason||'')}</div></td>
               <td>${r.confirmed_at?'<span class="pill ok">in</span>'
                    :(r.decision==='allow'?'<span class="pill grey">not confirmed</span>'
@@ -545,11 +663,11 @@ route('/class', async (id) => {
     <h2>Sessions</h2>
     <div class="sub" style="margin-bottom:12px">Each session has its own instructor — set it when scheduling, or from the session page.</div>
     <div class="box pad0">
-      ${c.sessions.length?`<table>
+      ${c.sessions.length?`<table data-search="Search sessions…">
         <thead><tr><th>WHEN</th><th>INSTRUCTOR</th><th class="hide-sm">LENGTH</th>
           <th>ATTENDED</th><th>STATUS</th><th></th></tr></thead>
         <tbody>${c.sessions.map(x=>`<tr class="click" onclick="location.hash='#/session/${x.id}'">
-          <td>${fmtFull(x.starts_at)}</td>
+          <td data-sort="${x.starts_at}">${fmtFull(x.starts_at)}</td>
           <td class="mute">${esc(x.instructor_name||'— none —')}</td>
           <td class="mute hide-sm">${hrs(x.duration_hours)}</td>
           <td class="num">${x.attended}/${x.booked}</td>
@@ -562,7 +680,7 @@ route('/class', async (id) => {
     <h2>Students (${c.students.length})</h2>
     <div class="sub" style="margin-bottom:12px">Anyone with a booking in this class. Membership follows the bookings, so there is no separate enrolment list.</div>
     <div class="box pad0">
-      ${c.students.length?`<table>
+      ${c.students.length?`<table data-search="Search students…">
         <thead><tr><th></th><th>NAME</th><th class="hide-sm">MOBILE</th><th>SLOTS</th><th>ATTENDED</th></tr></thead>
         <tbody>${c.students.map(m=>`<tr class="click" onclick="location.hash='#/client/${m.id}'">
           <td style="width:54px">${avatar(m)}</td>
@@ -630,11 +748,11 @@ route('/sessions', async () => {
   const upcoming = list.filter(s=>s.starts_at >= now - 3600);
   const past = list.filter(s=>s.starts_at < now - 3600).reverse();
 
-  const tbl = arr => `<table>
+  const tbl = arr => `<table data-search="Search by class, instructor or status…">
     <thead><tr><th>WHEN</th><th>CLASS</th><th>INSTRUCTOR</th><th class="hide-sm">LENGTH</th>
       <th>ATTENDED</th><th>STATUS</th></tr></thead>
     <tbody>${arr.map(s=>`<tr class="click" onclick="location.hash='#/session/${s.id}'">
-      <td>${fmtFull(s.starts_at)}</td>
+      <td data-sort="${s.starts_at}">${fmtFull(s.starts_at)}</td>
       <td><span class="dot" style="background:${esc(s.colour)}"></span>${esc(s.class_name)}</td>
       <td class="mute">${esc(s.instructor_name||'— none —')}</td>
       <td class="mute hide-sm">${hrs(s.duration_hours)}</td>
@@ -707,7 +825,7 @@ route('/session', async (id) => {
     </div>
 
     <div class="box pad0">
-      ${s.roster.length?`<table>
+      ${s.roster.length?`<table data-search="Search students…">
         <thead><tr><th></th><th>NAME</th><th class="hide-sm">MOBILE</th><th>STATUS</th>
           <th class="hide-sm">CHECKED IN</th><th>MARK AS</th><th></th></tr></thead>
         <tbody>${s.roster.map(m=>`<tr>
@@ -749,17 +867,17 @@ window.bookIntoSession = async (sid) => {
   openModal(`<h3>Add students</h3>
     <div class="mh">Uses one slot from each selected student's plan.</div>
     
-    <!-- Container for selected client pills -->
-    <div id="selected_pills" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; min-height: 32px; padding: 4px; border: 1px dashed #ccc; border-radius: 4px;">
-      <span style="color: #888; font-size: 13px; align-self: center;" id="pills_placeholder">No students selected yet...</span>
+    <div id="selected_pills" class="chipbox">
+      <span class="none">No students selected yet</span>
     </div>
 
     <label>SEARCH CLIENT</label>
-    <input type="text" id="bk_search" placeholder="Type name or phone to search…" oninput="filterclientOptions()" style="margin-bottom: 8px;" />
-    
-    <div id="bk_dropdown" style="max-height: 160px; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px;"></div>
-    
-    <div class="acts" style="margin-top: 15px;">
+    <input type="text" id="bk_search" placeholder="Type name or phone to search…"
+           oninput="filterclientOptions()" style="margin-bottom:8px">
+
+    <div id="bk_dropdown" class="picklist"></div>
+
+    <div class="acts">
       <button onclick="closeModal()">Cancel</button>
       <button class="pri" id="bk_save_btn" onclick="saveBookIn(${sid})">Add Selected</button>
     </div>`);
@@ -783,15 +901,15 @@ window.filterclientOptions = () => {
   });
 
   if (!filtered.length) {
-    container.innerHTML = `<div style="padding: 8px; color: #888; text-align: center;">No matching clients available</div>`;
+    container.innerHTML = '<div class="dt-none">No matching clients available</div>';
     return;
   }
 
   container.innerHTML = filtered.map(c => `
-    <div onclick="selectClient(${c.id})" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='transparent'">
-      <strong>${esc(c.name_en)}</strong> ${c.phone ? '— ' + esc(c.phone) : ''} <span style="color: #666; font-size: 12px;">(${c.remaining ?? 'no plan'} left)</span>
-    </div>
-  `).join('');
+    <div class="pickrow" onclick="selectClient(${c.id})">
+      <span style="flex:1"><b>${esc(c.name_en)}</b>${c.phone ? ' — ' + esc(c.phone) : ''}</span>
+      <span class="pk-meta">${c.remaining ?? 'no plan'} left</span>
+    </div>`).join('');
 };
 
 window.selectClient = (id) => {
@@ -823,16 +941,13 @@ window.renderPills = () => {
   if (!container) return;
 
   if (window._selectedClients.size === 0) {
-    container.innerHTML = `<span style="color: #888; font-size: 13px; align-self: center;" id="pills_placeholder">No students selected yet...</span>`;
+    container.innerHTML = '<span class="none">No students selected yet</span>';
     return;
   }
 
   container.innerHTML = Array.from(window._selectedClients.values()).map(c => `
-    <span style="background: #e0f2fe; color: #0369a1; padding: 4px 8px; border-radius: 12px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
-      ${esc(c.name_en)}
-      <b onclick="removeClient(${c.id})" style="cursor: pointer; color: #0284c7; font-size: 14px;">&times;</b>
-    </span>
-  `).join('');
+    <span class="chip">${esc(c.name_en)}
+      <b onclick="removeClient(${c.id})" title="Remove">&times;</b></span>`).join('');
 };
 
 window.saveBookIn = async (sid) => {
@@ -954,12 +1069,9 @@ window.saveSessionEdit = async (sid) => {
   const ins = numval('e_ins');
   if(ins !== null) body.instructor_id = ins;
   try{
-    console.log(new Date(when))
-    console.log(new Date())
-    if (new Date(when) > new Date()) {
-      body.status = 'scheduled';
-    }
-    console.log(body)
+    // Moving a session into the future makes it scheduled again, so a date
+    // corrected after the fact stops being reported as already completed.
+    if (new Date(when) > new Date()) body.status = 'scheduled';
     await api('/sessions/'+sid, {method:'PUT', body});
     if(ins === null) await api('/sessions/'+sid, {method:'PUT', body:{instructor_id:null}});
     closeModal(); toast('Session updated'); render();
@@ -1083,10 +1195,10 @@ route('/instructor', async (id) => {
                              .sort((a,b) => a.starts_at - b.starts_at);
   const past = i.sessions.filter(x => x.starts_at < now);
 
-  const table = arr => `<div class="box pad0"><table>
+  const table = arr => `<div class="box pad0"><table data-search="Search sessions…">
     <thead><tr><th>WHEN</th><th>CLASS</th><th class="hide-sm">LENGTH</th><th>ATTENDED</th><th>STATUS</th></tr></thead>
     <tbody>${arr.map(x=>`<tr class="click" onclick="location.hash='#/session/${x.id}'">
-      <td>${fmtFull(x.starts_at)}</td>
+      <td data-sort="${x.starts_at}">${fmtFull(x.starts_at)}</td>
       <td><span class="dot" style="background:${esc(x.colour)}"></span>${esc(x.class_name)}</td>
       <td class="mute hide-sm">${hrs(x.duration_hours)}</td>
       <td class="num">${x.attended}</td>
@@ -1358,7 +1470,7 @@ route('/client', async (id) => {
           ${c.upcoming.length?`<table>
             <thead><tr><th>WHEN</th><th>CLASS</th><th></th></tr></thead>
             <tbody>${c.upcoming.map(u=>`<tr>
-              <td>${fmtFull(u.starts_at)}<div class="sub">${esc(u.instructor_name||'no instructor')}</div></td>
+              <td data-sort="${u.starts_at}">${fmtFull(u.starts_at)}<div class="sub">${esc(u.instructor_name||'no instructor')}</div></td>
               <td><span class="dot" style="background:${esc(u.colour)}"></span>${esc(u.class_name)}</td>
               <td class="right"><div class="row tight" style="justify-content:flex-end">
                 <button class="sm" onclick="moveBooking(${c.id},${u.session_id},${u.class_id})">Move</button>
@@ -1371,11 +1483,11 @@ route('/client', async (id) => {
         <h2>Attendance history</h2>
         <div class="sub" style="margin-bottom:10px">Click a row to correct whether they attended.</div>
         <div class="box pad0">
-          ${c.history.length?`<table>
+          ${c.history.length?`<table data-search="Search attendance…">
             <thead><tr><th>DATE</th><th>CLASS</th><th>RESULT</th></tr></thead>
             <tbody>${c.history.map(h=>`<tr class="click"
               onclick="editAttendance(${c.id},${h.session_id},'${esc(h.class_name)}','${h.status}',${h.starts_at})">
-              <td class="num mute">${fmtDate(h.starts_at)} ${fmtTime(h.starts_at)}</td>
+              <td class="num mute" data-sort="${h.starts_at}">${fmtDate(h.starts_at)} ${fmtTime(h.starts_at)}</td>
               <td><span class="dot" style="background:${esc(h.colour)}"></span>${esc(h.class_name)}</td>
               <td>${statusPill(h.status)}</td>
             </tr>`).join('')}</tbody></table>`
@@ -1648,7 +1760,7 @@ window.planSessions = async (cid, pid, name) => {
     <div class="box pad0" style="max-height:50vh;overflow-y:auto">
       ${list.length?`<table><thead><tr><th>WHEN</th><th>CLASS</th><th>RESULT</th></tr></thead>
         <tbody>${list.map(x=>`<tr>
-          <td class="num mute">${fmtDate(x.starts_at)} ${fmtTime(x.starts_at)}</td>
+          <td class="num mute" data-sort="${x.starts_at}">${fmtDate(x.starts_at)} ${fmtTime(x.starts_at)}</td>
           <td><span class="dot" style="background:${esc(x.colour)}"></span>${esc(x.class_name)}</td>
           <td>${statusPill(x.status)}</td>
         </tr>`).join('')}</tbody></table>`
@@ -1713,7 +1825,7 @@ route('/cards', async () => {
       <div class="sub">Clients who need a card, a renewal, or have sessions still unassigned</div></div></div>
 
     <div class="box pad0">
-      ${list.length?`<table>
+      ${list.length?`<table data-search="Search clients…">
         <thead><tr><th></th><th>NAME</th><th>MOBILE</th><th>ISSUE</th><th>LEFT</th><th></th></tr></thead>
         <tbody>${list.map(c=>{
           let issue = '<span class="pill grey">—</span>';
