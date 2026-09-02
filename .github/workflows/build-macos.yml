@@ -26,7 +26,7 @@ jobs:
     # there's no way to run arm64 code on an Intel Mac. The reception Mac's
     # exact hardware isn't known, so this is the strictly safer choice.
     # Do not bump this to macos-latest without knowing that tradeoff.
-    runs-on: macos-13
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
