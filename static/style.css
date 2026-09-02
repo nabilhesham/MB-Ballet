@@ -56,6 +56,14 @@ body{
   -webkit-font-smoothing:antialiased;
   display:grid;grid-template-columns:var(--nav-w) 1fr;
 }
+/* The React admin mounts everything inside <div id="root">. Without this,
+   #root itself becomes body's one grid item (nav and main are its
+   grandchildren, not its children) and the two-column layout above collapses
+   to a single narrow column. display:contents removes #root from the box
+   tree so nav/main sit directly in body's grid, same as when they were
+   static index.html's own direct children. No-op on reception.html and
+   scanner-test.html, which have no #root. */
+#root{display:contents}
 ::selection{background:var(--brand-soft)}
 
 /* ---------------------------------------------------------------- sidebar */
