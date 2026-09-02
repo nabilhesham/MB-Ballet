@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api';
-import { todayISO } from '../lib/format';
+import { isoDay, todayISO } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import SessionPickList from './SessionPickList';
@@ -20,10 +20,11 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
   const [name, setName] = useState('12 sessions');
   const [need, setNeed] = useState(12);
   const [start, setStart] = useState(todayISO());
-  const [endsOn, setEndsOn] = useState(() => {
-    const d = new Date(); d.setMonth(d.getMonth() + 3);
-    return d.toISOString().slice(0, 10);
-  });
+  const [endsOn, setEndsOn] = useState('');
+  // Reception can still type its own end date — a courtesy extension. Once
+  // they have, the field stops following the picks rather than overwriting
+  // what was just typed.
+  const [endsTouched, setEndsTouched] = useState(false);
   const [price, setPrice] = useState('');
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
@@ -39,6 +40,17 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
   // session the plan is not allowed to pay for, the same rule the server
   // enforces (this just never offers the mistake).
   useEffect(() => { load(classId); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
+
+  // A plan is valid through the last session it pays for, so the end date is
+  // derived from the picks rather than guessed at three months out. The
+  // server applies the same rule when this is left blank; this only shows
+  // reception the answer before they save.
+  useEffect(() => {
+    if (endsTouched) return;
+    const last = sessions.reduce(
+      (m, s) => (chosen.includes(s.id) && s.starts_at > m ? s.starts_at : m), 0);
+    setEndsOn(last ? isoDay(last) : '');
+  }, [chosen, sessions, endsTouched]);
 
   const onClassChange = e => {
     const id = Number(e.target.value);
@@ -103,7 +115,12 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       </div>
       <div className="fieldrow">
         <div><label>STARTS ON</label><input type="date" value={start} onChange={e => setStart(e.target.value)} /></div>
-        <div><label>ENDS ON</label><input type="date" value={endsOn} onChange={e => setEndsOn(e.target.value)} /></div>
+        <div>
+          <label>ENDS ON</label>
+          <input type="date" value={endsOn}
+                 onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
+          <div className="hint">Follows the last session picked — type over it to extend.</div>
+        </div>
       </div>
       <label>PRICE (EGP)</label>
       <input type="number" placeholder="optional" value={price} onChange={e => setPrice(e.target.value)} />

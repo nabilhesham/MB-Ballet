@@ -61,18 +61,21 @@ def dashboard():
         soon = (date.today() + timedelta(days=7)).isoformat()
         attention = []
         for r in conn.execute(
-                "SELECT c.id, c.name_en, c.phone, s.id AS sub_id, s.plan, s.expires_on"
+                "SELECT c.id, c.name_en, c.phone, s.id AS sub_id, s.plan"
                 "  FROM clients c JOIN subscriptions s ON s.client_id=c.id AND s.active=1"
                 " WHERE c.active=1").fetchall():
             st = access.plan_state(conn, r["sub_id"])
             if st["frozen"]:
                 continue          # deliberately paused, not a problem to chase
-            if st["remaining"] <= 2 or r["expires_on"] <= soon or st["unassigned"] > 0:
+            # plan_state owns what a plan is valid through — the stored
+            # column is only its floor.
+            expires = st["expires_on"]
+            if st["remaining"] <= 2 or expires <= soon or st["unassigned"] > 0:
                 attention.append({
                     "id": r["id"], "name_en": r["name_en"], "phone": r["phone"],
-                    "plan": r["plan"], "expires_on": r["expires_on"],
+                    "plan": r["plan"], "expires_on": expires,
                     "remaining": st["remaining"], "unassigned": st["unassigned"],
-                    "expired": r["expires_on"] < today,
+                    "expired": expires < today,
                 })
         attention.sort(key=lambda x: (x["remaining"], x["expires_on"]))
 

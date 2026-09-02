@@ -377,6 +377,23 @@ still-`booked` slot absent once its session has ended, and runs on startup,
 hourly, and before every read that touches attendance. Nothing on screen is
 stale.
 
+**A plan is valid through the last session it pays for.** `access.plan_state()`
+derives `expires_on` as the later of the stored column and
+`access.last_session_date()` (the max `starts_at` among the plan's bookings),
+so assigning a later session — selling it that way, or via "Assign remaining
+sessions" / "Add a session" after the fact — extends the plan automatically;
+nothing has to be edited by hand. The stored column is the floor: what
+reception typed at sale time (`PlanPicker` auto-fills it from the sessions
+picked, but it stays overridable — a courtesy extension), or what a freeze
+pushed it to while the released slots had no dates to derive from. This is
+why `freeze_plan()`/`unfreeze_plan()` need no special-casing: freezing
+deletes the future bookings that would otherwise inflate the derived date,
+and unfreezing's existing day-shift is exactly the floor `plan_state()` needs
+until the released slots are reassigned. The printed member card shows
+whatever `plan_state()` returned at issue time — it does **not** update
+itself if the plan's validity grows afterward; reissuing is what refreshes it,
+same as it already was for a plan extended by an unfreeze.
+
 ## Seeding from the academy's spreadsheets
 
 Reception has run this academy out of Excel for years and will keep doing so.
@@ -554,7 +571,7 @@ the one screen that has to work.
 
 ### What a scan shows
 
-`access.client_profile()` supplies the context, and it is deliberately
+`access._client_payload()` supplies the context, and it is deliberately
 generous — the receptionist has a few seconds with a person in front of her,
 and that is the only moment "expired last week" or "three absences" is worth
 anything. Looking it up afterwards never happens.
@@ -609,8 +626,8 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 - Business rules in `access.py`, never in `server.py` or the frontend.
 - Deny messages are written for a receptionist to read aloud in plain language
-  ("Subscription expired 6 days ago"), not error codes. Technical detail goes in
-  `detail`, which the UI does not show.
+  ("No session booked today for Flexibility"), not error codes. Technical
+  detail goes in `detail`, which the UI does not show.
 - **Never use `dangerouslySetInnerHTML`.** JSX escapes interpolated text by
   default — that is what replaced the old `esc()` helper. There is no
   legitimate reason to render raw HTML anywhere in this app.

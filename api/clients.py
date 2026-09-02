@@ -34,7 +34,9 @@ class PlanIn(BaseModel):
     sessions_total: int
     price: Optional[float] = None
     starts_on: Optional[str] = None
-    expires_on: str
+    # Blank means "through the last session chosen" — the rule, rather than
+    # a date someone typed. A value here is a deliberate override.
+    expires_on: Optional[str] = None
     session_ids: list[int] = []
 
 
@@ -218,14 +220,18 @@ def add_plan(cid: int, body: PlanIn):
     """
     Sell a plan for one class.
 
-    Three rules are enforced here rather than trusted to the UI:
+    Four rules are enforced here rather than trusted to the UI:
       - every slot is assigned to a real session up front, because a plan with
         unassigned slots is a promise nobody has written down;
       - every one of those sessions belongs to the plan's class, so a Ballet
         plan cannot quietly pay for a Flexibility session;
       - only the previous plan *for this class* is replaced, so a client taking
-        two classes keeps the other one running.
+        two classes keeps the other one running;
+      - a plan runs through the last session it pays for, unless reception
+        types an end date of its own.
     """
+    if body.sessions_total < 1:
+        raise HTTPException(400, "a plan needs at least one session")
     if len(body.session_ids) != body.sessions_total:
         raise HTTPException(
             400, f"assign all {body.sessions_total} sessions "
@@ -256,11 +262,15 @@ def add_plan(cid: int, body: PlanIn):
         conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
                      (cid, body.class_id))
         starts = body.starts_on or date.today().isoformat()
+        # Validity follows the sessions the plan actually pays for: it runs
+        # through the last of them. Reception can still type a date instead
+        # — a courtesy extension — and that's what expires_on carries when set.
+        expires = body.expires_on or access.last_of_sessions(conn, body.session_ids) or starts
         cur = conn.execute(
             "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
             " starts_on, expires_on, created_at) VALUES (?,?,?,?,?,?,?,?)",
             (cid, body.class_id, body.plan, body.sessions_total, body.price, starts,
-             body.expires_on, db.now()))
+             expires, db.now()))
         sub_id = cur.lastrowid
         for sid in body.session_ids:
             s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()

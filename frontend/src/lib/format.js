@@ -20,6 +20,13 @@ export const fmtDay = ts =>
 
 export const todayISO = () => new Date().toISOString().slice(0, 10);
 
+/* A timestamp as its local calendar day, "YYYY-MM-DD". Not toISOString():
+   that is UTC, and an evening class in Alexandria can land on the next day. */
+export const isoDay = ts => {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 export const initials = n =>
   (n || '?').split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
 

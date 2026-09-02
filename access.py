@@ -52,6 +52,43 @@ def session_end(row) -> int:
 
 
 # ---------------------------------------------------------------- plans
+def _iso_day(ts: int) -> str:
+    """The local calendar day a unix timestamp falls on."""
+    return date.fromtimestamp(ts).isoformat()
+
+
+def last_session_date(conn, sub_id: int):
+    """
+    The date of the last session this plan is paying for, or None if it is
+    paying for nothing yet.
+
+    A plan cannot have run out before the last session it funds, so this is
+    what its validity is read against. Every booking counts regardless of
+    status: present and absent both spent a slot the plan paid for, a
+    booking still 'booked' is a date the client has been promised, and a
+    session marked cancelled still keeps its bookings (cancel_session()
+    resets them to 'booked' rather than releasing them) — the slot is still
+    owed, so it must still count.
+    """
+    t = conn.execute(
+        "SELECT MAX(s.starts_at) t FROM bookings b JOIN sessions s ON s.id=b.session_id"
+        " WHERE b.subscription_id=?", (sub_id,)).fetchone()["t"]
+    return _iso_day(t) if t is not None else None
+
+
+def last_of_sessions(conn, session_ids):
+    """
+    Same answer for sessions that have no bookings yet — what a plan about to
+    be sold against them will be valid through.
+    """
+    if not session_ids:
+        return None
+    marks = ",".join("?" * len(session_ids))
+    t = conn.execute(f"SELECT MAX(starts_at) t FROM sessions WHERE id IN ({marks})",
+                     tuple(session_ids)).fetchone()["t"]
+    return _iso_day(t) if t is not None else None
+
+
 def plan_state(conn, sub_id: int) -> dict:
     """
     Where a plan stands. Used slots are counted from the bookings rather than
@@ -70,6 +107,15 @@ def plan_state(conn, sub_id: int) -> dict:
     klass = conn.execute("SELECT name, colour FROM classes WHERE id=?",
                          (sub["class_id"],)).fetchone() if sub["class_id"] else None
     allowed, why = can_freeze(sub)
+    # A plan is valid through the last session it is paying for. The stored
+    # date is the floor, not the answer: it is what reception typed, and what
+    # a freeze pushed out while the released slots had no dates to derive
+    # from. Assigning a later session extends the plan automatically, which
+    # is the only version of this that cannot drift out of sync.
+    expires = sub["expires_on"]
+    covers = last_session_date(conn, sub_id)
+    if covers and covers > expires:
+        expires = covers
     return {
         "id": sub["id"], "plan": sub["plan"],
         "class_id": sub["class_id"],
@@ -81,7 +127,7 @@ def plan_state(conn, sub_id: int) -> dict:
         "present": present, "absent": absent, "used": used,
         "remaining": max(0, sub["sessions_total"] - used),
         "unassigned": max(0, sub["sessions_total"] - (c["assigned"] or 0)),
-        "starts_on": sub["starts_on"], "expires_on": sub["expires_on"],
+        "starts_on": sub["starts_on"], "expires_on": expires,
         "active": sub["active"], "price": sub["price"],
         "frozen": bool(sub["frozen_on"]),
         "frozen_on": sub["frozen_on"],
