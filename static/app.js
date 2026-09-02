@@ -1349,6 +1349,12 @@ route('/client', async (id) => {
   const totalOf   = plans.reduce((n,p)=>n+p.sessions_total, 0);
   const attended  = plans.reduce((n,p)=>n+p.present, 0);
   const absent    = plans.reduce((n,p)=>n+p.absent, 0);
+  // Adding a session only makes sense for a class whose plan still has a
+  // paid slot with no date on it. A class with none left is not offered —
+  // there is nothing valid to add, only existing bookings to move or drop.
+  // A frozen plan is skipped too: freezing is what created the unassigned
+  // slot, and it stays off-limits until the plan is active again.
+  const addableClasses = (c.classes_enrolled || []).filter(k => k.unassigned > 0 && !k.frozen);
 
   view.innerHTML = `
     <div class="head"><div class="row" style="gap:16px">
@@ -1469,9 +1475,12 @@ route('/client', async (id) => {
       <div>
         <div class="row" style="justify-content:space-between;align-items:baseline;margin:32px 0 14px">
           <h2 style="margin:0">Upcoming sessions</h2>
-          <button class="sm" onclick="addClientSession(${c.id})">Add session</button>
+          ${addableClasses.length
+            ? `<button class="sm" onclick="addClientSession(${c.id})">Add session</button>`
+            : `<button class="sm" disabled title="Every plan already has all its sessions assigned — move or remove an existing one instead">Add session</button>`}
         </div>
-        <div class="sub" style="margin-bottom:10px">Click one to move it to another date of the same class.</div>
+        <div class="sub" style="margin-bottom:10px">Click one to move it to another date of the same class.${
+          addableClasses.length ? '' : ' Every plan already has all its sessions assigned, so none can be added here — move or remove an existing one instead.'}</div>
         <div class="box pad0">
           ${c.upcoming.length?`<table>
             <thead><tr><th>WHEN</th><th>CLASS</th><th></th></tr></thead>
@@ -1755,30 +1764,39 @@ window.saveTopUp = async (cid, planId) => {
    From a client's profile: book them into an upcoming session of a class they
    already hold an active plan in. This spends a slot from that plan the same
    way a scan at reception does — access.book() picks the plan for the
-   session's own class, so the right balance is charged without asking here. */
-let addPick = { cid: null, classId: null, classes: [], sessions: [], chosen: [] };
+   session's own class, so the right balance is charged without asking here.
+
+   Only a class whose plan still has an unassigned slot is offered. A plan
+   with all its sessions already assigned — booked, present or absent, it
+   makes no difference — has nothing left to add; the server would refuse it
+   too (access.book() carries the same rule), but the picker should not offer
+   a choice it already knows is wrong. */
+let addPick = { cid: null, classId: null, need: 0, classes: [], sessions: [], chosen: [] };
 
 window.addClientSession = async (cid) => {
   const client = (window._client && window._client.id === cid) ? window._client : await api('/clients/'+cid);
-  const classes = client.classes_enrolled || [];
-  if(!classes.length) return toast('Add a plan before booking a session','bad');
+  const classes = (client.classes_enrolled || []).filter(k => k.unassigned > 0 && !k.frozen);
+  if(!classes.length)
+    return toast('Every plan already has all its sessions assigned','bad');
 
-  addPick = { cid, classId: classes[0].class_id, classes, sessions: [], chosen: [] };
+  addPick = { cid, classId: classes[0].class_id, need: classes[0].unassigned,
+              classes, sessions: [], chosen: [] };
 
   openModal(`<h3>Add a session</h3>
-    <div class="mh">Only sessions of a class they hold an active plan in are offered —
-      booking one spends a slot from that plan, the same as a scan.</div>
+    <div class="mh">Only a class with an unassigned slot on its plan is offered —
+      booking one spends that slot, the same as a scan.</div>
 
     ${classes.length > 1 ? `<label>CLASS</label>
     <select id="as_class" onchange="addSessionClassChanged()">
-      ${classes.map(k=>`<option value="${k.class_id}">${esc(k.class_name)}</option>`).join('')}
+      ${classes.map(k=>`<option value="${k.class_id}">${esc(k.class_name)} — ${k.unassigned} unassigned</option>`).join('')}
     </select>` : ''}
 
     <div class="row" style="justify-content:space-between;align-items:baseline;margin-top:${classes.length>1?'14px':'0'}">
       <b style="font-size:14px">Choose the session(s)</b>
-      <span id="as_count" class="pill warn">0 chosen</span>
+      <span id="as_count" class="pill warn">0 of ${addPick.need} chosen</span>
     </div>
-    <div id="as_sessions" class="picklist" style="margin-top:8px"></div>
+    <div class="sub" style="margin:6px 0 10px" id="as_hint"></div>
+    <div id="as_sessions" class="picklist"></div>
 
     <div class="acts">
       <button onclick="closeModal()">Cancel</button>
@@ -1794,11 +1812,16 @@ async function loadAddSessions(){
     `/sessions?start=${now}&end=${now+180*86400}` +
     `&class_id=${addPick.classId}&available_for=${addPick.cid}`);
   addPick.chosen = [];
+  const hint = $('#as_hint');
+  if(hint) hint.textContent =
+    `${addPick.need} unassigned session${addPick.need===1?'':'s'} left on this plan.`;
   renderAddSessions();
 }
 
 window.addSessionClassChanged = async () => {
   addPick.classId = Number($('#as_class').value);
+  const k = addPick.classes.find(x => x.class_id === addPick.classId);
+  addPick.need = k ? k.unassigned : 0;
   await loadAddSessions();
 };
 
@@ -1820,14 +1843,25 @@ window.renderAddSessions = () => {
 
   const n = addPick.chosen.length;
   const cnt = $('#as_count');
-  if(cnt){ cnt.textContent = `${n} chosen`; cnt.className = 'pill ' + (n ? 'ok' : 'warn'); }
+  if(cnt){
+    cnt.textContent = `${n} of ${addPick.need} chosen`;
+    cnt.className = 'pill ' + (n ? 'ok' : 'warn');
+  }
   const save = $('#as_save');
   if(save) save.disabled = n === 0;
 };
 
 window.addSessionToggle = (sid) => {
   const i = addPick.chosen.indexOf(sid);
-  if(i >= 0) addPick.chosen.splice(i,1); else addPick.chosen.push(sid);
+  if(i >= 0){ addPick.chosen.splice(i,1); }
+  else {
+    if(addPick.chosen.length >= addPick.need){
+      toast(`Only ${addPick.need} unassigned session${addPick.need===1?'':'s'} left on `+
+            `this plan — untick one first`, 'bad');
+      renderAddSessions(); return;
+    }
+    addPick.chosen.push(sid);
+  }
   renderAddSessions();
 };
 
