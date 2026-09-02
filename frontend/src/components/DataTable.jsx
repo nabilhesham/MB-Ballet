@@ -9,7 +9,10 @@
  * in React instead of being read back off the DOM.
  *
  * columns: [{ label, cell: row => node, sortValue?: row => value,
- *              sortable?: false, className?, hideSm? }]
+ *              sortable?: false, className?, hideSm?, style?, onCellClick? }]
+ * onCellClick puts the click/hover behaviour on one cell instead of the
+ * whole row — matches the handful of tables (Cards, Clients) where only the
+ * name cell (and a separate button) navigate, not a row-wide click.
  * A column sorts only if it has a sortValue — matching the plan's cleaner
  * "operate on the row object, not rendered text" replacement for the old
  * per-cell data-sort override.
@@ -121,9 +124,11 @@ export default function DataTable({
                     <td
                       key={col.label || i}
                       className={
-                        [col.className, col.hideSm ? 'hide-sm' : '']
+                        [col.className, col.hideSm ? 'hide-sm' : '', col.onCellClick ? 'click' : '']
                           .filter(Boolean).join(' ') || undefined
                       }
+                      style={col.style}
+                      onClick={col.onCellClick ? e => { e.stopPropagation(); col.onCellClick(r); } : undefined}
                     >
                       {col.cell(r)}
                     </td>

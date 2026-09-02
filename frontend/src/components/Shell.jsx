@@ -112,8 +112,6 @@ export default function Shell({ children }) {
       </nav>
 
       <main id="view">{children}</main>
-
-      <div className="veil" id="veil"><div className="modal" id="modal" /></div>
     </>
   );
 }
