@@ -134,6 +134,38 @@ td.right{text-align:right}
 .empty{padding:44px 20px;text-align:center;color:var(--dim);font-size:13.5px}
 .empty strong{display:block;color:var(--mute);font-size:15px;margin-bottom:5px;font-weight:500}
 
+/* ------------------------------------------------------------ data tables
+   enhanceTables() in app.js wraps every table in .dt. The padding below is
+   the same as the plain table above it on purpose: the point of doing this by
+   hand rather than with a library is that sorting and searching arrive without
+   a second stylesheet fighting this one. */
+.dt-bar{display:flex;align-items:center;gap:12px;padding:10px 14px;
+        background:var(--surface-2);border-bottom:1px solid var(--line)}
+.dt-bar .dt-find{flex:1;max-width:320px;height:32px;font-size:13px}
+.dt-count{font-family:var(--mono);font-size:9px;letter-spacing:1.2px;
+          color:var(--dim);white-space:nowrap;margin-left:auto}
+
+/* Only tables long enough to need it scroll, so a four-row panel never grows
+   a scrollbar it has no use for. */
+/* .box.pad0 scrolls horizontally itself. When it hosts a .dt the inner
+   .dt-scroll owns that, and two nested scroll boxes would break the sticky
+   header, so the outer one stands down. */
+.box.pad0.dt-host{overflow:visible}
+.dt-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.dt-scroll.capped{max-height:62vh;overflow-y:auto}
+.dt-scroll.capped thead th{position:sticky;top:0;z-index:2}
+
+th[data-sortable]{cursor:pointer;user-select:none;transition:background .12s,color .12s}
+th[data-sortable]:hover{background:var(--surface-3);color:var(--mute)}
+.dt-caret{display:inline-block;width:0;height:0;margin-left:6px;
+          vertical-align:middle;opacity:.32;
+          border-left:3.5px solid transparent;border-right:3.5px solid transparent;
+          border-bottom:4.5px solid currentColor}
+th[data-dir]{color:var(--brand-deep)}
+th[data-dir] .dt-caret{opacity:1;border-bottom-color:var(--brand)}
+th[data-dir="desc"] .dt-caret{border-bottom:0;border-top:4.5px solid var(--brand)}
+.dt-none{padding:34px 20px;text-align:center;color:var(--dim);font-size:13.5px}
+
 /* ---------------------------------------------------------------- pills */
 .pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:500;
       padding:3px 9px;border-radius:20px;white-space:nowrap;line-height:1.6}
@@ -361,9 +393,11 @@ body:not(.is-admin) .adminonly{display:none}
 }
 
 @media print{
-  nav,.topbar,.scrim,.toast,button,.btn{display:none !important}
+  nav,.topbar,.scrim,.toast,button,.btn,.dt-bar{display:none !important}
   body{grid-template-columns:1fr;background:#fff}
   .box{box-shadow:none;border-color:#ccc;break-inside:avoid}
+  .dt-scroll,.dt-scroll.capped{max-height:none;overflow:visible}
+  .dt-scroll.capped thead th{position:static}
 }
 
 @media(prefers-reduced-motion:reduce){
@@ -399,6 +433,19 @@ body:not(.is-admin) .adminonly{display:none}
 .pickrow:hover{background:var(--surface-2)}
 .pickrow.on{background:var(--brand-soft)}
 .pickrow input{width:auto;flex-shrink:0}
+
+/* Choosing several students at once: the chosen ones sit as chips above a
+   live-filtered list. Same vocabulary as .picklist above — this is the plan
+   picker's pattern applied to people. */
+.chipbox{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-height:38px;
+         padding:6px;margin-bottom:10px;border:1px dashed var(--line);
+         border-radius:var(--r-sm);background:var(--surface-2)}
+.chipbox .none{color:var(--dim);font-size:13px}
+.chip{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;
+      padding:4px 10px;border-radius:20px;line-height:1.6;
+      color:var(--brand-deep);background:var(--brand-soft)}
+.chip b{cursor:pointer;font-size:14px;line-height:1;opacity:.6}
+.chip b:hover{opacity:1}
 .pk-when{font-family:var(--mono);font-size:12px;min-width:150px;flex-shrink:0}
 .pk-class{font-weight:500;flex:1;min-width:0}
 .pk-meta{color:var(--dim);font-size:11.5px;text-align:right;white-space:nowrap}

@@ -411,6 +411,25 @@ def book(conn, client_id: int, session_id: int, subscription_id: int = None) -> 
         # Spend the plan bought for this class, not whichever one runs longest.
         sub = active_plan(conn, client_id, s["class_id"])
         subscription_id = sub["id"] if sub else None
+
+    # A booking spends one of the plan's paid slots, whether that plan was
+    # named here or just resolved above. A slot spent twice is a session
+    # nobody paid for, so this is checked no matter which caller asked.
+    if subscription_id is not None:
+        sub_row = conn.execute(
+            "SELECT sessions_total, frozen_on FROM subscriptions WHERE id=?",
+            (subscription_id,)).fetchone()
+        if sub_row and sub_row["frozen_on"]:
+            # Freezing is what released this slot in the first place; it is
+            # not available again until the plan is unfrozen.
+            return {"ok": False, "error": "this plan is frozen"}
+        used = conn.execute(
+            "SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
+            (subscription_id,)).fetchone()["n"]
+        if sub_row and used >= sub_row["sessions_total"]:
+            return {"ok": False,
+                    "error": "every session on this plan is already assigned"}
+
     conn.execute(
         "INSERT INTO bookings (client_id, session_id, subscription_id, status, created_at)"
         " VALUES (?,?,?,?,?)",

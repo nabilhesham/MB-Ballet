@@ -35,11 +35,37 @@ glance from a distance. Never hardcode a colour in JS — use the CSS variables;
 that is what makes the two themes share one set of views.
 
 **Responsive.** Sidebar becomes an off-canvas drawer under 900px (`body.nav-open`,
-`.topbar`, `.scrim`), tables scroll horizontally inside `.box.pad0`, secondary
+`.topbar`, `.scrim`), tables scroll horizontally inside `.dt-scroll`, secondary
 columns are dropped with `.hide-sm`, modal actions stack under 480px. There is
 also a print stylesheet. This is deployed by
 copying a folder to a laptop and running one command. Anything needing a build
 pipeline is the wrong answer here.
+
+**Tables sort and search without a library.** `enhanceTables()` in `app.js`
+upgrades ordinary server-rendered `<table>` markup in place: click a header to
+sort, and long tables get a search box and a capped scrolling body whose header
+stays put. It is called from exactly two places — the end of `render()` and the
+end of `openModal()` — so no view wires it up itself, and it is idempotent.
+
+A table opts into the search box by carrying `data-search="placeholder"`; the
+seven long ones do. A date cell carries `data-sort="<unix seconds>"` so WHEN
+columns order chronologically rather than by the letter the month starts with.
+The scroll cap itself is unconditional — every table gets it once it is long
+enough, `data-search` or not — only the toolbar is opt-in.
+
+The Clients list carries its own hand-built bar instead of `data-search`: it
+already searches server-side through `/api/clients?q=`, and letting
+`enhanceTables()` add a second, client-side box next to it would filter a
+different set of rows than the one just fetched. The bar is styled to match —
+same classes, same position above the table — so it reads as one system even
+though the wiring underneath is different.
+
+DataTables and jQuery were tried from a CDN and removed. Two reasons, both
+fatal here: this folder is copied to a reception laptop that may have no
+internet, so a CDN tag means the admin silently loses sorting and searching
+exactly where the tables are longest; and the library ships its own CSS, which
+fought the padding and type scale of everything above. Do not reintroduce
+either.
 
 ## Files
 

@@ -272,7 +272,14 @@ def get_client(cid: int):
         c["active_plan"] = c["active_plans"][0] if c["active_plans"] else None
         c["classes_enrolled"] = [
             {"class_id": p["class_id"], "class_name": p["class_name"],
-             "colour": p["class_colour"], "plan_id": p["id"]}
+             "colour": p["class_colour"], "plan_id": p["id"],
+             # How many of this plan's paid slots have no session yet — the
+             # only number that says whether a new one can be added here.
+             # Frozen carries separately: a freeze is what creates unassigned
+             # slots in the first place, and they stay off-limits to booking
+             # until the plan is active again — the same reason the existing
+             # "assign remaining sessions" link hides itself while frozen.
+             "unassigned": p["unassigned"], "frozen": p["frozen"]}
             for p in c["active_plans"] if p["class_id"]]
 
         c["cards"] = rows(conn.execute(
@@ -874,11 +881,9 @@ def edit_session(sid: int, body: SessionEdit):
         if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone():
             raise HTTPException(404, "no such session")
         fields = body.model_dump(exclude_none=True)
-        print(f"fields: {fields}")
         if not fields:
             return {"ok": True}
         sets = ", ".join(f"{k}=?" for k in fields)
-        print(f"sets: {sets}, values: {fields.values()}")
         conn.execute(f"UPDATE sessions SET {sets} WHERE id=?", (*fields.values(), sid))
         conn.commit()
         return {"ok": True, "changed": list(fields)}
