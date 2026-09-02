@@ -119,21 +119,12 @@ app.mount("/cards", StaticFiles(directory="cards"), name="cards")
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    return FileResponse(os.path.join(STATIC_DIR, "app", "index.html"))
 
 
 @app.get("/reception")
 def reception():
     return FileResponse(os.path.join(STATIC_DIR, "reception.html"))
-
-
-# Temporary, for phases 2-3 only: the React rewrite (frontend/, built into
-# static/app/) is served here so it can run side by side with the real app
-# on / for view-by-view comparison. Removed at cutover (plan phase 4), when
-# index() above starts serving static/app/index.html directly.
-@app.get("/next")
-def next_app():
-    return FileResponse(os.path.join(STATIC_DIR, "app", "index.html"))
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

@@ -22,8 +22,25 @@ until this has run with real clients. Do not add door-hardware code unless asked
 
 ## Stack
 
-Python 3, FastAPI, SQLite (WAL), uvicorn. Frontend is vanilla HTML/CSS/JS with
-hash routing — **no build step, no npm, no framework**.
+Python 3, FastAPI, SQLite (WAL), uvicorn on the backend. The admin frontend is
+React (Vite, plain JavaScript + `.jsx`, no TypeScript) with `react-router-dom`'s
+`HashRouter`, which is what keeps every `#/clients`, `#/client/17` URL working
+byte for byte across the rewrite. Source lives in `frontend/src/`.
+
+**No build step on the reception laptop — that promise survives the rewrite,
+it just moves.** `npm run build` runs once, on a developer's own machine,
+producing a folder of hashed, minified JS/CSS in `static/app/`. That output is
+committed to git like any other file. `START.bat`, `start.sh`, and the
+packaged `.exe` never invoke npm — they serve whatever is already sitting in
+`static/app/`. Node and npm are developer-only tools, exactly the way a
+compiler is a developer-only tool for a language that ships compiled: nothing
+about running the app requires them.
+
+**The cost of that, written down where the next person hits it:** a developer
+who changes anything under `frontend/src/` must run `npm run build` and
+commit the refreshed `static/app/` in the same commit. Nothing rebuilds it
+automatically — a source change with no matching `static/app/` change ships
+as a silent no-op.
 
 **Visual language.** The palette comes straight from the academy logo — the
 purple `#87438E` of the dancer and the pink `#EAAECA` of the panel behind her.
@@ -37,35 +54,44 @@ that is what makes the two themes share one set of views.
 **Responsive.** Sidebar becomes an off-canvas drawer under 900px (`body.nav-open`,
 `.topbar`, `.scrim`), tables scroll horizontally inside `.dt-scroll`, secondary
 columns are dropped with `.hide-sm`, modal actions stack under 480px. There is
-also a print stylesheet. This is deployed by
-copying a folder to a laptop and running one command. Anything needing a build
-pipeline is the wrong answer here.
+also a print stylesheet. Deployed by copying a folder to a laptop and running
+one command — see the Stack section above for how a React build stays
+compatible with that on the machine that matters, the reception laptop.
 
-**Tables sort and search without a library.** `enhanceTables()` in `app.js`
-upgrades ordinary server-rendered `<table>` markup in place: click a header to
-sort, and long tables get a search box and a capped scrolling body whose header
-stays put. It is called from exactly two places — the end of `render()` and the
-end of `openModal()` — so no view wires it up itself, and it is idempotent.
+**Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
+a controlled component that replaced app.js's old `enhanceTables()`. Click a
+column header to sort; a long table gets a capped scrolling body whose header
+stays put. The behaviour is the same as before — the mechanism had to change,
+because the old one worked by mutating already-rendered DOM after the fact
+(wrapper divs, rows physically reordered by `appendChild`), which is exactly
+what fights React owning that same subtree.
 
-A table opts into the search box by carrying `data-search="placeholder"`; the
-seven long ones do. A date cell carries `data-sort="<unix seconds>"` so WHEN
-columns order chronologically rather than by the letter the month starts with.
-The scroll cap itself is unconditional — every table gets it once it is long
-enough, `data-search` or not — only the toolbar is opt-in.
+A table opts into the search box with a `search="placeholder"` prop; most
+long tables pass one. Sorting has no separate opt-in switch: a column sorts
+if its definition carries a `sortValue: row => value` function, which is why
+every column doesn't need a `sortable: false` — no `sortValue` already means
+unsortable. The scroll cap applies to every table regardless of whether it
+has a search box, and is recomputed against the *filtered* row count on every
+render, so a table searched down to a handful of rows drops its cap rather
+than keeping the one computed before the search started.
 
-The Clients list carries its own hand-built bar instead of `data-search`: it
-already searches server-side through `/api/clients?q=`, and letting
-`enhanceTables()` add a second, client-side box next to it would filter a
-different set of rows than the one just fetched. The bar is styled to match —
-same classes, same position above the table — so it reads as one system even
-though the wiring underneath is different.
+The Clients list carries its own hand-built search bar instead of
+`<DataTable>`'s `search` prop: it already searches server-side through
+`/api/clients?q=`, and a second, client-side filter next to it would filter a
+different set of rows than the one just fetched. It still renders its table
+through `<DataTable>` with no `search` prop, so sorting still works — the old
+`enhanceTables()` made every table sortable regardless of whether it opted
+into search, and this is the one list that needs that distinction preserved.
+The bar is styled to match — same classes, same position above the table —
+so it reads as one system even though the wiring underneath is different.
 
-DataTables and jQuery were tried from a CDN and removed. Two reasons, both
-fatal here: this folder is copied to a reception laptop that may have no
-internet, so a CDN tag means the admin silently loses sorting and searching
-exactly where the tables are longest; and the library ships its own CSS, which
-fought the padding and type scale of everything above. Do not reintroduce
-either.
+DataTables and jQuery were tried from a CDN in the old vanilla frontend and
+removed — the library's own CSS fought the padding and type scale of
+everything else, and back when there was no build step at all, a CDN tag
+meant the admin could silently lose sorting on a reception laptop with no
+internet. That specific risk is gone now that the whole interface is one
+bundled, committed file, but the CSS fight is still a real reason: do not
+reintroduce either.
 
 ## Files
 
@@ -79,17 +105,38 @@ db.py             Schema + connection helpers. All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / manual_check_in.
 cards.py          Member card PNG generation.
-server.py         FastAPI routes. Thin — logic belongs in access.py.
+server.py         FastAPI app, paths, startup, static mounts. Thin — routes
+                  live in api/, business rules live in access.py.
+api/              One router module per resource, wired into server.py with
+                  ordinary static imports (helpers.py, clients.py, plans.py,
+                  classes.py, instructors.py, sessions.py, access_routes.py,
+                  dashboard.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
 seed.py           Wipes the DB and rebuilds it from sheets/. --force required.
-static/index.html Admin shell + sidebar.
-static/app.js     SPA: router, all views, all modals.
-static/style.css  Design tokens and components.
-static/reception.html  Kiosk check-in screen (standalone, own JS).
+frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
+                  for the build-once-commit-the-output model.
+  src/views/       One file per route: Dashboard, Calendar, Classes,
+                   ClassDetail, Instructors, InstructorDetail, Cards, Sessions,
+                   SessionDetail, Clients, ClientDetail.
+  src/modals/      Every modal, one file each, imported by the view(s) that
+                   open it.
+  src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
+                   Toast, Avatar, Pill, Empty.
+static/app/       Committed build output of frontend/ — what server.py
+                  actually serves at `/`. Regenerate with `npm run build`
+                  after any `frontend/src/` change; see Stack above.
+static/style.css  Design tokens and components. Shared by the React admin,
+                  reception.html and scanner-test.html — all three load it
+                  by the same `/static/style.css` URL, so it is never bundled
+                  into `static/app/`.
+static/reception.html  Kiosk check-in screen (standalone, own JS, untouched
+                  by the React rewrite — see the note below).
 START.bat         Windows double-click launcher.
 start.sh          Same thing for terminal / Mac / Linux.
 Check Setup.bat   Reports what the launcher can see. For diagnosing setup.
-BUILD_EXE.bat     Run once on Windows to produce the standalone .exe.
+BUILD_EXE.bat     Run once on Windows to produce the standalone .exe. Rebuilds
+                  the frontend first if Node is present; uses the committed
+                  static/app/ build as-is otherwise.
 academy.spec      PyInstaller build definition. Hidden imports live here.
 run_app.py        Entry point for the packaged build.
 cleanup.sh        Removes leftovers from earlier versions.
@@ -102,15 +149,28 @@ academy.db        The database. Not in git. This IS the business record.
 .env              ENTRY_SECRET. Not in git, ever.
 ```
 
+`static/reception.html` and `static/scanner-test.html` are deliberately
+untouched by the React rewrite: the kiosk is the one latency-sensitive
+surface in the app (USB-HID scanner keystroke timing, camera barcode
+scanning, audio beeps), has no tables, no router, no modals, and nothing to
+gain from a re-render model. It stays self-contained, inline `<style>`,
+inline `<script>`, vanilla — exactly as before.
+
 ## Commands
 
 ```bash
 ./start.sh                  # Mac/Linux, or Git Bash on Windows
 ./start.sh --seed           # wipe and rebuild from the sheets/ workbooks
-./start.sh --reset-admin    # forget all accounts, regenerate a bootstrap admin
 START.bat                   # Windows: double-click, or run from cmd
 BUILD_EXE.bat               # Windows, run once: produces a standalone .exe
 "Create Desktop Shortcut.bat"
+
+cd frontend && npm install  # once, to work on the React admin at all
+npm run dev                 # Vite dev server on :5173, proxies /api etc. to
+                             #   a real backend on :8000 (run ./start.sh in a
+                             #   second terminal) — for frontend iteration only
+npm run build                # regenerates static/app/ — required before
+                              #   committing any change under frontend/src/
 ```
 
 ### The reception laptop has nothing installed
@@ -551,7 +611,9 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 - Deny messages are written for a receptionist to read aloud in plain language
   ("Subscription expired 6 days ago"), not error codes. Technical detail goes in
   `detail`, which the UI does not show.
-- All user text passes through `esc()` in the frontend. No exceptions.
+- **Never use `dangerouslySetInnerHTML`.** JSX escapes interpolated text by
+  default — that is what replaced the old `esc()` helper. There is no
+  legitimate reason to render raw HTML anywhere in this app.
 - Comments explain *why*, not *what*. Most existing ones record a decision.
 - **English only.** There are no Arabic fields anywhere — no `name_ar`, no
   second name input, no RTL block. The academy works in English and a

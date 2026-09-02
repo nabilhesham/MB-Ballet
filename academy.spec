@@ -8,6 +8,11 @@ runtime, which PyInstaller's static analysis cannot see — leaving any of these
 out produces an .exe that opens a console and closes instantly.
 """
 
+# The React build (frontend/, committed into static/app/) is already inside
+# static/, so this needs no entry of its own — and must not get one. Adding
+# a separate ("frontend", "frontend") entry would bundle node_modules into
+# the exe; the whole point of committing static/app/ is that this build
+# never touches frontend/ at all.
 datas = [("static", "static")]
 
 hiddenimports = [
