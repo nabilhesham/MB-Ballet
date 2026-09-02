@@ -30,6 +30,8 @@ hiddenimports = [
     # local modules, imported normally but listed so a rename cannot break
     # the build silently
     "server", "access", "cards", "db", "tokens",
+    "api", "api.helpers", "api.clients", "api.plans", "api.classes",
+    "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
 ]
 
 a = Analysis(
