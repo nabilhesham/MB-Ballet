@@ -97,6 +97,7 @@ class SessionEdit(BaseModel):
     starts_at: Optional[int] = None
     duration_hours: Optional[float] = None
     notes: Optional[str] = None
+    status: Optional[str] = None
 
 
 class RepeatIn(BaseModel):
@@ -873,9 +874,11 @@ def edit_session(sid: int, body: SessionEdit):
         if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone():
             raise HTTPException(404, "no such session")
         fields = body.model_dump(exclude_none=True)
+        print(f"fields: {fields}")
         if not fields:
             return {"ok": True}
         sets = ", ".join(f"{k}=?" for k in fields)
+        print(f"sets: {sets}, values: {fields.values()}")
         conn.execute(f"UPDATE sessions SET {sets} WHERE id=?", (*fields.values(), sid))
         conn.commit()
         return {"ok": True, "changed": list(fields)}

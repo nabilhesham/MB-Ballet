@@ -740,22 +740,135 @@ window.markAs = async (sid, cid, status) => {
 window.bookIntoSession = async (sid) => {
   const [s, all] = await Promise.all([api('/sessions/'+sid), api('/clients')]);
   const inSession = new Set(s.roster.map(m => m.id));
-  const options = all.filter(c => !inSession.has(c.id));
-  if(!options.length) return toast('Every client is already booked in','bad');
-  openModal(`<h3>Add a student</h3>
-    <div class="mh">Uses one slot from their current plan.</div>
-    <label>CLIENT</label>
-    <select id="bk_pick">${options.map(c=>
-      `<option value="${c.id}">${esc(c.name_en)}${c.phone?' — '+esc(c.phone):''} (${c.remaining ?? 'no plan'} left)</option>`).join('')}</select>
-    <div class="acts"><button onclick="closeModal()">Cancel</button>
-      <button class="pri" onclick="saveBookIn(${sid})">Add</button></div>`);
+  
+  window._clientOptions = all.filter(c => !inSession.has(c.id));
+  window._selectedClients = new Map(); // Store chosen clients: id -> client object
+  
+  if(!window._clientOptions.length) return toast('Every client is already booked in','bad');
+  
+  openModal(`<h3>Add students</h3>
+    <div class="mh">Uses one slot from each selected student's plan.</div>
+    
+    <!-- Container for selected client pills -->
+    <div id="selected_pills" style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; min-height: 32px; padding: 4px; border: 1px dashed #ccc; border-radius: 4px;">
+      <span style="color: #888; font-size: 13px; align-self: center;" id="pills_placeholder">No students selected yet...</span>
+    </div>
+
+    <label>SEARCH CLIENT</label>
+    <input type="text" id="bk_search" placeholder="Type name or phone to search…" oninput="filterclientOptions()" style="margin-bottom: 8px;" />
+    
+    <div id="bk_dropdown" style="max-height: 160px; overflow-y: auto; border: 1px solid #ccc; border-radius: 4px;"></div>
+    
+    <div class="acts" style="margin-top: 15px;">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="pri" id="bk_save_btn" onclick="saveBookIn(${sid})">Add Selected</button>
+    </div>`);
+
+  filterclientOptions();
+  const searchInput = $('#bk_search');
+  if(searchInput) searchInput.focus();
+};
+
+window.filterclientOptions = () => {
+  const query = val('bk_search').toLowerCase();
+  const container = $('#bk_dropdown');
+  if(!container || !window._clientOptions) return;
+
+  // Exclude clients that have already been added as pills
+  const filtered = window._clientOptions.filter(c => {
+    if (window._selectedClients.has(c.id)) return false;
+    const nameMatch = (c.name_en || '').toLowerCase().includes(query);
+    const phoneMatch = (c.phone || '').toLowerCase().includes(query);
+    return nameMatch || phoneMatch;
+  });
+
+  if (!filtered.length) {
+    container.innerHTML = `<div style="padding: 8px; color: #888; text-align: center;">No matching clients available</div>`;
+    return;
+  }
+
+  container.innerHTML = filtered.map(c => `
+    <div onclick="selectClient(${c.id})" style="padding: 8px; cursor: pointer; border-bottom: 1px solid #eee;" onmouseover="this.style.background='#f5f5f5'" onmouseout="this.style.background='transparent'">
+      <strong>${esc(c.name_en)}</strong> ${c.phone ? '— ' + esc(c.phone) : ''} <span style="color: #666; font-size: 12px;">(${c.remaining ?? 'no plan'} left)</span>
+    </div>
+  `).join('');
+};
+
+window.selectClient = (id) => {
+  const client = window._clientOptions.find(c => c.id === id);
+  if (!client) return;
+
+  // Add to selection map
+  window._selectedClients.set(id, client);
+  
+  // Clear search input so user can search again immediately
+  const searchInput = $('#bk_search');
+  if (searchInput) {
+    searchInput.value = '';
+    searchInput.focus();
+  }
+
+  renderPills();
+  filterclientOptions();
+};
+
+window.removeClient = (id) => {
+  window._selectedClients.delete(id);
+  renderPills();
+  filterclientOptions();
+};
+
+window.renderPills = () => {
+  const container = $('#selected_pills');
+  if (!container) return;
+
+  if (window._selectedClients.size === 0) {
+    container.innerHTML = `<span style="color: #888; font-size: 13px; align-self: center;" id="pills_placeholder">No students selected yet...</span>`;
+    return;
+  }
+
+  container.innerHTML = Array.from(window._selectedClients.values()).map(c => `
+    <span style="background: #e0f2fe; color: #0369a1; padding: 4px 8px; border-radius: 12px; font-size: 13px; display: inline-flex; align-items: center; gap: 6px;">
+      ${esc(c.name_en)}
+      <b onclick="removeClient(${c.id})" style="cursor: pointer; color: #0284c7; font-size: 14px;">&times;</b>
+    </span>
+  `).join('');
 };
 
 window.saveBookIn = async (sid) => {
-  try{
-    await api(`/sessions/${sid}/book`, {method:'POST', body:{client_id:Number($('#bk_pick').value)}});
-    closeModal(); toast('Booked in'); render();
-  }catch(e){ toast(e.message,'bad'); }
+  const selectedIds = Array.from(window._selectedClients.keys());
+
+  if (!selectedIds.length) {
+    return toast('Please select at least one client', 'bad');
+  }
+
+  const btn = $('#bk_save_btn');
+  if (btn) btn.disabled = true;
+
+  try {
+    const results = await Promise.allSettled(
+      selectedIds.map(id => api(`/sessions/${sid}/book`, { method: 'POST', body: { client_id: id } }))
+    );
+
+    const failures = results.filter(r => r.status === 'rejected');
+    const successes = results.filter(r => r.status === 'fulfilled');
+
+    if (failures.length === 0) {
+      toast(`Successfully booked ${successes.length} student(s)`);
+    } else if (successes.length > 0) {
+      toast(`Booked ${successes.length} student(s), but ${failures.length} failed`, 'bad');
+    } else {
+      toast(failures[0].reason?.message || 'Failed to book clients', 'bad');
+    }
+
+    closeModal();
+    delete window._clientOptions;
+    delete window._selectedClients;
+    render();
+  } catch(e) {
+    toast(e.message, 'bad');
+    if (btn) btn.disabled = false;
+  }
 };
 
 window.unbookFromSession = (sid, cid, name) => confirmBox('Remove from this session',
@@ -841,6 +954,12 @@ window.saveSessionEdit = async (sid) => {
   const ins = numval('e_ins');
   if(ins !== null) body.instructor_id = ins;
   try{
+    console.log(new Date(when))
+    console.log(new Date())
+    if (new Date(when) > new Date()) {
+      body.status = 'scheduled';
+    }
+    console.log(body)
     await api('/sessions/'+sid, {method:'PUT', body});
     if(ins === null) await api('/sessions/'+sid, {method:'PUT', body:{instructor_id:null}});
     closeModal(); toast('Session updated'); render();

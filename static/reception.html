@@ -29,7 +29,7 @@
   body{grid-template-columns:1fr 330px;height:100vh;overflow:hidden}
   /* main{padding:30px 34px 80px;max-width:1360px;overflow-x:hidden} */
   main{display:flex;flex-direction:column;align-items:center;justify-content:center;
-       /*padding:30px;overflow-y:auto;*/transition:background .15s}
+       padding:30px;/*overflow-y:auto;*/transition:background .15s}
   main.ok{background:#12241A} main.bad{background:#2A1419} main.warn{background:#2A2012}
 
   /* ---------- idle ---------- */
@@ -101,7 +101,7 @@
 
   /* ---------- sidebar ---------- */
   aside{border-left:1px solid var(--line);background:#0A0E13;padding:20px 16px;
-        display:flex;flex-direction:column;overflow:hidden}
+        display:flex;flex-direction:column;overflow-y:scroll;/*overflow:hidden*/}
   .asidetop{flex-shrink:0}
   .recentwrap{flex:1;min-height:0;overflow-y:auto;margin-top:4px}
   .asidefoot{flex-shrink:0;padding-top:14px;border-top:1px solid var(--line);margin-top:12px}
@@ -204,13 +204,13 @@
     <div class="n" id="kInN">&nbsp;</div>
   </div>
 
-  <div class="eyebrow" style="margin:22px 0 11px">NOW &amp; NEXT</div>
-  <div id="sched"></div>
+  <!-- <div class="eyebrow" style="margin:22px 0 11px">NOW &amp; NEXT</div> -->
+  <!-- <div id="sched"></div> -->
 
-  <div class="eyebrow" style="margin:22px 0 11px">RECENT</div>
-  </div>
+  <!-- <div class="eyebrow" style="margin:22px 0 11px">RECENT</div> -->
+  <!-- </div> -->
 
-  <div class="recentwrap"><div id="log"></div></div>
+  <!-- <div class="recentwrap"><div id="log"></div></div> -->
 
   <div class="asidefoot">
     <a class="btn sm" href="/" style="width:100%;justify-content:center">Dashboard</a>
@@ -485,7 +485,14 @@ function show(r){
   $('undo').classList.remove('on');
 
   r.granted ? beepOk() : beepNo();
-  if(!r.granted) clearTimer = setTimeout(reset, 10000);
+  
+  // --- AUTOMATIC CHECK-IN ADDITION ---
+  if(r.granted){
+    doCheckIn();
+  } else {
+    clearTimer = setTimeout(reset, 10000);
+  }
+  
   refresh();
 }
 
@@ -515,7 +522,7 @@ $('undo').onclick = async () => {
 
 function reset(){
   clearTimeout(clearTimer); current=null;
-  card.classList.remove('on'); idle.style.display='block'; stage.className='';
+  card.classList.remove('on'); idle.style.display='flex'; stage.className='';
   updateIdle();
 }
 
