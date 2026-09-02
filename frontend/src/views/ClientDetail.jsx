@@ -18,6 +18,7 @@ import PlanSessionsPopup from '../modals/PlanSessionsPopup';
 import EditAttendance from '../modals/EditAttendance';
 import MoveBooking from '../modals/MoveBooking';
 import FreezePlan from '../modals/FreezePlan';
+import EditPlan from '../modals/EditPlan';
 
 export default function ClientDetail() {
   const { id } = useParams();
@@ -87,6 +88,10 @@ export default function ClientDetail() {
 
   const openAssignRemaining = plan => {
     open(<AssignRemaining clientId={c.id} plan={plan} onSaved={reload} />, { wide: true });
+  };
+
+  const openEditPlan = plan => {
+    open(<EditPlan clientId={c.id} plan={plan} onSaved={reload} />, { wide: true });
   };
 
   const openAddSession = () => {
@@ -224,6 +229,9 @@ export default function ClientDetail() {
                 </div>
               </div>
               <div className="row tight">
+                {p.frozen
+                  ? <button className="sm" disabled title="Unfreeze this plan before editing it">Edit</button>
+                  : <button className="sm" onClick={() => openEditPlan(p)}>Edit</button>}
                 {p.frozen
                   ? <button className="sm" onClick={() => unfreeze(p.id)}>Unfreeze</button>
                   : (p.can_freeze

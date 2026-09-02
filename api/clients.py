@@ -327,7 +327,7 @@ def issue_card(cid: int, body: CardIn):
         conn.commit()
 
         state = access.plan_state(conn, sub["id"])
-        path = cards.build_card(cid, c["name_en"], token, state["plan"],
+        path = cards.build_card(cid, c["name_en"], token, state["sessions_total"],
                                 state["expires_on"],
                                 class_name=klass["name"], colour=klass["colour"])
         return {"token": token, "card_url": "/" + path,

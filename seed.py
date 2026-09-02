@@ -363,7 +363,7 @@ def seed_cards(conn, make_pngs=True):
     import tokens
     n = 0
     for r in conn.execute(
-            "SELECT s.client_id, s.class_id, s.plan, s.expires_on, c.name_en,"
+            "SELECT s.client_id, s.class_id, s.sessions_total, s.expires_on, c.name_en,"
             "       cl.name AS class_name, cl.colour"
             "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
             "  JOIN classes cl ON cl.id=s.class_id"
@@ -374,7 +374,7 @@ def seed_cards(conn, make_pngs=True):
             " VALUES (?,?,?,?,?)",
             (r["client_id"], r["class_id"], token, "card", db.now()))
         if make_pngs:
-            cards.build_card(r["client_id"], r["name_en"], token, r["plan"],
+            cards.build_card(r["client_id"], r["name_en"], token, r["sessions_total"],
                              r["expires_on"], class_name=r["class_name"],
                              colour=r["colour"])
         n += 1

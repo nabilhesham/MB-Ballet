@@ -119,7 +119,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
           <label>ENDS ON</label>
           <input type="date" value={endsOn}
                  onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
-          <div className="hint">Follows the last session picked — type over it to extend.</div>
+          <div className="hint">Follows the sessions picked — type over it to override, until they change again.</div>
         </div>
       </div>
       <label>PRICE (EGP)</label>

@@ -440,6 +440,8 @@ body:not(.is-admin) .adminonly{display:none}
 .pickrow:last-child{border-bottom:0}
 .pickrow:hover{background:var(--surface-2)}
 .pickrow.on{background:var(--brand-soft)}
+.pickrow.disabled{cursor:default;opacity:.6}
+.pickrow.disabled:hover{background:none}
 .pickrow input{width:auto;flex-shrink:0}
 
 /* Choosing several students at once: the chosen ones sit as chips above a

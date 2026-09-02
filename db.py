@@ -260,6 +260,27 @@ def migrate(conn) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
     conn.commit()
 
+    # One-shot. expires_on used to be a floor that plan_state() raised at
+    # read time to the last session a plan covers; it is now the value
+    # itself, kept current by access.refresh_expiry() as bookings change.
+    # Lift any date that was relying on that read-time raise up to what was
+    # already on screen, once, so nothing appears to regress the moment this
+    # ships. Guarded by a marker rather than repeated on every start: after
+    # this runs, a stored date sitting below the last session is a
+    # deliberate override (typed in edit_plan()) and must not be re-raised.
+    if not get_settings(conn).get("expiry_backfilled"):
+        conn.execute(
+            "UPDATE subscriptions SET expires_on = ("
+            "  SELECT MAX(date(s.starts_at, 'unixepoch', 'localtime'))"
+            "    FROM bookings b JOIN sessions s ON s.id = b.session_id"
+            "   WHERE b.subscription_id = subscriptions.id)"
+            " WHERE expires_on < ("
+            "  SELECT MAX(date(s.starts_at, 'unixepoch', 'localtime'))"
+            "    FROM bookings b JOIN sessions s ON s.id = b.session_id"
+            "   WHERE b.subscription_id = subscriptions.id)")
+        conn.commit()
+        set_setting(conn, "expiry_backfilled", "1")
+
 
 def store_credential(conn, client_id, token, kind="card") -> int:
     """Issuing a new card revokes the client's previous one of the same kind."""
