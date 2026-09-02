@@ -137,8 +137,22 @@ Check Setup.bat   Reports what the launcher can see. For diagnosing setup.
 BUILD_EXE.bat     Run once on Windows to produce the standalone .exe. Rebuilds
                   the frontend first if Node is present; uses the committed
                   static/app/ build as-is otherwise.
-build_mac.sh      Same thing, run once on a Mac, for a macOS binary.
-build_linux.sh    Same thing, run once on Linux, for a Linux binary.
+build_mac.sh      Same thing, run once on a Mac, for a macOS binary. Refuses
+                  to run on anything that isn't Darwin — see the WSL note
+                  below for why that guard exists.
+build_linux.sh    Same thing, run once on Linux, for a Linux binary. Same
+                  host guard, symmetrically (refuses on anything but Linux).
+.github/workflows/
+  build-macos.yml Manually-triggered CI (Actions tab -> Run workflow, or
+                  `gh workflow run build-macos.yml`) that builds the macOS
+                  binary on a real GitHub-hosted Mac, for anyone who needs a
+                  ready-to-run Mac build without access to a Mac. Download
+                  the result from the finished run's Artifacts, or
+                  `gh run download`. Runs on macos-13 (Intel), deliberately
+                  not macos-latest/arm64 — an x86_64 build runs on Intel Macs
+                  natively and on Apple Silicon Macs via Rosetta 2, the
+                  reverse isn't true, and the reception Mac's hardware isn't
+                  known. Do not "helpfully" bump this to the newer image.
 academy.spec      PyInstaller build definition, shared by all three build
                   scripts above. Hidden imports live here.
 run_app.py        Entry point for the packaged build.
@@ -169,6 +183,12 @@ BUILD_EXE.bat               # Windows, run once: produces a standalone .exe
 ./build_mac.sh              # macOS, run once: produces a standalone binary
 ./build_linux.sh            # Linux, run once: produces a standalone binary
 "Create Desktop Shortcut.bat"
+
+gh workflow run build-macos.yml   # or the Actions tab -> Run workflow:
+                             #   builds the macOS binary on a real Mac in CI,
+                             #   for when there's no Mac to build on locally.
+                             #   Fetch the result with `gh run download` or
+                             #   from the run's page -> Artifacts.
 
 cd frontend && npm install  # once, to work on the React admin at all
 npm run dev                 # Vite dev server on :5173, proxies /api etc. to
@@ -210,6 +230,18 @@ redirect, so a machine with Python 3.11 was told Python was missing. Every
 command containing parentheses, pipes or redirects now lives in its own
 subroutine, and version comparison parses the plain text of `python -V`
 instead of running Python code. **Keep it that way.**
+
+**The WSL trap that already bit once, too.** `uname -s` reports `Linux`
+inside WSL — both WSL1 and WSL2 — not anything that names Windows. Someone
+ran `bash build_mac.sh` inside WSL expecting a macOS build; PyInstaller
+cannot cross-compile, so it silently built a genuine Linux binary while
+printing macOS-flavoured success text, and the failure only surfaced later,
+confusingly, as `zsh: exec format error` on the actual Mac — `chmod +x` and
+clearing Gatekeeper are both irrelevant to that, since neither changes a
+file's binary format. `build_mac.sh` and `build_linux.sh` now both refuse to
+run on the wrong host (`case "$(uname -s)" in Darwin*)`/`Linux*)`), failing
+fast with an explanation instead of producing a wrong-platform binary that
+"succeeds" until someone actually tries to run it. **Keep those guards.**
 
 Detection also scans the standard install folders and the registry, because
 installing Python with "Add to PATH" unticked is common and makes `where`
@@ -260,6 +292,20 @@ machine. The Linux binary is also tied to the glibc version of the machine
 that built it (newer glibc, not older, runs it), and an unsigned macOS binary
 copied to a different Mac needs one right-click-Open the first time to clear
 Gatekeeper — both scripts print these caveats at the end of a successful build.
+`build_mac.sh` and `build_linux.sh` also refuse outright to run on the wrong
+host OS (see the WSL trap above) rather than silently producing a
+wrong-platform binary — `BUILD_EXE.bat` gets no equivalent guard, since a
+`.bat` file only runs under `cmd.exe`/PowerShell in practice, unlike a bash
+script that WSL, Git Bash, a Linux box and a Mac terminal can all run
+without complaint.
+
+**No Mac to build on?** `.github/workflows/build-macos.yml` builds the macOS
+binary on a real GitHub-hosted Mac instead — trigger it from the Actions tab
+or `gh workflow run build-macos.yml` (both reachable from Windows/WSL), then
+download the finished binary from the run's Artifacts or `gh run download`.
+It is manually triggered only (`workflow_dispatch`), never on push, because
+macOS runner minutes are billed at a 10x multiplier against the GitHub free
+tier and this is an occasional "cut a release" action, not a per-commit one.
 
 The entry point is `run_app.py`, not `server.py`. A double-clicked exe closes
 its console the moment the process dies, so an unhandled exception is invisible

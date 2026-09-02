@@ -25,6 +25,18 @@ step(){ printf "  %s%s%s\n" "$dim" "$1" "$off"; }
 ok(){   printf "  %s✓%s %s\n" "$grn" "$off" "$1"; }
 die(){  printf "  %s✗ %s%s\n" "$red" "$1" "$off"; exit 1; }
 
+# PyInstaller cannot cross-compile — whatever OS this script runs ON is the
+# OS the binary targets, regardless of the script's name. Running this on a
+# Mac would silently produce a macOS binary that "succeeds" here and then
+# fails to launch at all on the reception laptop. Catch that up front,
+# before any of the slow steps below (see build_mac.sh for the symmetric
+# guard — this project has already been bitten by the WSL/uname version of
+# this mistake once).
+case "$(uname -s)" in
+  Linux*) ;;
+  *) die "This produces a Linux build and has to run on Linux (WSL counts — it reports itself as Linux). This machine is $(uname -s). Use build_mac.sh on an actual Mac, or BUILD_EXE.bat on Windows." ;;
+esac
+
 printf "\n  %sBuild MB Ballet Academy — Linux%s\n  %s────────────────────────────────%s\n\n" \
   "$bold" "$off" "$dim" "$off"
 printf "  Building a standalone program file. This takes a few minutes.\n\n"

@@ -28,6 +28,18 @@ step(){ printf "  %s%s%s\n" "$dim" "$1" "$off"; }
 ok(){   printf "  %s✓%s %s\n" "$grn" "$off" "$1"; }
 die(){  printf "  %s✗ %s%s\n" "$red" "$1" "$off"; exit 1; }
 
+# PyInstaller cannot cross-compile — whatever OS this script runs ON is the
+# OS the binary targets, regardless of the script's name. WSL reports itself
+# as Linux (uname -s -> "Linux", true for WSL1 and WSL2 both), so running
+# this INSIDE WSL silently produces a Linux binary that installs and
+# packages without complaint, then fails with "exec format error" the
+# moment it's copied to a real Mac. Catch that here, before any of the slow
+# steps below, rather than five minutes and a confusing runtime error later.
+case "$(uname -s)" in
+  Darwin*) ;;
+  *) die "This produces a macOS build and has to run on an actual Mac — this machine is $(uname -s). Running it in WSL, a Linux VM, or any non-Darwin shell produces a Linux binary that installs and packages without complaint but fails with \"exec format error\" the moment it's copied to a real Mac — that's exactly what happened here. Use build_linux.sh on Linux/WSL, BUILD_EXE.bat on Windows, or see the CI workflow in .github/workflows/build-macos.yml for a Mac build with no Mac required." ;;
+esac
+
 printf "\n  %sBuild MB Ballet Academy — macOS%s\n  %s────────────────────────────────%s\n\n" \
   "$bold" "$off" "$dim" "$off"
 printf "  Building a standalone program file. This takes a few minutes.\n\n"
