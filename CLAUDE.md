@@ -137,7 +137,10 @@ Check Setup.bat   Reports what the launcher can see. For diagnosing setup.
 BUILD_EXE.bat     Run once on Windows to produce the standalone .exe. Rebuilds
                   the frontend first if Node is present; uses the committed
                   static/app/ build as-is otherwise.
-academy.spec      PyInstaller build definition. Hidden imports live here.
+build_mac.sh      Same thing, run once on a Mac, for a macOS binary.
+build_linux.sh    Same thing, run once on Linux, for a Linux binary.
+academy.spec      PyInstaller build definition, shared by all three build
+                  scripts above. Hidden imports live here.
 run_app.py        Entry point for the packaged build.
 cleanup.sh        Removes leftovers from earlier versions.
                   (no settings page: the no-show rules it configured are gone)
@@ -163,6 +166,8 @@ inline `<script>`, vanilla — exactly as before.
 ./start.sh --seed           # wipe and rebuild from the sheets/ workbooks
 START.bat                   # Windows: double-click, or run from cmd
 BUILD_EXE.bat               # Windows, run once: produces a standalone .exe
+./build_mac.sh              # macOS, run once: produces a standalone binary
+./build_linux.sh            # Linux, run once: produces a standalone binary
 "Create Desktop Shortcut.bat"
 
 cd frontend && npm install  # once, to work on the React admin at all
@@ -243,7 +248,18 @@ Two cases the script handles:
 
 `BUILD_EXE.bat` is the stronger option: run once on any Windows machine with
 Python and it produces a single `MB Ballet Academy.exe` needing nothing at all.
-**PyInstaller cannot cross-compile — a Windows exe must be built on Windows.**
+`build_mac.sh`/`build_linux.sh` are the same idea for those platforms — same
+`academy.spec`, same four-step flow (build tool, frontend refresh, package,
+done). They differ from `BUILD_EXE.bat` only in shell (bash, not batch),
+Python-discovery idiom, and the OS-specific caveat printed at the end (see
+below) — nothing about the packaging step itself changes per OS.
+**PyInstaller cannot cross-compile — a build has to run on the OS it targets.**
+A Windows `.exe` needs a Windows machine, a macOS binary needs a Mac, a Linux
+one needs Linux; there is no way to pick a target from one script on one
+machine. The Linux binary is also tied to the glibc version of the machine
+that built it (newer glibc, not older, runs it), and an unsigned macOS binary
+copied to a different Mac needs one right-click-Open the first time to clear
+Gatekeeper — both scripts print these caveats at the end of a successful build.
 
 The entry point is `run_app.py`, not `server.py`. A double-clicked exe closes
 its console the moment the process dies, so an unhandled exception is invisible
