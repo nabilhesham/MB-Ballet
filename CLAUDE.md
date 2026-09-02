@@ -50,9 +50,15 @@ end of `openModal()` — so no view wires it up itself, and it is idempotent.
 A table opts into the search box by carrying `data-search="placeholder"`; the
 seven long ones do. A date cell carries `data-sort="<unix seconds>"` so WHEN
 columns order chronologically rather than by the letter the month starts with.
-The Clients list is deliberately left out: it already searches server-side
-through `/api/clients?q=`, and a second box beside it would filter a different
-set of rows.
+The scroll cap itself is unconditional — every table gets it once it is long
+enough, `data-search` or not — only the toolbar is opt-in.
+
+The Clients list carries its own hand-built bar instead of `data-search`: it
+already searches server-side through `/api/clients?q=`, and letting
+`enhanceTables()` add a second, client-side box next to it would filter a
+different set of rows than the one just fetched. The bar is styled to match —
+same classes, same position above the table — so it reads as one system even
+though the wiring underneath is different.
 
 DataTables and jQuery were tried from a CDN and removed. Two reasons, both
 fatal here: this folder is copied to a reception laptop that may have no

@@ -1297,14 +1297,17 @@ function debounce(fn, ms){ let t; return (...a)=>{ clearTimeout(t); t=setTimeout
 route('/clients', async () => {
   const list = await api('/clients?q='+encodeURIComponent(clientFilter));
   view.innerHTML = `
-    <div class="head"><div><h1>Clients</h1>
-      <div class="sub">${list.length} shown</div></div>
+    <div class="head"><div><h1>Clients</h1></div>
       <div class="row">
-        <input class="search" id="q" placeholder="Search name, mobile or school…" value="${esc(clientFilter)}">
         <button class="pri" onclick="newClient()">New client</button>
       </div></div>
 
     <div class="box pad0">
+      <div class="dt-bar">
+        <input class="search dt-find" id="q" type="search"
+               placeholder="Search name, mobile or school…" value="${esc(clientFilter)}">
+        <span class="dt-count">${list.length} client${list.length===1?'':'s'}</span>
+      </div>
       ${list.length?`<table>
         <thead><tr><th></th><th>NAME</th><th>MOBILE</th><th class="hide-sm">AGE</th>
           <th class="hide-sm">SCHOOL</th><th>PLAN</th><th>LEFT</th><th>CARDS</th></tr></thead>
@@ -1464,7 +1467,10 @@ route('/client', async (id) => {
       </div>
 
       <div>
-        <h2>Upcoming sessions</h2>
+        <div class="row" style="justify-content:space-between;align-items:baseline;margin:32px 0 14px">
+          <h2 style="margin:0">Upcoming sessions</h2>
+          <button class="sm" onclick="addClientSession(${c.id})">Add session</button>
+        </div>
         <div class="sub" style="margin-bottom:10px">Click one to move it to another date of the same class.</div>
         <div class="box pad0">
           ${c.upcoming.length?`<table>
@@ -1743,6 +1749,106 @@ window.saveTopUp = async (cid, planId) => {
     }
     closeModal(); toast('Sessions assigned'); render();
   }catch(e){ toast(e.message,'bad'); }
+};
+
+/* ============================================================ ADD A SESSION
+   From a client's profile: book them into an upcoming session of a class they
+   already hold an active plan in. This spends a slot from that plan the same
+   way a scan at reception does — access.book() picks the plan for the
+   session's own class, so the right balance is charged without asking here. */
+let addPick = { cid: null, classId: null, classes: [], sessions: [], chosen: [] };
+
+window.addClientSession = async (cid) => {
+  const client = (window._client && window._client.id === cid) ? window._client : await api('/clients/'+cid);
+  const classes = client.classes_enrolled || [];
+  if(!classes.length) return toast('Add a plan before booking a session','bad');
+
+  addPick = { cid, classId: classes[0].class_id, classes, sessions: [], chosen: [] };
+
+  openModal(`<h3>Add a session</h3>
+    <div class="mh">Only sessions of a class they hold an active plan in are offered —
+      booking one spends a slot from that plan, the same as a scan.</div>
+
+    ${classes.length > 1 ? `<label>CLASS</label>
+    <select id="as_class" onchange="addSessionClassChanged()">
+      ${classes.map(k=>`<option value="${k.class_id}">${esc(k.class_name)}</option>`).join('')}
+    </select>` : ''}
+
+    <div class="row" style="justify-content:space-between;align-items:baseline;margin-top:${classes.length>1?'14px':'0'}">
+      <b style="font-size:14px">Choose the session(s)</b>
+      <span id="as_count" class="pill warn">0 chosen</span>
+    </div>
+    <div id="as_sessions" class="picklist" style="margin-top:8px"></div>
+
+    <div class="acts">
+      <button onclick="closeModal()">Cancel</button>
+      <button class="pri" id="as_save" disabled onclick="saveClientSession()">Add</button>
+    </div>`, true);
+
+  await loadAddSessions();
+};
+
+async function loadAddSessions(){
+  const now = Math.floor(Date.now()/1000);
+  addPick.sessions = await api(
+    `/sessions?start=${now}&end=${now+180*86400}` +
+    `&class_id=${addPick.classId}&available_for=${addPick.cid}`);
+  addPick.chosen = [];
+  renderAddSessions();
+}
+
+window.addSessionClassChanged = async () => {
+  addPick.classId = Number($('#as_class').value);
+  await loadAddSessions();
+};
+
+window.renderAddSessions = () => {
+  const host = $('#as_sessions');
+  if(!host) return;
+  const list = addPick.sessions;
+
+  host.innerHTML = list.length ? list.map(s => {
+    const on = addPick.chosen.includes(s.id);
+    return `<label class="pickrow${on?' on':''}">
+      <input type="checkbox" ${on?'checked':''} onchange="addSessionToggle(${s.id})">
+      <span class="dot" style="background:${esc(s.colour)}"></span>
+      <span class="pk-when">${fmtDay(s.starts_at)} · ${fmtTime(s.starts_at)}</span>
+      <span class="pk-class">${esc(s.class_name)}</span>
+      <span class="pk-meta">${esc(s.instructor_name||'no instructor')} · ${s.booked} booked</span>
+    </label>`;
+  }).join('') : '<div class="empty">No upcoming sessions in this class.</div>';
+
+  const n = addPick.chosen.length;
+  const cnt = $('#as_count');
+  if(cnt){ cnt.textContent = `${n} chosen`; cnt.className = 'pill ' + (n ? 'ok' : 'warn'); }
+  const save = $('#as_save');
+  if(save) save.disabled = n === 0;
+};
+
+window.addSessionToggle = (sid) => {
+  const i = addPick.chosen.indexOf(sid);
+  if(i >= 0) addPick.chosen.splice(i,1); else addPick.chosen.push(sid);
+  renderAddSessions();
+};
+
+window.saveClientSession = async () => {
+  const ids = addPick.chosen.slice();
+  if(!ids.length) return;
+  const btn = $('#as_save'); if(btn) btn.disabled = true;
+  try{
+    const results = await Promise.allSettled(
+      ids.map(sid => api(`/sessions/${sid}/book`, {method:'POST', body:{client_id: addPick.cid}})));
+    const fail = results.filter(r => r.status === 'rejected');
+    const ok = results.length - fail.length;
+    if(!fail.length){
+      closeModal(); toast(`Added ${ok} session${ok===1?'':'s'}`); render();
+    } else if(ok){
+      closeModal(); toast(`Added ${ok}, ${fail.length} failed`, 'bad'); render();
+    } else {
+      toast(fail[0].reason?.message || 'Could not add session', 'bad');
+      if(btn) btn.disabled = false;
+    }
+  }catch(e){ toast(e.message,'bad'); if(btn) btn.disabled = false; }
 };
 
 /* ---------- plan detail popup ---------- */
