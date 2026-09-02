@@ -22,8 +22,25 @@ until this has run with real clients. Do not add door-hardware code unless asked
 
 ## Stack
 
-Python 3, FastAPI, SQLite (WAL), uvicorn. Frontend is vanilla HTML/CSS/JS with
-hash routing — **no build step, no npm, no framework**.
+Python 3, FastAPI, SQLite (WAL), uvicorn on the backend. The admin frontend is
+React (Vite, plain JavaScript + `.jsx`, no TypeScript) with `react-router-dom`'s
+`HashRouter`, which is what keeps every `#/clients`, `#/client/17` URL working
+byte for byte across the rewrite. Source lives in `frontend/src/`.
+
+**No build step on the reception laptop — that promise survives the rewrite,
+it just moves.** `npm run build` runs once, on a developer's own machine,
+producing a folder of hashed, minified JS/CSS in `static/app/`. That output is
+committed to git like any other file. `START.bat`, `start.sh`, and the
+packaged `.exe` never invoke npm — they serve whatever is already sitting in
+`static/app/`. Node and npm are developer-only tools, exactly the way a
+compiler is a developer-only tool for a language that ships compiled: nothing
+about running the app requires them.
+
+**The cost of that, written down where the next person hits it:** a developer
+who changes anything under `frontend/src/` must run `npm run build` and
+commit the refreshed `static/app/` in the same commit. Nothing rebuilds it
+automatically — a source change with no matching `static/app/` change ships
+as a silent no-op.
 
 **Visual language.** The palette comes straight from the academy logo — the
 purple `#87438E` of the dancer and the pink `#EAAECA` of the panel behind her.
@@ -37,35 +54,44 @@ that is what makes the two themes share one set of views.
 **Responsive.** Sidebar becomes an off-canvas drawer under 900px (`body.nav-open`,
 `.topbar`, `.scrim`), tables scroll horizontally inside `.dt-scroll`, secondary
 columns are dropped with `.hide-sm`, modal actions stack under 480px. There is
-also a print stylesheet. This is deployed by
-copying a folder to a laptop and running one command. Anything needing a build
-pipeline is the wrong answer here.
+also a print stylesheet. Deployed by copying a folder to a laptop and running
+one command — see the Stack section above for how a React build stays
+compatible with that on the machine that matters, the reception laptop.
 
-**Tables sort and search without a library.** `enhanceTables()` in `app.js`
-upgrades ordinary server-rendered `<table>` markup in place: click a header to
-sort, and long tables get a search box and a capped scrolling body whose header
-stays put. It is called from exactly two places — the end of `render()` and the
-end of `openModal()` — so no view wires it up itself, and it is idempotent.
+**Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
+a controlled component that replaced app.js's old `enhanceTables()`. Click a
+column header to sort; a long table gets a capped scrolling body whose header
+stays put. The behaviour is the same as before — the mechanism had to change,
+because the old one worked by mutating already-rendered DOM after the fact
+(wrapper divs, rows physically reordered by `appendChild`), which is exactly
+what fights React owning that same subtree.
 
-A table opts into the search box by carrying `data-search="placeholder"`; the
-seven long ones do. A date cell carries `data-sort="<unix seconds>"` so WHEN
-columns order chronologically rather than by the letter the month starts with.
-The scroll cap itself is unconditional — every table gets it once it is long
-enough, `data-search` or not — only the toolbar is opt-in.
+A table opts into the search box with a `search="placeholder"` prop; most
+long tables pass one. Sorting has no separate opt-in switch: a column sorts
+if its definition carries a `sortValue: row => value` function, which is why
+every column doesn't need a `sortable: false` — no `sortValue` already means
+unsortable. The scroll cap applies to every table regardless of whether it
+has a search box, and is recomputed against the *filtered* row count on every
+render, so a table searched down to a handful of rows drops its cap rather
+than keeping the one computed before the search started.
 
-The Clients list carries its own hand-built bar instead of `data-search`: it
-already searches server-side through `/api/clients?q=`, and letting
-`enhanceTables()` add a second, client-side box next to it would filter a
-different set of rows than the one just fetched. The bar is styled to match —
-same classes, same position above the table — so it reads as one system even
-though the wiring underneath is different.
+The Clients list carries its own hand-built search bar instead of
+`<DataTable>`'s `search` prop: it already searches server-side through
+`/api/clients?q=`, and a second, client-side filter next to it would filter a
+different set of rows than the one just fetched. It still renders its table
+through `<DataTable>` with no `search` prop, so sorting still works — the old
+`enhanceTables()` made every table sortable regardless of whether it opted
+into search, and this is the one list that needs that distinction preserved.
+The bar is styled to match — same classes, same position above the table —
+so it reads as one system even though the wiring underneath is different.
 
-DataTables and jQuery were tried from a CDN and removed. Two reasons, both
-fatal here: this folder is copied to a reception laptop that may have no
-internet, so a CDN tag means the admin silently loses sorting and searching
-exactly where the tables are longest; and the library ships its own CSS, which
-fought the padding and type scale of everything above. Do not reintroduce
-either.
+DataTables and jQuery were tried from a CDN in the old vanilla frontend and
+removed — the library's own CSS fought the padding and type scale of
+everything else, and back when there was no build step at all, a CDN tag
+meant the admin could silently lose sorting on a reception laptop with no
+internet. That specific risk is gone now that the whole interface is one
+bundled, committed file, but the CSS fight is still a real reason: do not
+reintroduce either.
 
 ## Files
 
@@ -79,18 +105,56 @@ db.py             Schema + connection helpers. All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / manual_check_in.
 cards.py          Member card PNG generation.
-server.py         FastAPI routes. Thin — logic belongs in access.py.
+server.py         FastAPI app, paths, startup, static mounts. Thin — routes
+                  live in api/, business rules live in access.py.
+api/              One router module per resource, wired into server.py with
+                  ordinary static imports (helpers.py, clients.py, plans.py,
+                  classes.py, instructors.py, sessions.py, access_routes.py,
+                  dashboard.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
 seed.py           Wipes the DB and rebuilds it from sheets/. --force required.
-static/index.html Admin shell + sidebar.
-static/app.js     SPA: router, all views, all modals.
-static/style.css  Design tokens and components.
-static/reception.html  Kiosk check-in screen (standalone, own JS).
+frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
+                  for the build-once-commit-the-output model.
+  src/views/       One file per route: Dashboard, Calendar, Classes,
+                   ClassDetail, Instructors, InstructorDetail, Cards, Sessions,
+                   SessionDetail, Clients, ClientDetail.
+  src/modals/      Every modal, one file each, imported by the view(s) that
+                   open it.
+  src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
+                   Toast, Avatar, Pill, Empty.
+static/app/       Committed build output of frontend/ — what server.py
+                  actually serves at `/`. Regenerate with `npm run build`
+                  after any `frontend/src/` change; see Stack above.
+static/style.css  Design tokens and components. Shared by the React admin,
+                  reception.html and scanner-test.html — all three load it
+                  by the same `/static/style.css` URL, so it is never bundled
+                  into `static/app/`.
+static/reception.html  Kiosk check-in screen (standalone, own JS, untouched
+                  by the React rewrite — see the note below).
 START.bat         Windows double-click launcher.
 start.sh          Same thing for terminal / Mac / Linux.
 Check Setup.bat   Reports what the launcher can see. For diagnosing setup.
-BUILD_EXE.bat     Run once on Windows to produce the standalone .exe.
-academy.spec      PyInstaller build definition. Hidden imports live here.
+BUILD_EXE.bat     Run once on Windows to produce the standalone .exe. Rebuilds
+                  the frontend first if Node is present; uses the committed
+                  static/app/ build as-is otherwise.
+build_mac.sh      Same thing, run once on a Mac, for a macOS binary. Refuses
+                  to run on anything that isn't Darwin — see the WSL note
+                  below for why that guard exists.
+build_linux.sh    Same thing, run once on Linux, for a Linux binary. Same
+                  host guard, symmetrically (refuses on anything but Linux).
+.github/workflows/
+  build-macos.yml Manually-triggered CI (Actions tab -> Run workflow, or
+                  `gh workflow run build-macos.yml`) that builds the macOS
+                  binary on a real GitHub-hosted Mac, for anyone who needs a
+                  ready-to-run Mac build without access to a Mac. Download
+                  the result from the finished run's Artifacts, or
+                  `gh run download`. Runs on macos-13 (Intel), deliberately
+                  not macos-latest/arm64 — an x86_64 build runs on Intel Macs
+                  natively and on Apple Silicon Macs via Rosetta 2, the
+                  reverse isn't true, and the reception Mac's hardware isn't
+                  known. Do not "helpfully" bump this to the newer image.
+academy.spec      PyInstaller build definition, shared by all three build
+                  scripts above. Hidden imports live here.
 run_app.py        Entry point for the packaged build.
 cleanup.sh        Removes leftovers from earlier versions.
                   (no settings page: the no-show rules it configured are gone)
@@ -102,15 +166,36 @@ academy.db        The database. Not in git. This IS the business record.
 .env              ENTRY_SECRET. Not in git, ever.
 ```
 
+`static/reception.html` and `static/scanner-test.html` are deliberately
+untouched by the React rewrite: the kiosk is the one latency-sensitive
+surface in the app (USB-HID scanner keystroke timing, camera barcode
+scanning, audio beeps), has no tables, no router, no modals, and nothing to
+gain from a re-render model. It stays self-contained, inline `<style>`,
+inline `<script>`, vanilla — exactly as before.
+
 ## Commands
 
 ```bash
 ./start.sh                  # Mac/Linux, or Git Bash on Windows
 ./start.sh --seed           # wipe and rebuild from the sheets/ workbooks
-./start.sh --reset-admin    # forget all accounts, regenerate a bootstrap admin
 START.bat                   # Windows: double-click, or run from cmd
 BUILD_EXE.bat               # Windows, run once: produces a standalone .exe
+./build_mac.sh              # macOS, run once: produces a standalone binary
+./build_linux.sh            # Linux, run once: produces a standalone binary
 "Create Desktop Shortcut.bat"
+
+gh workflow run build-macos.yml   # or the Actions tab -> Run workflow:
+                             #   builds the macOS binary on a real Mac in CI,
+                             #   for when there's no Mac to build on locally.
+                             #   Fetch the result with `gh run download` or
+                             #   from the run's page -> Artifacts.
+
+cd frontend && npm install  # once, to work on the React admin at all
+npm run dev                 # Vite dev server on :5173, proxies /api etc. to
+                             #   a real backend on :8000 (run ./start.sh in a
+                             #   second terminal) — for frontend iteration only
+npm run build                # regenerates static/app/ — required before
+                              #   committing any change under frontend/src/
 ```
 
 ### The reception laptop has nothing installed
@@ -145,6 +230,18 @@ redirect, so a machine with Python 3.11 was told Python was missing. Every
 command containing parentheses, pipes or redirects now lives in its own
 subroutine, and version comparison parses the plain text of `python -V`
 instead of running Python code. **Keep it that way.**
+
+**The WSL trap that already bit once, too.** `uname -s` reports `Linux`
+inside WSL — both WSL1 and WSL2 — not anything that names Windows. Someone
+ran `bash build_mac.sh` inside WSL expecting a macOS build; PyInstaller
+cannot cross-compile, so it silently built a genuine Linux binary while
+printing macOS-flavoured success text, and the failure only surfaced later,
+confusingly, as `zsh: exec format error` on the actual Mac — `chmod +x` and
+clearing Gatekeeper are both irrelevant to that, since neither changes a
+file's binary format. `build_mac.sh` and `build_linux.sh` now both refuse to
+run on the wrong host (`case "$(uname -s)" in Darwin*)`/`Linux*)`), failing
+fast with an explanation instead of producing a wrong-platform binary that
+"succeeds" until someone actually tries to run it. **Keep those guards.**
 
 Detection also scans the standard install folders and the registry, because
 installing Python with "Add to PATH" unticked is common and makes `where`
@@ -183,7 +280,32 @@ Two cases the script handles:
 
 `BUILD_EXE.bat` is the stronger option: run once on any Windows machine with
 Python and it produces a single `MB Ballet Academy.exe` needing nothing at all.
-**PyInstaller cannot cross-compile — a Windows exe must be built on Windows.**
+`build_mac.sh`/`build_linux.sh` are the same idea for those platforms — same
+`academy.spec`, same four-step flow (build tool, frontend refresh, package,
+done). They differ from `BUILD_EXE.bat` only in shell (bash, not batch),
+Python-discovery idiom, and the OS-specific caveat printed at the end (see
+below) — nothing about the packaging step itself changes per OS.
+**PyInstaller cannot cross-compile — a build has to run on the OS it targets.**
+A Windows `.exe` needs a Windows machine, a macOS binary needs a Mac, a Linux
+one needs Linux; there is no way to pick a target from one script on one
+machine. The Linux binary is also tied to the glibc version of the machine
+that built it (newer glibc, not older, runs it), and an unsigned macOS binary
+copied to a different Mac needs one right-click-Open the first time to clear
+Gatekeeper — both scripts print these caveats at the end of a successful build.
+`build_mac.sh` and `build_linux.sh` also refuse outright to run on the wrong
+host OS (see the WSL trap above) rather than silently producing a
+wrong-platform binary — `BUILD_EXE.bat` gets no equivalent guard, since a
+`.bat` file only runs under `cmd.exe`/PowerShell in practice, unlike a bash
+script that WSL, Git Bash, a Linux box and a Mac terminal can all run
+without complaint.
+
+**No Mac to build on?** `.github/workflows/build-macos.yml` builds the macOS
+binary on a real GitHub-hosted Mac instead — trigger it from the Actions tab
+or `gh workflow run build-macos.yml` (both reachable from Windows/WSL), then
+download the finished binary from the run's Artifacts or `gh run download`.
+It is manually triggered only (`workflow_dispatch`), never on push, because
+macOS runner minutes are billed at a 10x multiplier against the GitHub free
+tier and this is an occasional "cut a release" action, not a per-commit one.
 
 The entry point is `run_app.py`, not `server.py`. A double-clicked exe closes
 its console the moment the process dies, so an unhandled exception is invisible
@@ -317,6 +439,23 @@ still-`booked` slot absent once its session has ended, and runs on startup,
 hourly, and before every read that touches attendance. Nothing on screen is
 stale.
 
+**A plan is valid through the last session it pays for.** `access.plan_state()`
+derives `expires_on` as the later of the stored column and
+`access.last_session_date()` (the max `starts_at` among the plan's bookings),
+so assigning a later session — selling it that way, or via "Assign remaining
+sessions" / "Add a session" after the fact — extends the plan automatically;
+nothing has to be edited by hand. The stored column is the floor: what
+reception typed at sale time (`PlanPicker` auto-fills it from the sessions
+picked, but it stays overridable — a courtesy extension), or what a freeze
+pushed it to while the released slots had no dates to derive from. This is
+why `freeze_plan()`/`unfreeze_plan()` need no special-casing: freezing
+deletes the future bookings that would otherwise inflate the derived date,
+and unfreezing's existing day-shift is exactly the floor `plan_state()` needs
+until the released slots are reassigned. The printed member card shows
+whatever `plan_state()` returned at issue time — it does **not** update
+itself if the plan's validity grows afterward; reissuing is what refreshes it,
+same as it already was for a plan extended by an unfreeze.
+
 ## Seeding from the academy's spreadsheets
 
 Reception has run this academy out of Excel for years and will keep doing so.
@@ -377,10 +516,14 @@ Consequences to keep in mind:
 Anything with history is **archived** (`active=0`), never deleted. Permanent
 deletion is a separate `?hard=true` call, and the server refuses it when
 attendance records exist. Losing the record of who attended what is worse than
-a cluttered list. Archived records are restorable from the Admin → Archive tab.
+a cluttered list.
 
-Manual balance adjustment exists (`PATCH /api/admin/subscriptions/{id}`) and
-requires a reason, because the alternative is staff inventing workarounds.
+Archiving is currently **one-way**: there is no restore endpoint and no
+"Admin → Archive" screen. An `admin_routes.py` once existed with a restore
+route and a manual-balance-adjustment endpoint, but it was never mounted into
+`server.py` — dead code from the pre-authentication version of the app,
+removed rather than wired in (see Known gaps). If either is wanted, build it
+fresh against the current model rather than reviving that file.
 
 ## Design decisions — do not undo these without asking
 
@@ -490,7 +633,7 @@ the one screen that has to work.
 
 ### What a scan shows
 
-`access.client_profile()` supplies the context, and it is deliberately
+`access._client_payload()` supplies the context, and it is deliberately
 generous — the receptionist has a few seconds with a person in front of her,
 and that is the only moment "expired last week" or "three absences" is worth
 anything. Looking it up afterwards never happens.
@@ -515,8 +658,11 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 ## Known gaps / next up
 
-- [ ] Rate limiting on `/api/auth/login`. Currently unlimited attempts; fine on
-      a LAN-less laptop, not fine if this is ever exposed.
+- [ ] No archive-restore UI, and no manual balance adjustment endpoint. An
+      `admin_routes.py` once had both, but it was never mounted into
+      `server.py` — dead, unreachable code from the pre-authentication
+      version of the app, deleted rather than wired in. Building either
+      one for real is separate feature work against the current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
       flexibility alone. The dashboard says how many plans carry no price
@@ -542,9 +688,11 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 - Business rules in `access.py`, never in `server.py` or the frontend.
 - Deny messages are written for a receptionist to read aloud in plain language
-  ("Subscription expired 6 days ago"), not error codes. Technical detail goes in
-  `detail`, which the UI does not show.
-- All user text passes through `esc()` in the frontend. No exceptions.
+  ("No session booked today for Flexibility"), not error codes. Technical
+  detail goes in `detail`, which the UI does not show.
+- **Never use `dangerouslySetInnerHTML`.** JSX escapes interpolated text by
+  default — that is what replaced the old `esc()` helper. There is no
+  legitimate reason to render raw HTML anywhere in this app.
 - Comments explain *why*, not *what*. Most existing ones record a decision.
 - **English only.** There are no Arabic fields anywhere — no `name_ar`, no
   second name input, no RTL block. The academy works in English and a

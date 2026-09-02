@@ -1,0 +1,52 @@
+name: Build macOS binary
+#
+# Produces a ready-to-run macOS build of MB Ballet Academy with no Mac
+# required to build it — PyInstaller cannot cross-compile, so build_mac.sh
+# only works when run on an actual Mac. This workflow runs on a real
+# GitHub-hosted Mac instead.
+#
+# Manual trigger only (Actions tab -> Run workflow, or
+# `gh workflow run build-macos.yml`) — this is an occasional "cut a
+# release" action, not something that should burn macOS-runner minutes
+# (billed at a 10x multiplier against the free-tier quota) on every push.
+#
+# Download the result from the finished run's page: Actions tab -> the run
+# -> Artifacts, or `gh run download`. It comes back as a .zip containing
+# the single binary.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # Intel (x86_64) runner, deliberately NOT macos-latest/macos-14 (Apple
+    # Silicon/arm64). academy.spec's target_arch=None just builds for
+    # whatever the host is, and an x86_64 build runs natively on Intel Macs
+    # AND on Apple Silicon Macs via Rosetta 2 — the reverse isn't true,
+    # there's no way to run arm64 code on an Intel Mac. The reception Mac's
+    # exact hardware isn't known, so this is the strictly safer choice.
+    # Do not bump this to macos-latest without knowing that tradeoff.
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tool and dependencies
+        run: |
+          python3 -m pip install --upgrade pip pyinstaller
+          python3 -m pip install -r requirements.txt
+
+      - name: Package
+        # static/app/ (the built React interface) is used exactly as
+        # committed — no npm/Node step here, the same "already built, just
+        # use it" fallback the local build scripts take when Node isn't
+        # installed. The hidden imports live in academy.spec, not here.
+        run: python3 -m PyInstaller academy.spec --clean --noconfirm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mb-ballet-academy-macos
+          path: dist/MB Ballet Academy

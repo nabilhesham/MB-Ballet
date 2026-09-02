@@ -18,6 +18,7 @@ import os
 import sys
 from datetime import date, datetime, time, timedelta
 
+import access
 import cards
 import db
 import sheets
@@ -289,17 +290,16 @@ def _fit_expiry(conn, sub_id, expires):
     """
     Stretch the expiry to cover the sessions the plan is actually paying for.
 
-    The sheet gives a payment date, and thirty days from it is the usual
-    window -- but several rows were paid weeks before the student started, so
-    the plain arithmetic expires a plan halfway through the classes it bought.
-    A plan cannot have run out before the last session it funds.
+    access.last_session_date() owns the rule now (plan_state() applies it
+    live, on every read); the week added on top here is a seed-only concern
+    -- the sheet gives a payment date, and several rows were paid weeks
+    before the student started, so the plain arithmetic expires a plan
+    halfway through the classes it bought.
     """
-    last = conn.execute(
-        "SELECT MAX(s.starts_at) t FROM bookings b JOIN sessions s ON s.id=b.session_id"
-        " WHERE b.subscription_id=?", (sub_id,)).fetchone()["t"]
-    if last is None:
+    covers = access.last_session_date(conn, sub_id)
+    if covers is None:
         return
-    end = date.fromtimestamp(last) + timedelta(days=7)
+    end = date.fromisoformat(covers) + timedelta(days=7)
     if end > expires:
         conn.execute("UPDATE subscriptions SET expires_on=? WHERE id=?",
                      (end.isoformat(), sub_id))
