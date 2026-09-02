@@ -19,7 +19,6 @@ Design notes, so the next person does not undo them by accident:
 """
 
 import os
-import sys
 
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
@@ -162,7 +161,7 @@ def card_path(client_id: int, class_name: str = None, out_dir="cards") -> str:
     return os.path.join(out_dir, f"client_{client_id:05d}_{slug}.png")
 
 
-def build_card(client_id: int, name: str, token: str, plan: str,
+def build_card(client_id: int, name: str, token: str, sessions_total: int,
                expires_on: str, out_dir="cards",
                class_name: str = None, colour: str = None) -> str:
     """
@@ -241,7 +240,6 @@ def build_card(client_id: int, name: str, token: str, plan: str,
 
     pad = 20
     tile = [(CARD_W - QR) // 2 - pad, y, (CARD_W + QR) // 2 + pad, y + QR + pad * 2]
-    print(tile)
     d.rectangle(tile, fill="#FFFFFF", outline=RULE, width=1)
     card.paste(qr_img, ((CARD_W - QR) // 2, y + pad))
     y = tile[3] + 40
@@ -254,12 +252,16 @@ def build_card(client_id: int, name: str, token: str, plan: str,
     value = _font("serif_b", 25)
     mid = CARD_W / 2
 
-    d.text((MARGIN, y), "PLAN", font=label, fill=MUTE)
+    d.text((MARGIN, y), "SESSIONS", font=label, fill=MUTE)
     d.text((mid + 14, y), "VALID UNTIL", font=label, fill=MUTE)
     y += 22
 
-    plan_font = _fit(d, plan or "—", mid - MARGIN - 24, start=25, minimum=13)
-    d.text((MARGIN, y), plan or "—", font=plan_font, fill=INK)
+    # The total bought, not what's left: a remaining count goes stale the
+    # moment they check in, and this PNG is a print snapshot nothing
+    # regenerates on its own — reissuing is the only way to refresh it.
+    sessions_text = f"{sessions_total} SESSION{'' if sessions_total == 1 else 'S'}"
+    sessions_font = _fit(d, sessions_text, mid - MARGIN - 24, start=25, minimum=13)
+    d.text((MARGIN, y), sessions_text, font=sessions_font, fill=INK)
     d.text((mid + 14, y), expires_on, font=value, fill=INK)
     y += 46
 

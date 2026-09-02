@@ -108,10 +108,18 @@ def delete_class(clid: int, hard: bool = False):
         if hard and held:
             raise HTTPException(400, f"{c['name']} has {held} attendance records — archive instead")
         if hard:
+            # Bypasses access.unbook(), so the plans these bookings funded
+            # need their expiry refreshed by hand once the bookings are gone.
+            subs = {r["subscription_id"] for r in conn.execute(
+                "SELECT DISTINCT subscription_id FROM bookings"
+                " WHERE session_id IN (SELECT id FROM sessions WHERE class_id=?)"
+                "   AND subscription_id IS NOT NULL", (clid,)).fetchall()}
             conn.execute("DELETE FROM bookings WHERE session_id IN"
                          " (SELECT id FROM sessions WHERE class_id=?)", (clid,))
             conn.execute("DELETE FROM sessions WHERE class_id=?", (clid,))
             conn.execute("DELETE FROM classes WHERE id=?", (clid,))
+            for sub_id in subs:
+                access.refresh_expiry(conn, sub_id)
             action = "delete"
         else:
             conn.execute("UPDATE classes SET active=0 WHERE id=?", (clid,))

@@ -20,7 +20,24 @@ class FreezeIn(BaseModel):
     reason: Optional[str] = None
 
 
+class PlanEdit(BaseModel):
+    plan: Optional[str] = None
+    sessions_total: Optional[int] = None
+    expires_on: Optional[str] = None
+    session_ids: Optional[list[int]] = None
+
+
 # ---------------------------------------------------------------- routes
+@router.put("/api/plans/{pid}")
+def edit_plan(pid: int, body: PlanEdit):
+    conn = db.connect()
+    try:
+        r = access.edit_plan(conn, pid, **body.model_dump(exclude_none=True))
+        return JSONResponse(r, status_code=200 if r["ok"] else 400)
+    finally:
+        conn.close()
+
+
 @router.post("/api/plans/{pid}/freeze")
 def freeze_plan(pid: int, body: FreezeIn):
     conn = db.connect()

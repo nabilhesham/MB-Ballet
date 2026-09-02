@@ -213,9 +213,16 @@ def delete_session(sid: int, force: bool = False):
             raise HTTPException(400, f"{used} attendance record(s) — cancel it instead")
         n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
                          (sid,)).fetchone()["n"]
+        # Deleting bookings this way bypasses access.unbook(), so the plans
+        # they funded need the same expiry refresh by hand.
+        subs = {r["subscription_id"] for r in conn.execute(
+            "SELECT DISTINCT subscription_id FROM bookings"
+            " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
         conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
         conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
         conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+        for sub_id in subs:
+            access.refresh_expiry(conn, sub_id)
         conn.commit()
         return {"ok": True, "released": n}
     finally:

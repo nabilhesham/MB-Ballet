@@ -191,9 +191,13 @@ gh workflow run build-macos.yml   # or the Actions tab -> Run workflow:
                              #   from the run's page -> Artifacts.
 
 cd frontend && npm install  # once, to work on the React admin at all
-npm run dev                 # Vite dev server on :5173, proxies /api etc. to
-                             #   a real backend on :8000 (run ./start.sh in a
-                             #   second terminal) — for frontend iteration only
+npm run dev                 # Vite dev server, proxies /api etc. to a real
+                             #   backend on :8000 (run ./start.sh in a second
+                             #   terminal) — for frontend iteration only. Open
+                             #   the URL Vite prints, e.g. http://localhost:
+                             #   5173/static/app/ — NOT bare :5173/ — since
+                             #   the app's `base` in vite.config.js is
+                             #   /static/app/, matching production's URL
 npm run build                # regenerates static/app/ — required before
                               #   committing any change under frontend/src/
 ```
@@ -377,8 +381,9 @@ system and everything else follows from it:
   Status is `booked` → `present` | `absent`. There is no third state: a slot is
   either used or it is not, and **both present and absent consume it**, because
   the place was reserved either way.
-- **subscriptions** are plans. `sessions_used` is *not* stored — it is counted
-  from the bookings by `access.plan_state()`, so the two can never drift apart.
+- **subscriptions** are plans. `sessions_used` is a column but is dead weight —
+  nothing writes it and nothing reads it. Used slots are counted live from the
+  bookings by `access.plan_state()` instead, so the two can never drift apart.
   `price` is what was paid, and it is **nullable on purpose**: the ballet sheet
   records "yes" rather than an amount, and a plan whose price nobody wrote down
   must not be reported as zero revenue. `payment_note` keeps the cell verbatim
@@ -439,22 +444,47 @@ still-`booked` slot absent once its session has ended, and runs on startup,
 hourly, and before every read that touches attendance. Nothing on screen is
 stale.
 
-**A plan is valid through the last session it pays for.** `access.plan_state()`
-derives `expires_on` as the later of the stored column and
+**A plan is valid through the last session it pays for, kept current by
+writing it, not by deriving it at read time.** `subscriptions.expires_on` is
+the answer `plan_state()` returns, verbatim — no floor, no read-time raise.
+What keeps it honest is `access.refresh_expiry()`, which rewrites it to
 `access.last_session_date()` (the max `starts_at` among the plan's bookings),
-so assigning a later session — selling it that way, or via "Assign remaining
-sessions" / "Add a session" after the fact — extends the plan automatically;
-nothing has to be edited by hand. The stored column is the floor: what
-reception typed at sale time (`PlanPicker` auto-fills it from the sessions
-picked, but it stays overridable — a courtesy extension), or what a freeze
-pushed it to while the released slots had no dates to derive from. This is
-why `freeze_plan()`/`unfreeze_plan()` need no special-casing: freezing
-deletes the future bookings that would otherwise inflate the derived date,
-and unfreezing's existing day-shift is exactly the floor `plan_state()` needs
-until the released slots are reassigned. The printed member card shows
-whatever `plan_state()` returned at issue time — it does **not** update
-itself if the plan's validity grows afterward; reissuing is what refreshes it,
-same as it already was for a plan extended by an unfreeze.
+called from **every** path that changes which sessions a plan's slots point
+at: `book()`, `unbook()`, `move_booking()`, `edit_plan()`, and the bulk
+booking-deletes in `delete_session`/`delete_class` that bypass `unbook()`.
+Assigning a later session pushes the date out; removing one pulls it back —
+both directions, automatically, with nothing edited by hand. A date typed by
+reception (`PlanPicker`'s and `EditPlan`'s `ENDS ON` field both auto-fill from
+the sessions picked, but stay overridable) is written as given and holds
+right up until the plan's sessions change again, at which point it recomputes
+— it is a courtesy override, not a permanent one.
+
+**`freeze_plan()` is the one deliberate exception** and must never call
+`refresh_expiry()`: it deletes future bookings on purpose, and
+`unfreeze_plan()`'s existing day-shift needs the expiry to still be sitting
+where it was, not collapsed back to an earlier remaining session, so it has
+something real to shift from. If a future change adds another path that
+touches a plan's bookings, it needs this same refresh — forgetting it is
+exactly the kind of bug that only shows up as a card printing the wrong date
+weeks later.
+
+The printed member card shows whatever `plan_state()` returned at issue
+time — it does **not** update itself if the plan's validity changes
+afterward, grown or shrunk, edited or unfrozen; reissuing is what refreshes
+it. The card's `SESSIONS` field is `sessions_total` (the total bought), not a
+remaining count — remaining goes stale the moment they check in, and the PNG
+is a print snapshot nothing regenerates on its own.
+
+**Editing a plan** (`PUT /api/plans/{pid}`, `access.edit_plan()`) changes its
+name, its session count, its sessions, and its end date after it has been
+sold — the **Edit** button next to Freeze/Renew on the client profile.
+Refused outright on a frozen plan (unfreeze first — editing underneath a
+freeze would fight the exception above). Changing the session count reopens
+the same session picker `PlanPicker` uses and requires the picker's full,
+matching set of session ids — a count changed without saying which sessions
+is refused, the same contract `add_plan()` uses. A session already marked
+present or absent is attendance history and can never be dropped from a plan,
+whatever the new count is.
 
 ## Seeding from the academy's spreadsheets
 
@@ -552,12 +582,14 @@ client is enrolled in within roughly ±45 min. If none match it still returns
 ANYWAY". Reception has judgement; the software should inform, not block. Do not
 turn this into a hard deny.
 
-**Session spend is atomic via the WHERE clause:**
-```sql
-UPDATE subscriptions SET sessions_used = sessions_used + 1
- WHERE id=? AND sessions_used < sessions_total
-```
-A second call matches zero rows. Never replace with read-then-write.
+**Session spend is guarded before the insert.** `access.book()` counts the
+plan's existing bookings and refuses once that count reaches
+`sessions_total`, then inserts the new booking. There is no atomic
+single-statement spend here — `sessions_used` (see above) was that model's
+column, and it is dead. The count-then-insert happens inside one connection
+under SQLite's own locking, which is enough for this app's single-writer,
+one-laptop reality; it is not a claim of correctness under real concurrent
+writers.
 
 **Credentials are revoked, never deleted.** `revoked_at` timestamp. The log must
 keep pointing at the credential actually used. Issuing a card auto-revokes the

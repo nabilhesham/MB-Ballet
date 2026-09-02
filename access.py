@@ -89,6 +89,31 @@ def last_of_sessions(conn, session_ids):
     return _iso_day(t) if t is not None else None
 
 
+def refresh_expiry(conn, sub_id: int):
+    """
+    Rewrite a plan's end date to the last session it now pays for.
+
+    Called from every path that changes which sessions a plan's slots point
+    at — book(), unbook(), and the bulk deletes that remove bookings without
+    going through either. This is what makes adding a session in July push
+    the plan out to July, and removing it pull the plan back, with nobody
+    editing the field by hand — and it is why a date typed by hand in
+    edit_plan() stands only until the sessions move under it.
+
+    freeze_plan() is the one deliberate exception: it deletes future bookings
+    on purpose, and unfreeze_plan()'s day-shift is the date that has to
+    survive until the released slots are reassigned. It must not call this.
+
+    A plan with no bookings left keeps whatever is stored: the column is NOT
+    NULL, and "no dates yet" is not the same as "expired".
+    """
+    covers = last_session_date(conn, sub_id)
+    if covers is None:
+        return None
+    conn.execute("UPDATE subscriptions SET expires_on=? WHERE id=?", (covers, sub_id))
+    return covers
+
+
 def plan_state(conn, sub_id: int) -> dict:
     """
     Where a plan stands. Used slots are counted from the bookings rather than
@@ -107,15 +132,10 @@ def plan_state(conn, sub_id: int) -> dict:
     klass = conn.execute("SELECT name, colour FROM classes WHERE id=?",
                          (sub["class_id"],)).fetchone() if sub["class_id"] else None
     allowed, why = can_freeze(sub)
-    # A plan is valid through the last session it is paying for. The stored
-    # date is the floor, not the answer: it is what reception typed, and what
-    # a freeze pushed out while the released slots had no dates to derive
-    # from. Assigning a later session extends the plan automatically, which
-    # is the only version of this that cannot drift out of sync.
+    # The stored date is the answer, not a floor: refresh_expiry() rewrites it
+    # whenever the plan's bookings change, so deriving it again here would
+    # only be able to disagree with what an edit deliberately set.
     expires = sub["expires_on"]
-    covers = last_session_date(conn, sub_id)
-    if covers and covers > expires:
-        expires = covers
     return {
         "id": sub["id"], "plan": sub["plan"],
         "class_id": sub["class_id"],
@@ -481,6 +501,8 @@ def book(conn, client_id: int, session_id: int, subscription_id: int = None) -> 
         " VALUES (?,?,?,?,?)",
         (client_id, session_id, subscription_id,
          "absent" if session_end(s) < db.now() else "booked", db.now()))
+    if subscription_id is not None:
+        refresh_expiry(conn, subscription_id)
     conn.commit()
     return {"ok": True}
 
@@ -491,6 +513,8 @@ def unbook(conn, client_id: int, session_id: int) -> dict:
     if b is None:
         return {"ok": False, "error": "not booked"}
     conn.execute("DELETE FROM bookings WHERE id=?", (b["id"],))
+    if b["subscription_id"] is not None:
+        refresh_expiry(conn, b["subscription_id"])
     conn.commit()
     return {"ok": True}
 
@@ -514,6 +538,10 @@ def move_booking(conn, client_id: int, from_session: int, to_session: int) -> di
 
     conn.execute("UPDATE bookings SET session_id=?, status='booked', checked_in_at=NULL"
                  " WHERE id=?", (to_session, b["id"]))
+    # Moving a booking to a different date can move the plan's last session
+    # too — earlier or later — so it needs the same refresh book()/unbook() do.
+    if b["subscription_id"] is not None:
+        refresh_expiry(conn, b["subscription_id"])
     conn.commit()
     return {"ok": True}
 
@@ -534,6 +562,106 @@ def cancel_session(conn, session_id: int) -> dict:
     conn.execute("UPDATE sessions SET status='cancelled' WHERE id=?", (session_id,))
     conn.commit()
     return {"ok": True, "released": n}
+
+
+def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
+             expires_on: str = None, session_ids: list = None) -> dict:
+    """
+    Change a plan's name, size, sessions or end date after it has been sold.
+
+    Frozen plans are refused outright: freezing already owns this plan's
+    bookings and its expiry (see freeze_plan()'s comment on why it skips
+    refresh_expiry()), and editing underneath a freeze would fight
+    unfreeze_plan()'s day-shift.
+
+    Changing sessions_total requires session_ids too — the picker always
+    accompanies the count, the same contract add_plan() uses, so the two can
+    never drift out of step with each other. When session_ids is given it is
+    the plan's *complete* new set of dates, not a delta: every slot assigned
+    up front, same as add_plan(). Sessions already present/absent are
+    attendance history and can never be dropped; only 'booked' ones may be
+    removed.
+
+    A typed expires_on is a deliberate override and is written as given;
+    leaving it out re-derives the date from whatever sessions the plan holds
+    after this edit, via refresh_expiry() — so an edit that only adds or
+    drops sessions moves the date automatically, in either direction.
+    """
+    sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+    if sub is None:
+        return {"ok": False, "error": "no such plan"}
+    if sub["frozen_on"]:
+        return {"ok": False, "error": "unfreeze this plan before editing it"}
+    if sessions_total is not None and sessions_total < 1:
+        return {"ok": False, "error": "a plan needs at least one session"}
+    if sessions_total is not None and session_ids is None:
+        return {"ok": False, "error": "changing the number of sessions means reassigning them"}
+
+    current = conn.execute(
+        "SELECT session_id, status FROM bookings WHERE subscription_id=?",
+        (sub_id,)).fetchall()
+    current_ids = {b["session_id"] for b in current}
+    attended_ids = {b["session_id"] for b in current if b["status"] != "booked"}
+
+    total = sessions_total if sessions_total is not None else sub["sessions_total"]
+
+    if session_ids is not None:
+        if len(set(session_ids)) != len(session_ids):
+            return {"ok": False, "error": "the same session was chosen twice"}
+        if len(session_ids) != total:
+            return {"ok": False,
+                    "error": f"assign all {total} sessions ({len(session_ids)} chosen)"}
+        wanted = set(session_ids)
+        if not attended_ids <= wanted:
+            return {"ok": False, "error": "an already-attended session cannot be removed"}
+
+        new_ids = wanted - current_ids
+        if new_ids:
+            marks = ",".join("?" * len(new_ids))
+            wrong = conn.execute(
+                f"SELECT COUNT(*) n FROM sessions WHERE id IN ({marks}) AND class_id != ?",
+                (*new_ids, sub["class_id"])).fetchone()["n"]
+            if wrong:
+                return {"ok": False,
+                        "error": f"{wrong} of the chosen sessions are not this plan's class"}
+            clash = conn.execute(
+                f"SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id IN ({marks})",
+                (sub["client_id"], *new_ids)).fetchone()["n"]
+            if clash:
+                return {"ok": False, "error": "already booked into one of those sessions"}
+
+        to_drop = current_ids - wanted
+        if to_drop:
+            marks = ",".join("?" * len(to_drop))
+            conn.execute(
+                f"DELETE FROM bookings WHERE subscription_id=? AND session_id IN ({marks})",
+                (sub_id, *to_drop))
+        for sid in new_ids:
+            s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+            status = "absent" if s and session_end(s) < db.now() else "booked"
+            conn.execute(
+                "INSERT INTO bookings (client_id, session_id, subscription_id, status,"
+                " created_at) VALUES (?,?,?,?,?)",
+                (sub["client_id"], sid, sub_id, status, db.now()))
+
+    fields = {}
+    if plan is not None:
+        fields["plan"] = plan
+    if sessions_total is not None:
+        fields["sessions_total"] = sessions_total
+    if fields:
+        sets = ", ".join(f"{k}=?" for k in fields)
+        conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?",
+                     (*fields.values(), sub_id))
+
+    if expires_on:
+        conn.execute("UPDATE subscriptions SET expires_on=? WHERE id=?",
+                     (expires_on, sub_id))
+    else:
+        refresh_expiry(conn, sub_id)
+
+    conn.commit()
+    return {"ok": True, **plan_state(conn, sub_id)}
 
 
 def expected_today(conn) -> dict:
@@ -666,6 +794,11 @@ def freeze_plan(conn, sub_id: int, until: str = None, reason: str = None,
 
     # Release future bookings inside the freeze. Anything already marked
     # present or absent is history and stays untouched.
+    #
+    # Deliberately does NOT call refresh_expiry() after this delete, unlike
+    # book()/unbook()/move_booking(): the expiry needs to stay put at whatever
+    # it already was so unfreeze_plan()'s day-shift has a real date to shift
+    # from, not one that just collapsed back to an earlier remaining session.
     cutoff_from = int(datetime.combine(date.fromisoformat(start), _t.min).timestamp())
     params = [sub_id, cutoff_from]
     window = ""
