@@ -64,12 +64,9 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         + 'are already attended — the plan cannot go below that', 'bad');
     }
     setNeed(n);
-    setChosen(c => {
-      if (c.length <= n) return c;
-      const lockedChosen = c.filter(x => locked.includes(x));
-      const rest = c.filter(x => !locked.includes(x));
-      return [...lockedChosen, ...rest.slice(0, n - lockedChosen.length)];
-    });
+    // Deliberately does not touch `chosen` — which session to drop (or add)
+    // is reception's call, not the app's. A mismatch just shows as a warning
+    // below and keeps Save off until the ticks are adjusted by hand.
   };
 
   const toggle = sid => {
@@ -130,6 +127,12 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         Only {plan.class_name || 'this class'}'s sessions are offered. Sessions already attended
         are locked and always count toward the total.
       </div>
+      {chosen.length !== need && (
+        <div className="warnline" style={{ margin: '0 0 10px' }}>
+          {chosen.length} of {need} sessions picked — Save stays off until they match.
+          Tick or untick a session below, or change the number back.
+        </div>
+      )}
       <SessionPickList sessions={sessions} chosen={chosen} onToggle={toggle} locked={locked} />
 
       <div className="acts">

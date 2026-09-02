@@ -191,9 +191,13 @@ gh workflow run build-macos.yml   # or the Actions tab -> Run workflow:
                              #   from the run's page -> Artifacts.
 
 cd frontend && npm install  # once, to work on the React admin at all
-npm run dev                 # Vite dev server on :5173, proxies /api etc. to
-                             #   a real backend on :8000 (run ./start.sh in a
-                             #   second terminal) — for frontend iteration only
+npm run dev                 # Vite dev server, proxies /api etc. to a real
+                             #   backend on :8000 (run ./start.sh in a second
+                             #   terminal) — for frontend iteration only. Open
+                             #   the URL Vite prints, e.g. http://localhost:
+                             #   5173/static/app/ — NOT bare :5173/ — since
+                             #   the app's `base` in vite.config.js is
+                             #   /static/app/, matching production's URL
 npm run build                # regenerates static/app/ — required before
                               #   committing any change under frontend/src/
 ```
