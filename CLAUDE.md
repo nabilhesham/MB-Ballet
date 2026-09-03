@@ -404,6 +404,17 @@ system and everything else follows from it:
   total behind. It is what payroll is actually paid on; "sessions taught" is
   the app's own count, and the instructor page shows both because a gap
   between them is worth seeing.
+- **instructor_hour_adjustments** is a manual correction, layered on top of
+  `instructor_hours` without ever touching it. Reception's "edit the hours"
+  button on the instructor page shows one editable total for the period being
+  viewed; under that, `access.adjust_logged_hours()` writes one new dated
+  delta row rather than rewriting or deleting a real salary-sheet row, so what
+  the sheet actually said stays visible. The row is dated to the *end* of the
+  period being edited, so it stays in scope whenever that period — or any
+  wider range containing it — is looked at again. `access.logged_hours()` is
+  what sums both tables together into the figure shown; "days worked" counts
+  only real `instructor_hours` rows, since a correction is not a claim of an
+  extra day worked.
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
 
@@ -574,6 +585,13 @@ attendance are never touched. This is the one archive path that cascades a
 delete into another table on its own; client and instructor archiving do not
 touch sessions this way.
 
+**Instructors are the one archived list with a restore path today.**
+`GET /api/instructors?status=archived` and `POST /api/instructors/{iid}/unarchive`
+back the "Archived" view reachable from a button beside "New instructor" (not
+the sidebar — the same convention any future archived-list screen should
+follow). Classes and clients still have no restore route or archived-list
+view — see Known gaps.
+
 ## Design decisions — do not undo these without asking
 
 **The QR says WHO, not WHETHER.** The token carries a client ID and a
@@ -709,11 +727,14 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 ## Known gaps / next up
 
-- [ ] No archive-restore UI, and no manual balance adjustment endpoint. An
-      `admin_routes.py` once had both, but it was never mounted into
-      `server.py` — dead, unreachable code from the pre-authentication
-      version of the app, deleted rather than wired in. Building either
-      one for real is separate feature work against the current model.
+- [ ] No archive-restore UI for classes or clients, and no manual balance
+      adjustment endpoint. Instructors are the one exception — see the
+      Deletion policy section above. An `admin_routes.py` once had a
+      class/client restore route and the balance adjustment, but it was
+      never mounted into `server.py` — dead, unreachable code from the
+      pre-authentication version of the app, deleted rather than wired in.
+      Building either one for real is separate feature work against the
+      current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
       flexibility alone. The dashboard says how many plans carry no price

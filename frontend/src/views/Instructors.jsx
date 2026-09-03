@@ -1,9 +1,9 @@
 import { useNavigate } from 'react-router-dom';
 
 import { useApi } from '../api';
-import { initials } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { Pill } from '../components/Pill';
+import Avatar from '../components/Avatar';
 import Empty from '../components/Empty';
 import InstructorForm from '../modals/InstructorForm';
 
@@ -19,9 +19,12 @@ export default function Instructors() {
     <>
       <div className="head">
         <div><h1>Instructors</h1><div className="sub">{list.length} on the team</div></div>
-        <button className="pri" onClick={() => open(<InstructorForm onSaved={reload} />)}>
-          New instructor
-        </button>
+        <div className="row">
+          <button onClick={() => nav('/instructors/archived')}>Archived</button>
+          <button className="pri" onClick={() => open(<InstructorForm onSaved={reload} />)}>
+            New instructor
+          </button>
+        </div>
       </div>
 
       {list.length ? (
@@ -29,7 +32,7 @@ export default function Instructors() {
           {list.map(i => (
             <div key={i.id} className="box tap" onClick={() => nav(`/instructor/${i.id}`)}>
               <div className="row" style={{ gap: 13 }}>
-                <span className="avatar">{initials(i.name)}</span>
+                <Avatar client={i} />
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 600 }}>{i.name}</div>
                   <div className="sub">{i.specialty || '—'}</div>

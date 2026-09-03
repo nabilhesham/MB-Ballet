@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS instructors (
     email        TEXT,
     specialty    TEXT,
     hourly_rate  REAL NOT NULL DEFAULT 0,
+    photo_path   TEXT,
     active       INTEGER NOT NULL DEFAULT 1
 );
 
@@ -153,6 +154,21 @@ CREATE TABLE IF NOT EXISTS instructor_hours (
     UNIQUE(instructor_id, work_date)
 );
 
+-- A manual correction to hours logged, layered on top of instructor_hours
+-- without ever touching it: corrections are counted alongside the salary
+-- sheet's own rows, never mixed into or overwriting them, so what the sheet
+-- actually said stays visible and auditable. delta_hours can be negative --
+-- a correction downward doesn't delete or edit a real imported row either.
+CREATE TABLE IF NOT EXISTS instructor_hour_adjustments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    instructor_id   INTEGER NOT NULL REFERENCES instructors(id),
+    adjustment_date TEXT NOT NULL,
+    delta_hours     REAL NOT NULL,
+    note            TEXT,
+    created_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_iha_date ON instructor_hour_adjustments(instructor_id, adjustment_date);
+
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
 CREATE TABLE IF NOT EXISTS settings (
@@ -244,7 +260,7 @@ def migrate(conn) -> None:
     add = {
         "clients": [("age", "REAL"), ("school", "TEXT"), ("joined_on", "TEXT"),
                     ("dob", "TEXT")],
-        "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0")],
+        "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0"), ("photo_path", "TEXT")],
         "classes": [("level", "TEXT"), ("instructor_id", "INTEGER")],
         "credentials": [("class_id", "INTEGER")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),

@@ -689,6 +689,71 @@ def prev_month(month: str) -> str:
     return (first - timedelta(days=1)).strftime("%Y-%m")
 
 
+def month_bounds(when: date = None) -> tuple:
+    """The first and last day of a date's calendar month, both ISO. Today's
+    month unless told otherwise -- the instructor view's default period."""
+    d = when or date.today()
+    first = d.replace(day=1)
+    next_first = (first.replace(year=d.year + 1, month=1) if d.month == 12
+                  else first.replace(month=d.month + 1))
+    last = next_first - timedelta(days=1)
+    return first.isoformat(), last.isoformat()
+
+
+def date_range_ts(period_from: str, period_to: str) -> tuple:
+    """An inclusive [from, to] ISO-date pair as a half-open unix timestamp
+    range, for filtering a starts_at column against a picked date range."""
+    start = int(datetime.combine(date.fromisoformat(period_from), _t.min).timestamp())
+    end = int(datetime.combine(date.fromisoformat(period_to), _t.min).timestamp()) + 86400
+    return start, end
+
+
+def logged_hours(conn, instructor_id: int, period_from: str, period_to: str) -> dict:
+    """
+    Hours the salary sheet recorded for this instructor within a period, plus
+    any manual corrections layered on top (see instructor_hour_adjustments) --
+    never mixed into the sheet's own rows, so what the sheet actually said
+    stays visible. `days`/`from`/`to` count only real salary-sheet rows; a
+    correction is not a claim of an extra day worked.
+    """
+    sheet = conn.execute(
+        "SELECT COALESCE(SUM(hours),0) h, COUNT(*) days, MIN(work_date) a, MAX(work_date) b"
+        " FROM instructor_hours WHERE instructor_id=? AND work_date BETWEEN ? AND ?",
+        (instructor_id, period_from, period_to)).fetchone()
+    adjustments = conn.execute(
+        "SELECT COALESCE(SUM(delta_hours),0) d FROM instructor_hour_adjustments"
+        " WHERE instructor_id=? AND adjustment_date BETWEEN ? AND ?",
+        (instructor_id, period_from, period_to)).fetchone()
+    rate_row = conn.execute("SELECT hourly_rate FROM instructors WHERE id=?",
+                            (instructor_id,)).fetchone()
+    rate = (rate_row["hourly_rate"] or 0) if rate_row else 0
+    hours = round((sheet["h"] or 0) + (adjustments["d"] or 0), 2)
+    return {
+        "hours": hours, "days": sheet["days"], "from": sheet["a"], "to": sheet["b"],
+        "pay": round(hours * rate, 2),
+    }
+
+
+def adjust_logged_hours(conn, instructor_id: int, period_from: str, period_to: str,
+                        new_total: float, note: str = None) -> dict:
+    """
+    Reception's "edit the total" action. Computes the delta against the
+    period's current total and records it as one new dated row -- never
+    rewrites or deletes an existing instructor_hours row, so a correction is
+    its own auditable fact rather than lost inside an edited import. Dated to
+    the end of the period being viewed, so it stays in scope whenever that
+    period -- or any range containing it -- is looked at again later.
+    """
+    current = logged_hours(conn, instructor_id, period_from, period_to)
+    delta = round(new_total - current["hours"], 2)
+    conn.execute(
+        "INSERT INTO instructor_hour_adjustments (instructor_id, adjustment_date, delta_hours,"
+        " note, created_at) VALUES (?,?,?,?,?)",
+        (instructor_id, period_to, delta, note, db.now()))
+    conn.commit()
+    return logged_hours(conn, instructor_id, period_from, period_to)
+
+
 def month_intake(conn, month: str = None) -> dict:
     """
     Who joined this month and what they paid.

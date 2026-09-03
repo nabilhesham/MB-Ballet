@@ -6,6 +6,7 @@ import Classes from './views/Classes';
 import ClassDetail from './views/ClassDetail';
 import Instructors from './views/Instructors';
 import InstructorDetail from './views/InstructorDetail';
+import ArchivedInstructors from './views/ArchivedInstructors';
 import Cards from './views/Cards';
 import Sessions from './views/Sessions';
 import SessionDetail from './views/SessionDetail';
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/classes" element={<Classes />} />
         <Route path="/class/:id" element={<ClassDetail />} />
         <Route path="/instructors" element={<Instructors />} />
+        <Route path="/instructors/archived" element={<ArchivedInstructors />} />
         <Route path="/instructor/:id" element={<InstructorDetail />} />
         <Route path="/cards" element={<Cards />} />
         <Route path="/sessions" element={<Sessions />} />
