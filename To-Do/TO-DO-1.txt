@@ -1,5 +1,6 @@
 another enhancement:
 
 1 - i need the  plan ends on will be the datetime of the last session in this plan automatically calculated,
-2 - also i want a button to exit certain plan and will only edit the ends on date and the plan name and the plan number of session
+2 - also i want a button to edit certain plan and will only edit the ends on date and the plan name and the plan number of session
 3- if we added sessions or deleted session in the plan the ends on date will reflect automatically but we can override it.
+4 - in the QR card i want to switch the plan name with the number of sessions for this plan i mean i need in the card like  sessions like that not the name of the plan.
