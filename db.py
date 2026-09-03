@@ -16,9 +16,11 @@ CREATE TABLE IF NOT EXISTS instructors (
     active       INTEGER NOT NULL DEFAULT 1
 );
 
--- A class is the offering (Ballet, Flexibility). The instructor lives on each
--- session, not here: who teaches a given date changes often enough that a
--- class-level default was more misleading than useful.
+-- A class is the offering (Ballet, Flexibility). instructor_id is a default,
+-- not a replacement for the instructor on each session: it is what a new
+-- session falls back to when none is chosen, and what every upcoming
+-- session's instructor is overwritten to when this changes. Who actually
+-- teaches a given date still lives on the session and stays editable there.
 CREATE TABLE IF NOT EXISTS classes (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     name           TEXT NOT NULL,
@@ -27,6 +29,7 @@ CREATE TABLE IF NOT EXISTS classes (
     duration_hours REAL NOT NULL DEFAULT 1.5,
     -- "primary", "level 8", "grade 6" -- the wording the roster sheets use.
     level          TEXT,
+    instructor_id  INTEGER REFERENCES instructors(id),
     active         INTEGER NOT NULL DEFAULT 1
 );
 
@@ -242,7 +245,7 @@ def migrate(conn) -> None:
         "clients": [("age", "REAL"), ("school", "TEXT"), ("joined_on", "TEXT"),
                     ("dob", "TEXT")],
         "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0")],
-        "classes": [("level", "TEXT")],
+        "classes": [("level", "TEXT"), ("instructor_id", "INTEGER")],
         "credentials": [("class_id", "INTEGER")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),

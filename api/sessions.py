@@ -102,10 +102,13 @@ def create_session(body: SessionIn):
         cl = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
         if not cl:
             raise HTTPException(404, "no such class")
+        # No instructor named explicitly -> fall back to the class's default,
+        # if it has one. Naming one, even a different one, always wins.
+        instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
         cur = conn.execute(
             "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours, notes)"
             " VALUES (?,?,?,?,?)",
-            (body.class_id, body.instructor_id, body.starts_at,
+            (body.class_id, instructor_id, body.starts_at,
              body.duration_hours or cl["duration_hours"], body.notes))
         conn.commit()
         return {"id": cur.lastrowid}
@@ -120,6 +123,7 @@ def repeat_sessions(body: RepeatIn):
         cl = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
         if not cl:
             raise HTTPException(404, "no such class")
+        instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
         base = datetime.fromtimestamp(body.starts_at)
         weekdays = body.weekdays or [base.weekday()]
         made = 0
@@ -137,7 +141,7 @@ def repeat_sessions(body: RepeatIn):
                 conn.execute(
                     "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours)"
                     " VALUES (?,?,?,?)",
-                    (body.class_id, body.instructor_id, ts,
+                    (body.class_id, instructor_id, ts,
                      body.duration_hours or cl["duration_hours"]))
                 made += 1
         conn.commit()
@@ -164,12 +168,21 @@ def get_session(sid: int):
 
 
 @router.put("/api/sessions/{sid}")
-def edit_session(sid: int, body: SessionEdit):
+def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
+    """
+    Partial update — only the fields sent are touched, via exclude_none. That
+    is also why clearing the instructor needs its own flag: a plain
+    instructor_id=null is indistinguishable from "wasn't sent" once
+    exclude_none drops it, so it silently never reached the database. Pass
+    ?clear_instructor=true instead of instructor_id to blank it back to none.
+    """
     conn = db.connect()
     try:
         if not conn.execute("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone():
             raise HTTPException(404, "no such session")
         fields = body.model_dump(exclude_none=True)
+        if clear_instructor:
+            fields["instructor_id"] = None
         if not fields:
             return {"ok": True}
         sets = ", ".join(f"{k}=?" for k in fields)

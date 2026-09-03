@@ -37,13 +37,23 @@ export default function ClassDetail() {
     if (!classes.length) return toast('Create a class first', 'bad');
     open(<RepeatSessions classes={classes} instructors={instructors} presetClassId={c.id} onSaved={reload} />);
   };
+  const openEditClass = async () => {
+    const instructors = await api('/instructors');
+    open(<ClassForm existing={c} instructors={instructors} onSaved={reload} />);
+  };
   const archive = () => confirm({
     title: 'Archive class',
-    message: <><b>{c.name}</b> will be hidden from the list. Its sessions and every attendance record are kept.</>,
+    message: (
+      <><b>{c.name}</b> will be hidden from the list. Any upcoming sessions are released — the
+        clients booked into them keep the slot as unassigned on their plan. Past sessions and
+        every attendance record are kept exactly as they are.</>
+    ),
     label: 'Archive',
     onConfirm: async () => {
-      await api(`/classes/${c.id}`, { method: 'DELETE' });
-      toast('Class archived');
+      const r = await api(`/classes/${c.id}`, { method: 'DELETE' });
+      toast(r.released_sessions
+        ? `Class archived — ${r.released_sessions} upcoming session${r.released_sessions === 1 ? '' : 's'} released`
+        : 'Class archived');
       nav('/classes');
     },
   });
@@ -57,7 +67,7 @@ export default function ClassDetail() {
           <div className="sub">{hrs(c.duration_hours)}{c.level ? ` · ${c.level}` : ''}</div>
         </div>
         <div className="row">
-          <button onClick={() => open(<ClassForm existing={c} onSaved={reload} />)}>Edit class</button>
+          <button onClick={openEditClass}>Edit class</button>
           <button onClick={openSchedule}>Schedule session</button>
           <button onClick={openRepeat}>Repeat weekly</button>
         </div>
@@ -90,7 +100,8 @@ export default function ClassDetail() {
 
       <h2>Sessions</h2>
       <div className="sub" style={{ marginBottom: 12 }}>
-        Each session has its own instructor — set it when scheduling, or from the session page.
+        Each session has its own instructor, defaulting to the class's — change one from the
+        session page any time.
       </div>
       <div className="box pad0 dt-host">
         <DataTable

@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 
-import { useApi } from '../api';
+import { api, useApi } from '../api';
 import { hrs } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { Pill } from '../components/Pill';
@@ -15,11 +15,16 @@ export default function Classes() {
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
 
+  const openNewClass = async () => {
+    const instructors = await api('/instructors');
+    open(<ClassForm instructors={instructors} onSaved={reload} />);
+  };
+
   return (
     <>
       <div className="head">
         <div><h1>Classes</h1><div className="sub">{classes.length} active</div></div>
-        <button className="pri" onClick={() => open(<ClassForm onSaved={reload} />)}>New class</button>
+        <button className="pri" onClick={openNewClass}>New class</button>
       </div>
 
       {classes.length ? (

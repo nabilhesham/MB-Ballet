@@ -136,7 +136,8 @@ scols = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)")}
 check("duration in hours, no capacity",
       "duration_hours" in scols and "capacity" not in scols and "duration_min" not in scols)
 ccols = {r["name"] for r in conn.execute("PRAGMA table_info(classes)")}
-check("classes carry no instructor", "instructor_id" not in ccols)
+check("classes carry a default instructor sessions fall back to",
+      "instructor_id" in ccols)
 clcols = {r["name"] for r in conn.execute("PRAGMA table_info(clients)")}
 check("client has age / school / joined_on",
       {"age", "school", "joined_on"} <= clcols)

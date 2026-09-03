@@ -370,13 +370,22 @@ system and everything else follows from it:
 
 - **classes** are the offering, at the granularity the roster sheets use:
   "Ballet Level 8", "Ballet Grade 6", "Evening Flexibility". One block of a
-  roster sheet is one class. They carry a duration, a colour and a level, and
-  they do **not** carry an instructor. Splitting them this finely is what
-  makes one card per class mean something — a Grade 6 card must not check
-  someone into the Level 8 class two hours earlier.
-- **sessions** are dated occurrences. The instructor lives here, per session,
-  because who teaches a given date changes often enough that a class-level
-  default was more misleading than useful. No capacity field.
+  roster sheet is one class. They carry a duration, a colour and a level.
+  Splitting them this finely is what makes one card per class mean something
+  — a Grade 6 card must not check someone into the Level 8 class two hours
+  earlier.
+- **sessions** are dated occurrences. Each carries its own `instructor_id`,
+  because who teaches a given date changes often enough that a per-session
+  field, not a class-level constant, is what has to be the source of truth.
+  No capacity field.
+- **classes.instructor_id** is a *default*, not a substitute for the field
+  above: what a new session for that class falls back to when none is named,
+  and what every one of that class's upcoming (`status='scheduled'`,
+  not yet started) sessions is overwritten to whenever it's set or changed —
+  deliberately including a session someone had set to a different, specific
+  instructor. `api/classes.py`'s `update_class` is the one place that
+  cascade happens; `create_session`/`repeat_sessions` are the two places the
+  fallback is read. Past and cancelled sessions are never touched by either.
 - **bookings** replaced `enrolments`, `attendance` and `session_roster` at once.
   Status is `booked` → `present` | `absent`. There is no third state: a slot is
   either used or it is not, and **both present and absent consume it**, because
@@ -554,6 +563,16 @@ route and a manual-balance-adjustment endpoint, but it was never mounted into
 `server.py` — dead code from the pre-authentication version of the app,
 removed rather than wired in (see Known gaps). If either is wanted, build it
 fresh against the current model rather than reviving that file.
+
+**Archiving a class also releases its upcoming sessions.** A class that
+stops being offered has nothing left to happen for, so `delete_class`'s soft
+path deletes its `status='scheduled'`, not-yet-started sessions and their
+bookings (not just flips `active=0` and leaves them dangling) — the clients
+booked into them get the slot back as `unassigned` on their plan, same as any
+other booking removal, via `access.refresh_expiry()`. Past sessions and their
+attendance are never touched. This is the one archive path that cascades a
+delete into another table on its own; client and instructor archiving do not
+touch sessions this way.
 
 ## Design decisions — do not undo these without asking
 
