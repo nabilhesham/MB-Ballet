@@ -1,5 +1,3 @@
-another enhancement:
-
 1 - i need the  plan ends on will be the datetime of the last session in this plan automatically calculated,
 2 - also i want a button to edit certain plan and will only edit the ends on date and the plan name and the plan number of session
 3- if we added sessions or deleted session in the plan the ends on date will reflect automatically but we can override it.
