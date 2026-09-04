@@ -47,7 +47,16 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
         duration_hours: cls ? cls.duration_hours : null,
       } });
       close();
-      toast(`${r.created} sessions created`);
+      // A term is generated in one go, so a clash is reported rather than
+      // failing the batch — say how many and name the first, or reception
+      // has no idea a date is quietly missing from the timetable.
+      const n = r.skipped ? r.skipped.length : 0;
+      if (n) {
+        toast(`${r.created} created, ${n} skipped — ${r.skipped[0]}`
+          + (n > 1 ? ` (and ${n - 1} more)` : ''), 'bad');
+      } else {
+        toast(`${r.created} sessions created`);
+      }
       onSaved();
     } catch (e) { toast(e.message, 'bad'); }
   };

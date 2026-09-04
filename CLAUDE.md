@@ -483,6 +483,27 @@ session straight to `absent`, so the list marks past rows and says why, and
 "auto-fill earliest" skips them: creating absences is a decision to make one
 date at a time, never in bulk.
 
+**One session at a time, academy-wide.** A slot that is taken is taken,
+whatever class wants it: `access.slot_conflict()` is the single answer to
+"is this free?", and `create_session`, `edit_session`, `repeat_sessions` and
+un-cancelling via `set_session_status` all ask it. Intervals are half-open,
+so 15:01–16:01 and 16:01–17:00 are fine — back-to-back is how a timetable is
+built, and only a real overlap is refused. A cancelled session occupies
+nothing, so cancelling is how reception frees a slot up.
+
+The rule applies to past datetimes too, deliberately: a slot that has been
+and gone is still a slot. **`seed.py` does not call it.** The academy's own
+roster sheets contain three real makeup classes that ran alongside another
+class, and the sheets record what actually happened — dropping or moving one
+to satisfy a scheduling rule would corrupt the business record. So a
+re-seeded database legitimately holds three overlaps the UI would now refuse
+to create. If that ever needs reconciling, fix the sheets, not the importer.
+
+Repeat weekly **skips** a clash rather than failing the batch, and returns
+`skipped` saying which dates and why — one taken evening in week 7 must not
+cost the other eleven. It is the same treatment a date already holding that
+class's own session has always had.
+
 **One check-in per day.** A second scan the same day is refused with the time of
 the first, and nothing is deducted.
 

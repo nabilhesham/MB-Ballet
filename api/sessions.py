@@ -105,11 +105,14 @@ def create_session(body: SessionIn):
         # No instructor named explicitly -> fall back to the class's default,
         # if it has one. Naming one, even a different one, always wins.
         instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
+        hours = body.duration_hours or cl["duration_hours"]
+        clash = access.slot_conflict(conn, body.starts_at, hours)
+        if clash:
+            raise HTTPException(400, access.slot_taken_message(clash))
         cur = conn.execute(
             "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours, notes)"
             " VALUES (?,?,?,?,?)",
-            (body.class_id, instructor_id, body.starts_at,
-             body.duration_hours or cl["duration_hours"], body.notes))
+            (body.class_id, instructor_id, body.starts_at, hours, body.notes))
         conn.commit()
         return {"id": cur.lastrowid}
     finally:
@@ -126,7 +129,9 @@ def repeat_sessions(body: RepeatIn):
         instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
         base = datetime.fromtimestamp(body.starts_at)
         weekdays = body.weekdays or [base.weekday()]
+        hours = body.duration_hours or cl["duration_hours"]
         made = 0
+        skipped = []
         for w in range(body.weeks):
             monday = base - timedelta(days=base.weekday()) + timedelta(weeks=w)
             for wd in weekdays:
@@ -138,14 +143,21 @@ def repeat_sessions(body: RepeatIn):
                 if conn.execute("SELECT 1 FROM sessions WHERE class_id=? AND starts_at=?",
                                 (body.class_id, ts)).fetchone():
                     continue
+                # A whole term is generated at once, so one taken evening in
+                # week 7 must not cost the other eleven. Skip it and say
+                # which, the same way a date already holding this class's own
+                # session is skipped just above.
+                clash = access.slot_conflict(conn, ts, hours)
+                if clash:
+                    skipped.append(access.slot_taken_message(clash))
+                    continue
                 conn.execute(
                     "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours)"
                     " VALUES (?,?,?,?)",
-                    (body.class_id, instructor_id, ts,
-                     body.duration_hours or cl["duration_hours"]))
+                    (body.class_id, instructor_id, ts, hours))
                 made += 1
         conn.commit()
-        return {"created": made}
+        return {"created": made, "skipped": skipped}
     finally:
         conn.close()
 
@@ -185,6 +197,18 @@ def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
             fields["instructor_id"] = None
         if not fields:
             return {"ok": True}
+        # Moving a session or stretching it can walk into another one, so the
+        # slot is re-checked against the values this edit is about to write —
+        # ignoring the session itself, which of course overlaps where it is.
+        if "starts_at" in fields or "duration_hours" in fields:
+            cur = one(conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)))
+            clash = access.slot_conflict(
+                conn,
+                fields.get("starts_at", cur["starts_at"]),
+                fields.get("duration_hours", cur["duration_hours"]),
+                exclude_id=sid)
+            if clash:
+                raise HTTPException(400, access.slot_taken_message(clash))
         sets = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE sessions SET {sets} WHERE id=?", (*fields.values(), sid))
         conn.commit()
@@ -208,6 +232,17 @@ def set_session_status(sid: int, status: str):
         raise HTTPException(400, "bad status")
     conn = db.connect()
     try:
+        # Cancelling frees the slot, so bringing a session back has to find it
+        # still free — otherwise cancel, schedule something else, un-cancel
+        # would put two classes in one slot by the back door.
+        if status != "cancelled":
+            s = one(conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)))
+            if not s:
+                raise HTTPException(404, "no such session")
+            clash = access.slot_conflict(conn, s["starts_at"], s["duration_hours"],
+                                         exclude_id=sid)
+            if clash:
+                raise HTTPException(400, access.slot_taken_message(clash))
         conn.execute("UPDATE sessions SET status=? WHERE id=?", (status, sid))
         conn.commit()
         return {"ok": True}

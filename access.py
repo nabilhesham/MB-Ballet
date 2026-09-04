@@ -58,6 +58,49 @@ def session_end(row) -> int:
     return int(row["starts_at"] + row["duration_hours"] * 3600)
 
 
+def slot_conflict(conn, starts_at: int, duration_hours: float, exclude_id: int = None):
+    """
+    The session already occupying this slot, or None.
+
+    One session at a time, academy-wide — the rule is on the level of the app,
+    not of a class or an instructor: whatever is running, nothing else runs
+    beside it. Checked here rather than at each call site so create, edit,
+    repeat and un-cancel cannot drift apart on what "taken" means.
+
+    Intervals are half-open. A session ending at 16:01 and one starting at
+    16:01 do not clash, because back-to-back is how a timetable is built; only
+    a real overlap does.
+
+    A cancelled session occupies nothing and never blocks — cancelling is how
+    reception frees a slot up.
+
+    Note this deliberately says nothing about the past: a datetime that has
+    already been and gone is still a slot, and entering a second session into
+    it is refused the same way. History that predates the rule is left alone
+    (seed.py does not call this — see CLAUDE.md), so the database can still
+    hold overlaps the UI would now refuse to create.
+    """
+    ends_at = starts_at + duration_hours * 3600
+    sql = ("SELECT s.id, s.starts_at, s.duration_hours, c.name AS class_name"
+           "  FROM sessions s JOIN classes c ON c.id = s.class_id"
+           " WHERE s.status != 'cancelled'"
+           "   AND s.starts_at < ? AND s.starts_at + s.duration_hours * 3600 > ?")
+    params = [ends_at, starts_at]
+    if exclude_id is not None:
+        sql += " AND s.id != ?"
+        params.append(exclude_id)
+    return conn.execute(sql + " ORDER BY s.starts_at LIMIT 1", params).fetchone()
+
+
+def slot_taken_message(row) -> str:
+    """One sentence a receptionist can act on, worded the same everywhere."""
+    starts = time.localtime(row["starts_at"])
+    ends = time.localtime(session_end(row))
+    return (f"{time.strftime('%a %d %b', starts)} "
+            f"{time.strftime('%H:%M', starts)}–{time.strftime('%H:%M', ends)} "
+            f"is already taken by {row['class_name']}")
+
+
 # ---------------------------------------------------------------- plans
 def _iso_day(ts: int) -> str:
     """The local calendar day a unix timestamp falls on."""
