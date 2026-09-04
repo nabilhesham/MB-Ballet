@@ -24,7 +24,10 @@ export default function Classes() {
     <>
       <div className="head">
         <div><h1>Classes</h1><div className="sub">{classes.length} active</div></div>
-        <button className="pri" onClick={openNewClass}>New class</button>
+        <div className="row">
+          <button onClick={() => nav('/classes/archived')}>Archived</button>
+          <button className="pri" onClick={openNewClass}>New class</button>
+        </div>
       </div>
 
       {classes.length ? (

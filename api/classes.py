@@ -28,16 +28,22 @@ class ClassIn(BaseModel):
 
 # ---------------------------------------------------------------- routes
 @router.get("/api/classes")
-def list_classes():
+def list_classes(status: str = "active"):
+    """
+    `status="archived"` is the whole other half of this list, not an overlay
+    on top of the active one -- same convention as /api/instructors' status
+    param.
+    """
     conn = db.connect()
     try:
+        active = 0 if status == "archived" else 1
         return rows(conn.execute(
             "SELECT c.*,"
             "  (SELECT COUNT(*) FROM sessions s WHERE s.class_id=c.id"
             "     AND s.starts_at > ? AND s.status='scheduled') AS upcoming,"
             "  (SELECT COUNT(DISTINCT b.client_id) FROM bookings b"
             "     JOIN sessions s ON s.id=b.session_id WHERE s.class_id=c.id) AS students"
-            " FROM classes c WHERE c.active=1 ORDER BY c.name", (db.now(),)))
+            " FROM classes c WHERE c.active=? ORDER BY c.name", (db.now(), active)))
     finally:
         conn.close()
 
@@ -167,5 +173,18 @@ def delete_class(clid: int, hard: bool = False):
         return {"ok": True, "action": action,
                 "released_sessions": released_sessions if action == "archive" else None,
                 "released_bookings": released_bookings if action == "archive" else None}
+    finally:
+        conn.close()
+
+
+@router.post("/api/classes/{clid}/unarchive")
+def unarchive_class(clid: int):
+    conn = db.connect()
+    try:
+        if not conn.execute("SELECT 1 FROM classes WHERE id=?", (clid,)).fetchone():
+            raise HTTPException(404, "no such class")
+        conn.execute("UPDATE classes SET active=1 WHERE id=?", (clid,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()

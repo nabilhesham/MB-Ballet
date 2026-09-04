@@ -70,6 +70,7 @@ export default function ClassDetail() {
           <button onClick={openEditClass}>Edit class</button>
           <button onClick={openSchedule}>Schedule session</button>
           <button onClick={openRepeat}>Repeat weekly</button>
+          <button className="danger" onClick={archive}>Archive class</button>
         </div>
       </div>
 
@@ -155,10 +156,6 @@ export default function ClassDetail() {
             { label: 'ATTENDED', className: 'num', sortValue: r => r.attended || 0, cell: r => r.attended || 0 },
           ]}
         />
-      </div>
-
-      <div className="row" style={{ marginTop: 22 }}>
-        <button className="danger" onClick={archive}>Archive class</button>
       </div>
     </>
   );

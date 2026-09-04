@@ -585,12 +585,16 @@ attendance are never touched. This is the one archive path that cascades a
 delete into another table on its own; client and instructor archiving do not
 touch sessions this way.
 
-**Instructors are the one archived list with a restore path today.**
-`GET /api/instructors?status=archived` and `POST /api/instructors/{iid}/unarchive`
-back the "Archived" view reachable from a button beside "New instructor" (not
-the sidebar — the same convention any future archived-list screen should
-follow). Classes and clients still have no restore route or archived-list
-view — see Known gaps.
+**Instructors and classes both have an archived list with a restore path
+today.** `GET /api/instructors?status=archived` / `GET /api/classes?status=archived`
+and `POST /api/instructors/{iid}/unarchive` / `POST /api/classes/{clid}/unarchive`
+back an "Archived" view for each, reachable from a plain button beside "New
+instructor" / "New class" (not the sidebar — the same convention any future
+archived-list screen should follow). Unarchiving a class brings back the
+class and its past sessions/attendance, but not the upcoming sessions the
+archive released — those were deleted for good; new ones get scheduled
+fresh. Clients still have no restore route or archived-list view — see
+Known gaps.
 
 ## Design decisions — do not undo these without asking
 
@@ -727,10 +731,10 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 ## Known gaps / next up
 
-- [ ] No archive-restore UI for classes or clients, and no manual balance
-      adjustment endpoint. Instructors are the one exception — see the
+- [ ] No archive-restore UI for clients, and no manual balance adjustment
+      endpoint. Instructors and classes are the exceptions — see the
       Deletion policy section above. An `admin_routes.py` once had a
-      class/client restore route and the balance adjustment, but it was
+      client restore route and the balance adjustment, but it was
       never mounted into `server.py` — dead, unreachable code from the
       pre-authentication version of the app, deleted rather than wired in.
       Building either one for real is separate feature work against the

@@ -4,6 +4,7 @@ import Shell from './components/Shell';
 import Dashboard from './views/Dashboard';
 import Classes from './views/Classes';
 import ClassDetail from './views/ClassDetail';
+import ArchivedClasses from './views/ArchivedClasses';
 import Instructors from './views/Instructors';
 import InstructorDetail from './views/InstructorDetail';
 import ArchivedInstructors from './views/ArchivedInstructors';
@@ -21,6 +22,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/classes" element={<Classes />} />
+        <Route path="/classes/archived" element={<ArchivedClasses />} />
         <Route path="/class/:id" element={<ClassDetail />} />
         <Route path="/instructors" element={<Instructors />} />
         <Route path="/instructors/archived" element={<ArchivedInstructors />} />
