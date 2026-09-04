@@ -58,19 +58,47 @@ export default function ClientDetail() {
     if (r.ok) { toast('Photo saved'); reload(); } else toast('Upload failed', 'bad');
   };
 
-  const archive = () => confirm({
-    title: 'Archive client',
-    message: (
-      <><b>{c.name_en}</b> will be hidden and their cards revoked. Any future bookings
-        are released; their attendance history is kept.</>
-    ),
-    label: 'Archive',
-    onConfirm: async () => {
-      await api(`/clients/${c.id}`, { method: 'DELETE' });
-      toast('Client archived');
-      nav('/clients');
-    },
-  });
+  // The button refuses for the same reason the endpoint does, and says so
+  // without a round-trip — the profile already knows the count. The server
+  // guard is still the authority; this only saves reception a click.
+  const archive = () => {
+    const n = c.upcoming.length;
+    if (n) {
+      return toast(`${c.name_en} has ${n} upcoming session${n === 1 ? '' : 's'} — `
+        + `remove or reassign ${n === 1 ? 'it' : 'them'} before archiving`, 'bad');
+    }
+    return confirm({
+      title: 'Archive client',
+      message: (
+        <>
+          <b>{c.name_en}</b> will be hidden and their cards revoked — a revoked card is never
+          un-revoked, so restoring them later means issuing a new one. Their attendance
+          history is kept.
+          {totalLeft > 0 && (
+            <> Their {plans.length === 1 ? 'plan still has' : 'plans still have'}{' '}
+              <b>{totalLeft} paid session{totalLeft === 1 ? '' : 's'}</b> unused, which will be
+              given up.</>
+          )}
+        </>
+      ),
+      label: 'Archive',
+      onConfirm: async () => {
+        try {
+          await api(`/clients/${c.id}`, { method: 'DELETE' });
+          toast('Client archived');
+          nav('/clients');
+        } catch (e) { toast(e.message, 'bad'); }
+      },
+    });
+  };
+
+  const unarchive = async () => {
+    try {
+      await api(`/clients/${c.id}/unarchive`, { method: 'POST' });
+      toast('Client restored — issue a card to let them check in again');
+      reload();
+    } catch (e) { toast(e.message, 'bad'); }
+  };
 
   const issueCard = async classId => {
     try {
@@ -165,6 +193,7 @@ export default function ClientDetail() {
               {c.age ? <Pill kind="grey">{c.age} years old</Pill> : null}
               {c.school ? <Pill kind="grey">{c.school}</Pill> : null}
               {c.joined_on ? <Pill kind="grey">joined {c.joined_on}</Pill> : null}
+              {c.active ? null : <Pill kind="bad">archived</Pill>}
             </div>
           </div>
         </div>
@@ -173,7 +202,10 @@ export default function ClientDetail() {
           <button onClick={uploadPhoto}>Photo</button>
           <button onClick={() => open(<ClientForm existing={c} onSaved={reload} />)}>Edit</button>
           <button className="pri" onClick={() => openNewPlan()}>Add plan</button>
-          <button className="danger" onClick={archive}>Archive</button>
+          {/* A profile reached from the archived list is otherwise a dead end. */}
+          {c.active
+            ? <button className="danger" onClick={archive}>Archive</button>
+            : <button onClick={unarchive}>Unarchive</button>}
         </div>
       </div>
 

@@ -46,6 +46,7 @@ export default function Clients() {
       <div className="head">
         <div><h1>Clients</h1></div>
         <div className="row">
+          <button onClick={() => nav('/clients/archived')}>Archived</button>
           <button
             className="pri"
             onClick={() => open(<ClientForm onSaved={reload} onCreated={id => nav(`/client/${id}`)} />)}

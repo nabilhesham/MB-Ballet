@@ -13,6 +13,7 @@ import Sessions from './views/Sessions';
 import SessionDetail from './views/SessionDetail';
 import Clients from './views/Clients';
 import ClientDetail from './views/ClientDetail';
+import ArchivedClients from './views/ArchivedClients';
 import Calendar from './views/Calendar';
 import NotBuilt from './views/NotBuilt';
 
@@ -31,6 +32,7 @@ export default function App() {
         <Route path="/sessions" element={<Sessions />} />
         <Route path="/session/:id" element={<SessionDetail />} />
         <Route path="/clients" element={<Clients />} />
+        <Route path="/clients/archived" element={<ArchivedClients />} />
         <Route path="/client/:id" element={<ClientDetail />} />
         <Route path="/calendar" element={<Calendar />} />
         {/* Everything else is ported in phase 3; see NotBuilt.jsx. */}

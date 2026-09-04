@@ -35,9 +35,9 @@ class HoursAdjustIn(BaseModel):
 def list_instructors(status: str = "active"):
     """
     `status="archived"` is the whole other half of this list, not an overlay
-    on top of the active one — unlike /api/clients's status param, which
-    keeps active=1 hardcoded underneath and so can never actually reach
-    archived rows.
+    on top of the active one. /api/classes and /api/clients read the same
+    way; /api/clients additionally carries "attention", which filters within
+    the active half rather than choosing a half.
     """
     conn = db.connect()
     try:

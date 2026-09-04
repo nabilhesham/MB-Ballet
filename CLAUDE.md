@@ -389,6 +389,14 @@ system and everything else follows from it:
   instructor. `api/classes.py`'s `update_class` is the one place that
   cascade happens; `create_session`/`repeat_sessions` are the two places the
   fallback is read. Past and cancelled sessions are never touched by either.
+- **clients** carry `age` as **REAL, not INTEGER** — the roster sheets hold
+  "4.8" and "12.5" for the youngest children, and rounding a four-year-old up
+  to five loses the distinction the class placement is made on. The whole
+  path is float: `sheets.py` parses it with `number()` (deliberately without
+  the `int()` that `months` and `sessions` get), `ClientIn.age` is
+  `Optional[float]`, and the form's age input carries `step="any"`. Both of
+  those last two matter — an `int` field *rejects* 3.5 outright rather than
+  rounding it, and without `step` the browser refuses it before it is sent.
 - **bookings** replaced `enrolments`, `attendance` and `session_roster` at once.
   Status is `booked` → `present` | `absent`. There is no third state: a slot is
   either used or it is not, and **both present and absent consume it**, because
@@ -608,16 +616,35 @@ attendance are never touched. This is the one archive path that cascades a
 delete into another table on its own; client and instructor archiving do not
 touch sessions this way.
 
-**Instructors and classes both have an archived list with a restore path
-today.** `GET /api/instructors?status=archived` / `GET /api/classes?status=archived`
-and `POST /api/instructors/{iid}/unarchive` / `POST /api/classes/{clid}/unarchive`
-back an "Archived" view for each, reachable from a plain button beside "New
-instructor" / "New class" (not the sidebar — the same convention any future
-archived-list screen should follow). Unarchiving a class brings back the
-class and its past sessions/attendance, but not the upcoming sessions the
-archive released — those were deleted for good; new ones get scheduled
-fresh. Clients still have no restore route or archived-list view — see
-Known gaps.
+**Instructors, classes and clients all have an archived list with a restore
+path.** `GET /api/{resource}?status=archived` and
+`POST /api/{resource}/{id}/unarchive` back an "Archived" view for each,
+reachable from a plain button beside "New instructor" / "New class" / "New
+client" — never the sidebar, which is the convention any future
+archived-list screen should follow.
+
+`/api/clients`'s `status` is the one that carries two jobs: `"archived"`
+picks which half of the list to read, while `"attention"` filters *within*
+the active half, after each row has been enriched with its plan state. They
+are not three values of one switch, and the SQL only knows about the first.
+
+What a restore does not bring back is per-resource. A class comes back with
+its past sessions and attendance but not the upcoming sessions the archive
+released — those were deleted for good. A client comes back with their
+history but not their card: archiving revokes it, and credentials are
+revoked rather than deleted (see below), so a restored client needs a new
+one issued.
+
+**Archiving a client is refused while they have upcoming sessions.** Not
+released, refused — `delete_client` counts bookings whose session is in the
+future and not cancelled, using the same predicate `get_client` builds the
+profile's `upcoming` list from, so the number in the error is the number on
+the screen the receptionist is looking at. This replaces the older behaviour
+of silently deleting those bookings. Unused slots with no dates on them do
+*not* block it; the confirm dialog just says how many are being given up,
+since a lapsed plan holding slots nobody will book must not make a client
+permanently un-archivable. The button raises the error without a round-trip
+and the endpoint refuses independently — the same split `can_freeze` uses.
 
 ## Design decisions — do not undo these without asking
 
@@ -754,13 +781,13 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 ## Known gaps / next up
 
-- [ ] No archive-restore UI for clients, and no manual balance adjustment
-      endpoint. Instructors and classes are the exceptions — see the
-      Deletion policy section above. An `admin_routes.py` once had a
-      client restore route and the balance adjustment, but it was
-      never mounted into `server.py` — dead, unreachable code from the
-      pre-authentication version of the app, deleted rather than wired in.
-      Building either one for real is separate feature work against the
+- [ ] No manual balance-adjustment endpoint. Archive-restore now exists for
+      all three of instructors, classes and clients — see the Deletion
+      policy section above. An `admin_routes.py` once had both a restore
+      route and the balance adjustment, but it was never mounted into
+      `server.py` — dead, unreachable code from the pre-authentication
+      version of the app, deleted rather than wired in. Building the
+      balance adjustment for real is separate feature work against the
       current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
