@@ -60,7 +60,10 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
       <div className="fieldrow">
         <div>
           <label>AGE</label>
-          <input type="number" min="1" max="99" value={age} onChange={e => setAge(e.target.value)} />
+          {/* step="any": without it the browser defaults to whole numbers and
+              refuses 3.5, which is exactly what the youngest classes need. */}
+          <input type="number" step="any" min="1" max="99" value={age}
+                 onChange={e => setAge(e.target.value)} placeholder="3.5" />
         </div>
         <div>
           <label>FIRST JOINED</label>

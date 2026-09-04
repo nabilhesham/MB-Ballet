@@ -27,6 +27,19 @@ export const isoDay = ts => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+/* The local calendar month "YYYY-MM-DD" -> "YYYY-MM-DD" bounds of today's
+   month — mirrors access.month_bounds() so the instructor view's date
+   inputs show real dates immediately, before the first response arrives. */
+export const thisMonthBounds = () => {
+  const now = new Date();
+  const pad2 = n => String(n).padStart(2, '0');
+  const iso = (y, m, d) => `${y}-${pad2(m + 1)}-${pad2(d)}`;
+  const first = iso(now.getFullYear(), now.getMonth(), 1);
+  const lastDate = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const last = iso(now.getFullYear(), now.getMonth(), lastDate);
+  return [first, last];
+};
+
 export const initials = n =>
   (n || '?').split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
 

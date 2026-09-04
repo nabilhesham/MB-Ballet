@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { api } from '../api';
 import { isoDay } from '../lib/format';
+import { fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import Empty from '../components/Empty';
@@ -29,16 +30,16 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   // only until the sessions on the plan change again — then it follows the
   // picks once more.
   const [endsTouched, setEndsTouched] = useState(false);
+  const [paidOn, setPaidOn] = useState(plan.paid_on || '');
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
   const [locked, setLocked] = useState([]);
 
   useEffect(() => {
     (async () => {
-      const now = Math.floor(Date.now() / 1000);
       const [existing, available] = await Promise.all([
         api(`/clients/${clientId}/plan/${plan.id}/sessions`),
-        api(`/sessions?start=${now}&end=${now + 180 * 86400}&class_id=${plan.class_id}&available_for=${clientId}`),
+        fetchPlanSessions(plan.class_id, clientId),
       ]);
       const existingNorm = existing.map(r => ({ ...r, id: r.session_id }));
       setSessions([...existingNorm, ...available].sort((a, b) => a.starts_at - b.starts_at));
@@ -84,9 +85,16 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   const save = async () => {
     if (!name.trim()) return toast('Name is required', 'bad');
     try {
-      const r = await api(`/plans/${plan.id}`, { method: 'PUT', body: {
-        plan: name, sessions_total: Number(need), expires_on: endsOn, session_ids: chosen,
-      } });
+      // Emptying the field means "unpaid again", and a null body field is
+      // dropped before it reaches the server — hence the flag. See the
+      // route's own note in api/plans.py.
+      const r = await api(`/plans/${plan.id}${paidOn ? '' : '?clear_paid_on=true'}`, {
+        method: 'PUT',
+        body: {
+          plan: name, sessions_total: Number(need), expires_on: endsOn,
+          paid_on: paidOn || null, session_ids: chosen,
+        },
+      });
       if (!r.ok) return toast(r.error, 'bad');
       close();
       toast('Plan updated — reissue the card to print the new numbers');
@@ -113,10 +121,19 @@ export default function EditPlan({ clientId, plan, onSaved }) {
           <input type="number" min={locked.length || 1} max="200" value={need} onChange={onNeedChange} />
         </div>
       </div>
-      <label>ENDS ON</label>
-      <input type="date" value={endsOn}
-             onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
-      <div className="hint">Follows the sessions picked below — type over it to override, until they change again.</div>
+      <div className="fieldrow">
+        <div>
+          <label>ENDS ON</label>
+          <input type="date" value={endsOn}
+                 onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
+          <div className="hint">Follows the sessions picked below — type over it to override, until they change again.</div>
+        </div>
+        <div>
+          <label>PAID ON</label>
+          <input type="date" value={paidOn} onChange={e => setPaidOn(e.target.value)} />
+          <div className="hint">Clear it to mark this plan unpaid again.</div>
+        </div>
+      </div>
 
       <div className="divider" />
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -124,8 +141,8 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         <span className={'pill ' + (chosen.length === need ? 'ok' : 'warn')}>{chosen.length} of {need} chosen</span>
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>
-        Only {plan.class_name || 'this class'}'s sessions are offered. Sessions already attended
-        are locked and always count toward the total.
+        Only {plan.class_name || 'this class'}'s sessions are offered, including the last three
+        weeks. Sessions already attended are locked and always count toward the total.
       </div>
       {chosen.length !== need && (
         <div className="warnline" style={{ margin: '0 0 10px' }}>

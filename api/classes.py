@@ -20,20 +20,30 @@ class ClassIn(BaseModel):
     colour: str = "#87438E"
     duration_hours: float = 1.5
     level: Optional[str] = None
+    # A default, not a lock: what a new session falls back to when no
+    # instructor is chosen, and what every upcoming session's instructor is
+    # overwritten to when this changes (see update_class below).
+    instructor_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------- routes
 @router.get("/api/classes")
-def list_classes():
+def list_classes(status: str = "active"):
+    """
+    `status="archived"` is the whole other half of this list, not an overlay
+    on top of the active one -- same convention as /api/instructors' status
+    param.
+    """
     conn = db.connect()
     try:
+        active = 0 if status == "archived" else 1
         return rows(conn.execute(
             "SELECT c.*,"
             "  (SELECT COUNT(*) FROM sessions s WHERE s.class_id=c.id"
             "     AND s.starts_at > ? AND s.status='scheduled') AS upcoming,"
             "  (SELECT COUNT(DISTINCT b.client_id) FROM bookings b"
             "     JOIN sessions s ON s.id=b.session_id WHERE s.class_id=c.id) AS students"
-            " FROM classes c WHERE c.active=1 ORDER BY c.name", (db.now(),)))
+            " FROM classes c WHERE c.active=? ORDER BY c.name", (db.now(), active)))
     finally:
         conn.close()
 
@@ -43,9 +53,10 @@ def create_class(body: ClassIn):
     conn = db.connect()
     try:
         cur = conn.execute(
-            "INSERT INTO classes (name, description, colour, duration_hours, level)"
-            " VALUES (?,?,?,?,?)",
-            (body.name, body.description, body.colour, body.duration_hours, body.level))
+            "INSERT INTO classes (name, description, colour, duration_hours, level,"
+            " instructor_id) VALUES (?,?,?,?,?,?)",
+            (body.name, body.description, body.colour, body.duration_hours, body.level,
+             body.instructor_id))
         conn.commit()
         return {"id": cur.lastrowid}
     finally:
@@ -58,11 +69,20 @@ def update_class(clid: int, body: ClassIn):
     try:
         conn.execute(
             "UPDATE classes SET name=?, description=?, colour=?,"
-            " duration_hours=?, level=? WHERE id=?",
+            " duration_hours=?, level=?, instructor_id=? WHERE id=?",
             (body.name, body.description, body.colour,
-             body.duration_hours, body.level, clid))
+             body.duration_hours, body.level, body.instructor_id, clid))
+        # The class's instructor is a default that cascades: every session
+        # that hasn't happened yet is overwritten to match, whatever
+        # instructor it had before — not just the ones with none. Past and
+        # cancelled sessions are untouched; the "upcoming" predicate here is
+        # the same one list_classes' own `upcoming` count uses.
+        cascaded = conn.execute(
+            "UPDATE sessions SET instructor_id=? WHERE class_id=?"
+            " AND status='scheduled' AND starts_at > ?",
+            (body.instructor_id, clid, db.now())).rowcount
         conn.commit()
-        return {"ok": True}
+        return {"ok": True, "cascaded_sessions": cascaded}
     finally:
         conn.close()
 
@@ -122,9 +142,49 @@ def delete_class(clid: int, hard: bool = False):
                 access.refresh_expiry(conn, sub_id)
             action = "delete"
         else:
+            # Archiving a class stops it from being offered again, so its
+            # upcoming sessions have nothing left to happen for — release
+            # them the same way the hard-delete branch above does (just
+            # scoped to sessions that haven't happened yet), so the clients
+            # booked into them get the slot back as unassigned on their plan
+            # instead of it silently dangling on a class nobody can see.
+            # Past sessions and their attendance are never touched.
+            upcoming_ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM sessions WHERE class_id=? AND status='scheduled'"
+                " AND starts_at > ?", (clid, db.now())).fetchall()]
+            released_sessions = len(upcoming_ids)
+            released_bookings = 0
+            if upcoming_ids:
+                marks = ",".join("?" * len(upcoming_ids))
+                subs = {r["subscription_id"] for r in conn.execute(
+                    f"SELECT DISTINCT subscription_id FROM bookings"
+                    f" WHERE session_id IN ({marks}) AND subscription_id IS NOT NULL",
+                    upcoming_ids).fetchall()}
+                released_bookings = conn.execute(
+                    f"SELECT COUNT(*) n FROM bookings WHERE session_id IN ({marks})",
+                    upcoming_ids).fetchone()["n"]
+                conn.execute(f"DELETE FROM bookings WHERE session_id IN ({marks})", upcoming_ids)
+                conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", upcoming_ids)
+                for sub_id in subs:
+                    access.refresh_expiry(conn, sub_id)
             conn.execute("UPDATE classes SET active=0 WHERE id=?", (clid,))
             action = "archive"
         conn.commit()
-        return {"ok": True, "action": action}
+        return {"ok": True, "action": action,
+                "released_sessions": released_sessions if action == "archive" else None,
+                "released_bookings": released_bookings if action == "archive" else None}
+    finally:
+        conn.close()
+
+
+@router.post("/api/classes/{clid}/unarchive")
+def unarchive_class(clid: int):
+    conn = db.connect()
+    try:
+        if not conn.execute("SELECT 1 FROM classes WHERE id=?", (clid,)).fetchone():
+            raise HTTPException(404, "no such class")
+        conn.execute("UPDATE classes SET active=1 WHERE id=?", (clid,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()

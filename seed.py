@@ -270,11 +270,16 @@ def seed_clients(conn, rosters, class_of, sessions_of, warn):
                 cur = conn.execute(
                     "INSERT INTO subscriptions (client_id, class_id, plan,"
                     " sessions_total, price, payment_note, months, days_pattern,"
-                    " starts_on, expires_on, created_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    " starts_on, expires_on, paid_on, created_at)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                     (client_id, cid_class, plan_name, total, st.price,
                      st.paid_raw, months, st.days, starts.isoformat(),
-                     expires.isoformat(), db.now()))
+                     expires.isoformat(),
+                     # The sheet's own PAID DATE column, kept as the answer to
+                     # "when was this paid" rather than only being spent on
+                     # starts_on. A blank cell stays blank: unpaid, not guessed.
+                     st.paid_date.isoformat() if st.paid_date else None,
+                     db.now()))
                 sub_id = cur.lastrowid
                 subs.append(sub_id)
 

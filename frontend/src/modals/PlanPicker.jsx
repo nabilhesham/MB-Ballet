@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { api } from '../api';
 import { isoDay, todayISO } from '../lib/format';
+import { earliestUpcoming, fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import SessionPickList from './SessionPickList';
@@ -26,13 +27,14 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
   // what was just typed.
   const [endsTouched, setEndsTouched] = useState(false);
   const [price, setPrice] = useState('');
+  // Blank is a real answer, not a missing one: the plan is unpaid until a
+  // date is put here, and reads that way everywhere it is shown.
+  const [paidOn, setPaidOn] = useState('');
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
 
   const load = async cid => {
-    const now = Math.floor(Date.now() / 1000);
-    const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&class_id=${cid}&available_for=${clientId}`);
-    setSessions(list);
+    setSessions(await fetchPlanSessions(cid, clientId));
     setChosen([]);
   };
 
@@ -78,7 +80,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       await api(`/clients/${clientId}/plan`, { method: 'POST', body: {
         class_id: classId, plan: name, sessions_total: Number(need),
         price: price === '' ? null : Number(price), starts_on: start, expires_on: endsOn,
-        session_ids: chosen,
+        paid_on: paidOn || null, session_ids: chosen,
       } });
       close();
       toast('Plan saved — issue the card for this class next');
@@ -88,7 +90,8 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
 
   const k = classes.find(x => x.id === classId);
   const hint = k
-    ? `Only ${k.name} sessions are offered — a plan pays for its own class.`
+    ? `Only ${k.name} sessions are offered — a plan pays for its own class. `
+      + 'The last three weeks are included, for a plan written down after the client started.'
     : 'Pick a date for every session in the plan.';
   const canSave = chosen.length === need && need > 0;
 
@@ -122,8 +125,17 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
           <div className="hint">Follows the sessions picked — type over it to override, until they change again.</div>
         </div>
       </div>
-      <label>PRICE (EGP)</label>
-      <input type="number" placeholder="optional" value={price} onChange={e => setPrice(e.target.value)} />
+      <div className="fieldrow">
+        <div>
+          <label>PRICE (EGP)</label>
+          <input type="number" placeholder="optional" value={price} onChange={e => setPrice(e.target.value)} />
+        </div>
+        <div>
+          <label>PAID ON</label>
+          <input type="date" value={paidOn} onChange={e => setPaidOn(e.target.value)} />
+          <div className="hint">Leave blank if they have not paid yet — the plan shows as unpaid.</div>
+        </div>
+      </div>
 
       <div className="divider" />
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
@@ -132,7 +144,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>{hint}</div>
       <div className="row" style={{ marginBottom: 8 }}>
-        <button className="sm" onClick={() => setChosen(sessions.slice(0, need).map(s => s.id))}>Auto-fill earliest</button>
+        <button className="sm" onClick={() => setChosen(earliestUpcoming(sessions, need))}>Auto-fill earliest</button>
         <button className="sm" onClick={() => setChosen([])}>Clear</button>
       </div>
       <SessionPickList sessions={sessions} chosen={chosen} onToggle={toggle} />

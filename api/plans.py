@@ -25,14 +25,24 @@ class PlanEdit(BaseModel):
     sessions_total: Optional[int] = None
     expires_on: Optional[str] = None
     session_ids: Optional[list[int]] = None
+    paid_on: Optional[str] = None
 
 
 # ---------------------------------------------------------------- routes
 @router.put("/api/plans/{pid}")
-def edit_plan(pid: int, body: PlanEdit):
+def edit_plan(pid: int, body: PlanEdit, clear_paid_on: bool = False):
+    """
+    Partial update — only the fields sent are touched, via exclude_none. That
+    is also why marking a plan unpaid again needs its own flag: a plain
+    paid_on=null is indistinguishable from "wasn't sent" once exclude_none
+    drops it, so it would silently never reach the database. Pass
+    ?clear_paid_on=true instead of paid_on to blank it back to unpaid — the
+    same shape edit_session() uses for clear_instructor.
+    """
     conn = db.connect()
     try:
-        r = access.edit_plan(conn, pid, **body.model_dump(exclude_none=True))
+        r = access.edit_plan(conn, pid, clear_paid_on=clear_paid_on,
+                             **body.model_dump(exclude_none=True))
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
         conn.close()

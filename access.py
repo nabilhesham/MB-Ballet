@@ -36,8 +36,15 @@ def _log(conn, client_id, credential_id, session_id, decision, reason,
     return cur.lastrowid
 
 
-def _deny(message, detail=None, **base):
-    return {**base, "granted": False, "message": message, "detail": detail}
+def _deny(message, detail=None, severity="stop", **base):
+    """
+    A refusal. `severity` separates "something is wrong" from "nothing to do
+    here" — a client scanning twice has not done anything wrong, and the kiosk
+    reads a red STOP at them for it. "warn" is the amber middle: refused, but
+    routine. Nothing is deducted either way.
+    """
+    return {**base, "granted": False, "severity": severity,
+            "message": message, "detail": detail}
 
 
 def day_bounds(ts: int = None):
@@ -49,6 +56,49 @@ def day_bounds(ts: int = None):
 
 def session_end(row) -> int:
     return int(row["starts_at"] + row["duration_hours"] * 3600)
+
+
+def slot_conflict(conn, starts_at: int, duration_hours: float, exclude_id: int = None):
+    """
+    The session already occupying this slot, or None.
+
+    One session at a time, academy-wide — the rule is on the level of the app,
+    not of a class or an instructor: whatever is running, nothing else runs
+    beside it. Checked here rather than at each call site so create, edit,
+    repeat and un-cancel cannot drift apart on what "taken" means.
+
+    Intervals are half-open. A session ending at 16:01 and one starting at
+    16:01 do not clash, because back-to-back is how a timetable is built; only
+    a real overlap does.
+
+    A cancelled session occupies nothing and never blocks — cancelling is how
+    reception frees a slot up.
+
+    Note this deliberately says nothing about the past: a datetime that has
+    already been and gone is still a slot, and entering a second session into
+    it is refused the same way. History that predates the rule is left alone
+    (seed.py does not call this — see CLAUDE.md), so the database can still
+    hold overlaps the UI would now refuse to create.
+    """
+    ends_at = starts_at + duration_hours * 3600
+    sql = ("SELECT s.id, s.starts_at, s.duration_hours, c.name AS class_name"
+           "  FROM sessions s JOIN classes c ON c.id = s.class_id"
+           " WHERE s.status != 'cancelled'"
+           "   AND s.starts_at < ? AND s.starts_at + s.duration_hours * 3600 > ?")
+    params = [ends_at, starts_at]
+    if exclude_id is not None:
+        sql += " AND s.id != ?"
+        params.append(exclude_id)
+    return conn.execute(sql + " ORDER BY s.starts_at LIMIT 1", params).fetchone()
+
+
+def slot_taken_message(row) -> str:
+    """One sentence a receptionist can act on, worded the same everywhere."""
+    starts = time.localtime(row["starts_at"])
+    ends = time.localtime(session_end(row))
+    return (f"{time.strftime('%a %d %b', starts)} "
+            f"{time.strftime('%H:%M', starts)}–{time.strftime('%H:%M', ends)} "
+            f"is already taken by {row['class_name']}")
 
 
 # ---------------------------------------------------------------- plans
@@ -149,6 +199,10 @@ def plan_state(conn, sub_id: int) -> dict:
         "unassigned": max(0, sub["sessions_total"] - (c["assigned"] or 0)),
         "starts_on": sub["starts_on"], "expires_on": expires,
         "active": sub["active"], "price": sub["price"],
+        # NULL means unpaid. Everything that shows a paid/unpaid indicator —
+        # the profile, the payment history, the kiosk — reads it from here,
+        # so there is one answer rather than four re-derivations.
+        "paid_on": sub["paid_on"],
         "frozen": bool(sub["frozen_on"]),
         "frozen_on": sub["frozen_on"],
         "frozen_until": sub["frozen_until"],
@@ -230,7 +284,7 @@ def settle_past_sessions(conn) -> int:
 
 
 # ---------------------------------------------------------------- scanning
-def _client_payload(conn, client, sub) -> dict:
+def _client_payload(conn, client, sub, class_id=None) -> dict:
     cid = client["id"]
     state = plan_state(conn, sub["id"]) if sub else {}
 
@@ -242,12 +296,22 @@ def _client_payload(conn, client, sub) -> dict:
         " WHERE b.client_id = ? AND b.status != 'booked'"
         " ORDER BY s.starts_at DESC LIMIT 4", (cid,)).fetchall()]
 
+    # "Next class" means the next one on the card being held. A client who
+    # takes Ballet and Flexibility was being shown whichever came first
+    # across both, so the Ballet card could answer with a Flexibility date —
+    # true, but not what was asked. Scoped to the card's class; a
+    # member-number lookup names no class and still spans everything.
+    nxt_params = [cid, db.now()]
+    class_clause = ""
+    if class_id:
+        class_clause = " AND s.class_id = ?"
+        nxt_params.append(class_id)
     nxt = conn.execute(
         "SELECT s.starts_at, c.name AS class_name FROM bookings b"
         "  JOIN sessions s ON s.id = b.session_id"
         "  JOIN classes c ON c.id = s.class_id"
         " WHERE b.client_id = ? AND b.status = 'booked' AND s.starts_at > ?"
-        " ORDER BY s.starts_at LIMIT 1", (cid, db.now())).fetchone()
+        f"{class_clause} ORDER BY s.starts_at LIMIT 1", nxt_params).fetchone()
 
     tot = conn.execute(
         "SELECT SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) present,"
@@ -261,6 +325,9 @@ def _client_payload(conn, client, sub) -> dict:
         "sessions_total": state.get("sessions_total"),
         "sessions_remaining": state.get("remaining"),
         "expires_on": state.get("expires_on"),
+        # Shown as a tag at reception. It never blocks a check-in — the
+        # receptionist is the one who decides what to do about it.
+        "paid_on": state.get("paid_on"),
         "visits": tot["present"] or 0,
         "absences": tot["absent"] or 0,
         "last_visit": tot["last_visit"],
@@ -303,7 +370,7 @@ def verify(conn, raw_token: str) -> dict:
         "client_id": client["id"], "credential_id": cred["id"],
         "name_en": client["name_en"], "photo_path": client["photo_path"],
         "card_class": cred["class_name"], "card_colour": cred["colour"],
-        **_client_payload(conn, client, sub),
+        **_client_payload(conn, client, sub, cred["class_id"]),
     }
     if sub is None and cred["class_id"]:
         _log(conn, client["id"], cred["id"], None, "deny", "no plan for that class")
@@ -337,7 +404,7 @@ def _decide(conn, client, cred, base, t):
         when = time.strftime("%H:%M", time.localtime(done["checked_in_at"]))
         _log(conn, cid, cred_id, None, "deny", "already checked in today")
         return _deny(f"Already checked in today at {when} for {done['class_name']}",
-                     detail="nothing was deducted", **base)
+                     detail="nothing was deducted", severity="warn", **base)
 
     # The card's own plan: freezing the ballet plan must not turn away a
     # client arriving for the flexibility class she is paid up in.
@@ -473,28 +540,46 @@ def book(conn, client_id: int, session_id: int, subscription_id: int = None) -> 
     s = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
     if s is None:
         return {"ok": False, "error": "no such session"}
+    klass = conn.execute("SELECT name FROM classes WHERE id=?", (s["class_id"],)).fetchone()
+    cname = klass["name"] if klass else "this class"
+
     if subscription_id is None:
         # Spend the plan bought for this class, not whichever one runs longest.
         sub = active_plan(conn, client_id, s["class_id"])
-        subscription_id = sub["id"] if sub else None
+        if sub is None:
+            # No plan for this class means no slot to spend, and a booking
+            # with no plan behind it is a session nobody paid for. This used
+            # to fall through and insert one with subscription_id NULL —
+            # which is how a client ended up in a class they were not
+            # enrolled in. A session can only be booked against the plan
+            # that pays for its class.
+            return {"ok": False,
+                    "error": f"no active {cname} plan — add one for that class "
+                             f"before booking them into this session"}
+        subscription_id = sub["id"]
 
     # A booking spends one of the plan's paid slots, whether that plan was
     # named here or just resolved above. A slot spent twice is a session
     # nobody paid for, so this is checked no matter which caller asked.
-    if subscription_id is not None:
-        sub_row = conn.execute(
-            "SELECT sessions_total, frozen_on FROM subscriptions WHERE id=?",
-            (subscription_id,)).fetchone()
-        if sub_row and sub_row["frozen_on"]:
-            # Freezing is what released this slot in the first place; it is
-            # not available again until the plan is unfrozen.
-            return {"ok": False, "error": "this plan is frozen"}
-        used = conn.execute(
-            "SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
-            (subscription_id,)).fetchone()["n"]
-        if sub_row and used >= sub_row["sessions_total"]:
-            return {"ok": False,
-                    "error": "every session on this plan is already assigned"}
+    sub_row = conn.execute(
+        "SELECT sessions_total, frozen_on, class_id FROM subscriptions WHERE id=?",
+        (subscription_id,)).fetchone()
+    if sub_row is None:
+        return {"ok": False, "error": "no such plan"}
+    if sub_row["class_id"] != s["class_id"]:
+        # The one rule the whole card-per-class model rests on.
+        return {"ok": False, "error": f"that plan is not a {cname} plan"}
+    if sub_row["frozen_on"]:
+        # Freezing is what released this slot in the first place; it is
+        # not available again until the plan is unfrozen.
+        return {"ok": False, "error": "this plan is frozen"}
+    used = conn.execute(
+        "SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
+        (subscription_id,)).fetchone()["n"]
+    if used >= sub_row["sessions_total"]:
+        return {"ok": False,
+                "error": f"every session on their {cname} plan is already "
+                         f"assigned — no free slot to book this one against"}
 
     conn.execute(
         "INSERT INTO bookings (client_id, session_id, subscription_id, status, created_at)"
@@ -565,7 +650,8 @@ def cancel_session(conn, session_id: int) -> dict:
 
 
 def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
-             expires_on: str = None, session_ids: list = None) -> dict:
+             expires_on: str = None, session_ids: list = None,
+             paid_on: str = None, clear_paid_on: bool = False) -> dict:
     """
     Change a plan's name, size, sessions or end date after it has been sold.
 
@@ -586,6 +672,10 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     leaving it out re-derives the date from whatever sessions the plan holds
     after this edit, via refresh_expiry() — so an edit that only adds or
     drops sessions moves the date automatically, in either direction.
+
+    clear_paid_on marks the plan unpaid again. It exists because the route
+    drops None fields before calling this, so paid_on=None cannot mean
+    "erase it" — the same reason edit_session() carries clear_instructor.
     """
     sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
     if sub is None:
@@ -649,6 +739,10 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
         fields["plan"] = plan
     if sessions_total is not None:
         fields["sessions_total"] = sessions_total
+    if clear_paid_on:
+        fields["paid_on"] = None
+    elif paid_on is not None:
+        fields["paid_on"] = paid_on
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?",
@@ -687,6 +781,71 @@ def month_of(when: date = None) -> str:
 def prev_month(month: str) -> str:
     first = date.fromisoformat(month + "-01")
     return (first - timedelta(days=1)).strftime("%Y-%m")
+
+
+def month_bounds(when: date = None) -> tuple:
+    """The first and last day of a date's calendar month, both ISO. Today's
+    month unless told otherwise -- the instructor view's default period."""
+    d = when or date.today()
+    first = d.replace(day=1)
+    next_first = (first.replace(year=d.year + 1, month=1) if d.month == 12
+                  else first.replace(month=d.month + 1))
+    last = next_first - timedelta(days=1)
+    return first.isoformat(), last.isoformat()
+
+
+def date_range_ts(period_from: str, period_to: str) -> tuple:
+    """An inclusive [from, to] ISO-date pair as a half-open unix timestamp
+    range, for filtering a starts_at column against a picked date range."""
+    start = int(datetime.combine(date.fromisoformat(period_from), _t.min).timestamp())
+    end = int(datetime.combine(date.fromisoformat(period_to), _t.min).timestamp()) + 86400
+    return start, end
+
+
+def logged_hours(conn, instructor_id: int, period_from: str, period_to: str) -> dict:
+    """
+    Hours the salary sheet recorded for this instructor within a period, plus
+    any manual corrections layered on top (see instructor_hour_adjustments) --
+    never mixed into the sheet's own rows, so what the sheet actually said
+    stays visible. `days`/`from`/`to` count only real salary-sheet rows; a
+    correction is not a claim of an extra day worked.
+    """
+    sheet = conn.execute(
+        "SELECT COALESCE(SUM(hours),0) h, COUNT(*) days, MIN(work_date) a, MAX(work_date) b"
+        " FROM instructor_hours WHERE instructor_id=? AND work_date BETWEEN ? AND ?",
+        (instructor_id, period_from, period_to)).fetchone()
+    adjustments = conn.execute(
+        "SELECT COALESCE(SUM(delta_hours),0) d FROM instructor_hour_adjustments"
+        " WHERE instructor_id=? AND adjustment_date BETWEEN ? AND ?",
+        (instructor_id, period_from, period_to)).fetchone()
+    rate_row = conn.execute("SELECT hourly_rate FROM instructors WHERE id=?",
+                            (instructor_id,)).fetchone()
+    rate = (rate_row["hourly_rate"] or 0) if rate_row else 0
+    hours = round((sheet["h"] or 0) + (adjustments["d"] or 0), 2)
+    return {
+        "hours": hours, "days": sheet["days"], "from": sheet["a"], "to": sheet["b"],
+        "pay": round(hours * rate, 2),
+    }
+
+
+def adjust_logged_hours(conn, instructor_id: int, period_from: str, period_to: str,
+                        new_total: float, note: str = None) -> dict:
+    """
+    Reception's "edit the total" action. Computes the delta against the
+    period's current total and records it as one new dated row -- never
+    rewrites or deletes an existing instructor_hours row, so a correction is
+    its own auditable fact rather than lost inside an edited import. Dated to
+    the end of the period being viewed, so it stays in scope whenever that
+    period -- or any range containing it -- is looked at again later.
+    """
+    current = logged_hours(conn, instructor_id, period_from, period_to)
+    delta = round(new_total - current["hours"], 2)
+    conn.execute(
+        "INSERT INTO instructor_hour_adjustments (instructor_id, adjustment_date, delta_hours,"
+        " note, created_at) VALUES (?,?,?,?,?)",
+        (instructor_id, period_to, delta, note, db.now()))
+    conn.commit()
+    return logged_hours(conn, instructor_id, period_from, period_to)
 
 
 def month_intake(conn, month: str = None) -> dict:

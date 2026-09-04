@@ -58,6 +58,14 @@ also a print stylesheet. Deployed by copying a folder to a laptop and running
 one command — see the Stack section above for how a React build stays
 compatible with that on the machine that matters, the reception laptop.
 
+**A row of filter inputs and the buttons acting on them uses `.filterbar`**,
+which pins both to the same 42px height and bottom-aligns them. A default
+button is a few pixels shorter than a date field and reads as stuck on the
+end rather than part of the same control; the instructor page's from/to
+range is the first user. Such a range applies on a button, never on change —
+a date input fires on every edit, so binding a request straight to it
+reloads the view for a half-typed year.
+
 **Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
 a controlled component that replaced app.js's old `enhanceTables()`. Click a
 column header to sort; a long table gets a capped scrolling body whose header
@@ -122,6 +130,9 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                    open it.
   src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
                    Toast, Avatar, Pill, Empty.
+  src/lib/         format.js (timestamp -> what a receptionist reads) and
+                   planSessions.js (the window a plan's slots are filled
+                   from — see the three-weeks-back rule below).
 static/app/       Committed build output of frontend/ — what server.py
                   actually serves at `/`. Regenerate with `npm run build`
                   after any `frontend/src/` change; see Stack above.
@@ -370,13 +381,30 @@ system and everything else follows from it:
 
 - **classes** are the offering, at the granularity the roster sheets use:
   "Ballet Level 8", "Ballet Grade 6", "Evening Flexibility". One block of a
-  roster sheet is one class. They carry a duration, a colour and a level, and
-  they do **not** carry an instructor. Splitting them this finely is what
-  makes one card per class mean something — a Grade 6 card must not check
-  someone into the Level 8 class two hours earlier.
-- **sessions** are dated occurrences. The instructor lives here, per session,
-  because who teaches a given date changes often enough that a class-level
-  default was more misleading than useful. No capacity field.
+  roster sheet is one class. They carry a duration, a colour and a level.
+  Splitting them this finely is what makes one card per class mean something
+  — a Grade 6 card must not check someone into the Level 8 class two hours
+  earlier.
+- **sessions** are dated occurrences. Each carries its own `instructor_id`,
+  because who teaches a given date changes often enough that a per-session
+  field, not a class-level constant, is what has to be the source of truth.
+  No capacity field.
+- **classes.instructor_id** is a *default*, not a substitute for the field
+  above: what a new session for that class falls back to when none is named,
+  and what every one of that class's upcoming (`status='scheduled'`,
+  not yet started) sessions is overwritten to whenever it's set or changed —
+  deliberately including a session someone had set to a different, specific
+  instructor. `api/classes.py`'s `update_class` is the one place that
+  cascade happens; `create_session`/`repeat_sessions` are the two places the
+  fallback is read. Past and cancelled sessions are never touched by either.
+- **clients** carry `age` as **REAL, not INTEGER** — the roster sheets hold
+  "4.8" and "12.5" for the youngest children, and rounding a four-year-old up
+  to five loses the distinction the class placement is made on. The whole
+  path is float: `sheets.py` parses it with `number()` (deliberately without
+  the `int()` that `months` and `sessions` get), `ClientIn.age` is
+  `Optional[float]`, and the form's age input carries `step="any"`. Both of
+  those last two matter — an `int` field *rejects* 3.5 outright rather than
+  rounding it, and without `step` the browser refuses it before it is sent.
 - **bookings** replaced `enrolments`, `attendance` and `session_roster` at once.
   Status is `booked` → `present` | `absent`. There is no third state: a slot is
   either used or it is not, and **both present and absent consume it**, because
@@ -388,13 +416,32 @@ system and everything else follows from it:
   records "yes" rather than an amount, and a plan whose price nobody wrote down
   must not be reported as zero revenue. `payment_note` keeps the cell verbatim
   ("package", "free", "680") because "package" and a blank mean different
-  things.
+  things. `paid_on` answers *when* the money arrived, where those two answer
+  what the sheet said about it — seeded from the roster's own PAID DATE
+  column (68 of 70 rows have one), and **nullable on purpose**: NULL is
+  read as unpaid and shown that way. It is set in the plan picker, edited
+  from the plan's Edit button, and shows as a pill on the client profile,
+  as the payment history's PAID column, and as a tag at reception. It never
+  blocks a check-in — reception is told, and decides. The printed card
+  deliberately omits it: that PNG is a snapshot nothing regenerates, so a
+  card printed while unpaid would read UNPAID for the life of the card.
 - **instructor_hours** is one row per instructor per working day, from the
   monthly salary sheet. Pay is `hours x hourly_rate` at read time, never
   stored, so correcting a rate re-prices the month instead of leaving a stale
   total behind. It is what payroll is actually paid on; "sessions taught" is
   the app's own count, and the instructor page shows both because a gap
   between them is worth seeing.
+- **instructor_hour_adjustments** is a manual correction, layered on top of
+  `instructor_hours` without ever touching it. Reception's "edit the hours"
+  button on the instructor page shows one editable total for the period being
+  viewed; under that, `access.adjust_logged_hours()` writes one new dated
+  delta row rather than rewriting or deleting a real salary-sheet row, so what
+  the sheet actually said stays visible. The row is dated to the *end* of the
+  period being edited, so it stays in scope whenever that period — or any
+  wider range containing it — is looked at again. `access.logged_hours()` is
+  what sums both tables together into the figure shown; "days worked" counts
+  only real `instructor_hours` rows, since a correction is not a claim of an
+  extra day worked.
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
 
@@ -431,6 +478,50 @@ why the class page shows "students with a booking" rather than a roster.
 `POST /api/clients/{id}/plan` rejects a mismatch between `sessions_total` and
 `session_ids`, and the picker keeps Save disabled until they match. A plan with
 unassigned slots is a promise nobody has written down.
+
+**A plan's slots can be filled from three weeks back, not just forward.**
+Reception writes a plan down after the client has already started coming, so
+the dates they actually attended have to be reachable. `lib/planSessions.js`
+holds that window and the four pickers that assign a plan's slots
+(`PlanPicker`, `EditPlan`, `AddSessionToPlan`, `AssignRemaining`) all fetch
+through it — moving an existing booking is deliberately not one of them. It
+also drops cancelled sessions, which `/api/sessions` does not filter. All
+three write paths (`add_plan`, `edit_plan`, `book`) already book a finished
+session straight to `absent`, so the list marks past rows and says why, and
+"auto-fill earliest" skips them: creating absences is a decision to make one
+date at a time, never in bulk.
+
+**A session can only be booked against the plan that pays for its class.**
+`access.book()` refuses when the client has no active plan in that session's
+class, when the named plan belongs to another class, when it is frozen, or
+when every one of its slots already has a date. The no-plan case used to
+fall through and insert a booking with `subscription_id` NULL — a session
+nobody paid for, in a class the client was never enrolled in.
+`GET /api/sessions/{sid}/bookable` asks the same four questions ahead of
+time so the add-student picker only ever offers people the endpoint would
+accept, and shows how many free slots each has. The rule lives in `book()`;
+the picker holds no copy of it.
+
+**One session at a time, academy-wide.** A slot that is taken is taken,
+whatever class wants it: `access.slot_conflict()` is the single answer to
+"is this free?", and `create_session`, `edit_session`, `repeat_sessions` and
+un-cancelling via `set_session_status` all ask it. Intervals are half-open,
+so 15:01–16:01 and 16:01–17:00 are fine — back-to-back is how a timetable is
+built, and only a real overlap is refused. A cancelled session occupies
+nothing, so cancelling is how reception frees a slot up.
+
+The rule applies to past datetimes too, deliberately: a slot that has been
+and gone is still a slot. **`seed.py` does not call it.** The academy's own
+roster sheets contain three real makeup classes that ran alongside another
+class, and the sheets record what actually happened — dropping or moving one
+to satisfy a scheduling rule would corrupt the business record. So a
+re-seeded database legitimately holds three overlaps the UI would now refuse
+to create. If that ever needs reconciling, fix the sheets, not the importer.
+
+Repeat weekly **skips** a clash rather than failing the batch, and returns
+`skipped` saying which dates and why — one taken evening in week 7 must not
+cost the other eleven. It is the same treatment a date already holding that
+class's own session has always had.
 
 **One check-in per day.** A second scan the same day is refused with the time of
 the first, and nothing is deducted.
@@ -555,6 +646,46 @@ route and a manual-balance-adjustment endpoint, but it was never mounted into
 removed rather than wired in (see Known gaps). If either is wanted, build it
 fresh against the current model rather than reviving that file.
 
+**Archiving a class also releases its upcoming sessions.** A class that
+stops being offered has nothing left to happen for, so `delete_class`'s soft
+path deletes its `status='scheduled'`, not-yet-started sessions and their
+bookings (not just flips `active=0` and leaves them dangling) — the clients
+booked into them get the slot back as `unassigned` on their plan, same as any
+other booking removal, via `access.refresh_expiry()`. Past sessions and their
+attendance are never touched. This is the one archive path that cascades a
+delete into another table on its own; client and instructor archiving do not
+touch sessions this way.
+
+**Instructors, classes and clients all have an archived list with a restore
+path.** `GET /api/{resource}?status=archived` and
+`POST /api/{resource}/{id}/unarchive` back an "Archived" view for each,
+reachable from a plain button beside "New instructor" / "New class" / "New
+client" — never the sidebar, which is the convention any future
+archived-list screen should follow.
+
+`/api/clients`'s `status` is the one that carries two jobs: `"archived"`
+picks which half of the list to read, while `"attention"` filters *within*
+the active half, after each row has been enriched with its plan state. They
+are not three values of one switch, and the SQL only knows about the first.
+
+What a restore does not bring back is per-resource. A class comes back with
+its past sessions and attendance but not the upcoming sessions the archive
+released — those were deleted for good. A client comes back with their
+history but not their card: archiving revokes it, and credentials are
+revoked rather than deleted (see below), so a restored client needs a new
+one issued.
+
+**Archiving a client is refused while they have upcoming sessions.** Not
+released, refused — `delete_client` counts bookings whose session is in the
+future and not cancelled, using the same predicate `get_client` builds the
+profile's `upcoming` list from, so the number in the error is the number on
+the screen the receptionist is looking at. This replaces the older behaviour
+of silently deleting those bookings. Unused slots with no dates on them do
+*not* block it; the confirm dialog just says how many are being given up,
+since a lapsed plan holding slots nobody will book must not make a client
+permanently un-archivable. The button raises the error without a round-trip
+and the endpoint refuses independently — the same split `can_freeze` uses.
+
 ## Design decisions — do not undo these without asking
 
 **The QR says WHO, not WHETHER.** The token carries a client ID and a
@@ -571,16 +702,33 @@ refused with "Already checked in today at HH:MM" and **nothing is deducted**.
 The earlier rolling ten-minute window was wrong: someone returning after lunch
 would have been charged twice. `access._todays_checkin()` owns this.
 
-**verify() and check_in() are separate calls.** verify() is read-only and
-returns an `event_id`. Nothing is deducted until reception presses the button. A
-scan that doesn't become a check-in must not cost a session. There is a
-60-second `undo()`.
+**A refusal has two temperatures.** `_deny()` carries a `severity`: `"stop"`
+is the default and reads red, `"warn"` reads amber and is what the
+second-scan-today case returns. Scanning twice is the ordinary thing a
+client does when they are not sure the first one took, and answering it with
+the same red STOP as a revoked card told the whole room she had done
+something wrong. Nothing is deducted either way — only the temperature
+differs. Reach for `"warn"` whenever a refusal means "nothing to do here"
+rather than "something is wrong".
 
-**Session matching is a suggestion, not a gate.** verify() finds sessions the
-client is enrolled in within roughly ±45 min. If none match it still returns
-`granted: true` with `no_session: true`, and the kiosk turns amber with "CHECK IN
-ANYWAY". Reception has judgement; the software should inform, not block. Do not
-turn this into a hard deny.
+**verify() and check_in() are still separate calls, but the kiosk now presses
+the button itself.** verify() stays read-only and returns an `event_id`;
+check_in() is what spends the slot, and the 60-second `undo()` is unchanged.
+What changed is who calls it: a scan that matched one of today's sessions
+checks itself in, because the card already proved everything the button was
+confirming. Undo, not a second confirmation, is the safety net. Any granted
+scan with **no** matched session keeps a manual button — see the next point
+for why that path is currently unreachable, and why the branch stays anyway.
+
+**Session matching is a hard deny today, and the docs used to claim
+otherwise.** The intent written down here was that verify() returns
+`granted: true` with `no_session: true` and the kiosk turns amber with
+"CHECK IN ANYWAY" — inform, don't block. That is **not** what the code does:
+`access._decide()` returns "No session booked today" as a refusal, and
+`no_session` appears nowhere in the codebase. Whichever way this is settled,
+settle both sides together; the kiosk's manual-check-in branch is written
+and commented for the softer behaviour so it can be restored without
+touching the auto path.
 
 **Session spend is guarded before the insert.** `access.book()` counts the
 plan's existing bookings and refuses once that count reaches
@@ -650,6 +798,40 @@ browser cannot actually do.
 The old dev panel (client dropdown, paste box) has been removed. Test without
 hardware using Camera mode and a card PNG on a phone screen.
 
+(There are three input sources now, not two — Number joined Scanner and
+Camera as the fallback for an unplugged scanner and a card the camera will
+not focus on. It runs the same checks; only the card is missing.)
+
+### One result at a time, cleared by hand
+
+**Nothing on the kiosk dismisses itself.** A verdict stays up until someone
+presses Esc. The old ten- and nine-second timers meant a queue of clients
+could roll the screen past a receptionist who was still reading it, and
+there was no way to get the last one back.
+
+**While a result is up, the reader is deaf.** A second card, a second face
+in the camera, a second member number — none of them replace what is
+showing; `locked()` gates `scan()`, `lookupById()` and the camera's `pump()`
+alike, because two people scanning in quick succession is exactly how one
+client's verdict used to be swapped out before it was read. A scan that is
+ignored **says so** — an amber line and a soft beep — since a scanner that
+silently does nothing reads as broken hardware. The camera is the one that
+stays quiet rather than nudging: a card sitting in front of the lens would
+re-trigger every few seconds, so `pump()` skips without remembering, and the
+card still in frame reads the instant Esc clears the screen.
+
+**Esc is handled before every other guard** in the keydown listener, so it
+works from the manual-entry box and from a focused button, not just from the
+bare page. It was previously unreachable in Number mode — which the
+clear-by-hand rule now depends on.
+
+**"Next class" is scoped to the card being held.** `_client_payload()` takes
+the credential's `class_id` and filters the lookup by it. A client taking
+Ballet and Flexibility was shown whichever came first across both, so the
+Ballet card could answer with a Flexibility date — true, but not the
+question asked. A member-number lookup names no class and still spans
+everything.
+
 ### One card per class
 
 `credentials.class_id` decides which session a scan looks for. A client holding
@@ -690,11 +872,14 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 
 ## Known gaps / next up
 
-- [ ] No archive-restore UI, and no manual balance adjustment endpoint. An
-      `admin_routes.py` once had both, but it was never mounted into
+- [ ] No manual balance-adjustment endpoint. Archive-restore now exists for
+      all three of instructors, classes and clients — see the Deletion
+      policy section above. An `admin_routes.py` once had both a restore
+      route and the balance adjustment, but it was never mounted into
       `server.py` — dead, unreachable code from the pre-authentication
-      version of the app, deleted rather than wired in. Building either
-      one for real is separate feature work against the current model.
+      version of the app, deleted rather than wired in. Building the
+      balance adjustment for real is separate feature work against the
+      current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
       flexibility alone. The dashboard says how many plans carry no price

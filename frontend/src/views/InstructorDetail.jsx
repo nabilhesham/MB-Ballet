@@ -1,14 +1,17 @@
+import { useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtISO, hrs, initials } from '../lib/format';
+import { fmtFull, fmtISO, hrs, isoDay, thisMonthBounds } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
 import DataTable from '../components/DataTable';
 import { Pill } from '../components/Pill';
+import Avatar from '../components/Avatar';
 import Empty from '../components/Empty';
 import InstructorForm from '../modals/InstructorForm';
+import EditInstructorHours from '../modals/EditInstructorHours';
 
 function sessionColumns() {
   return [
@@ -34,13 +37,27 @@ function sessionColumns() {
   ];
 }
 
+// The search box matches literal text on the row's own values (DataTable's
+// rowSearchText) — starts_at is a raw unix number, so a typed date can't
+// match it without a plain string field carrying one alongside it.
+const withDateSearch = list => list.map(s => ({ ...s, _search_date: `${isoDay(s.starts_at)} ${fmtFull(s.starts_at)}` }));
+
 export default function InstructorDetail() {
   const { id } = useParams();
   const nav = useNavigate();
-  const { data: i, loading, error, reload } = useApi(`/instructors/${id}`);
+  const [[defaultFrom, defaultTo]] = useState(thisMonthBounds);
+  // What the inputs hold, and what the page is actually showing, kept apart
+  // on purpose: a date input fires on every change, so binding the request
+  // straight to it reloaded the whole view mid-edit — once for a half-typed
+  // year, again for the real one. Nothing moves until Apply.
+  const [draft, setDraft] = useState({ from: defaultFrom, to: defaultTo });
+  const [range, setRange] = useState({ from: defaultFrom, to: defaultTo });
+  const { data: i, loading, error, reload } =
+    useApi(`/instructors/${id}?from=${range.from}&to=${range.to}`);
   const { open } = useModal();
   const confirm = useConfirm();
   const toast = useToast();
+  const photoInput = useRef(null);
 
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
@@ -51,6 +68,17 @@ export default function InstructorDetail() {
     .filter(x => x.starts_at >= now && x.status === 'scheduled')
     .sort((a, b) => a.starts_at - b.starts_at);
   const past = i.sessions.filter(x => x.starts_at < now);
+
+  const resetPeriod = () => {
+    setDraft({ from: defaultFrom, to: defaultTo });
+    setRange({ from: defaultFrom, to: defaultTo });
+  };
+  const applyPeriod = () => {
+    if (!draft.from || !draft.to) return toast('Pick both dates', 'bad');
+    if (draft.from > draft.to) return toast('The start date is after the end date', 'bad');
+    return setRange(draft);
+  };
+  const dirty = draft.from !== range.from || draft.to !== range.to;
 
   const archive = () => confirm({
     title: 'Archive instructor',
@@ -63,11 +91,31 @@ export default function InstructorDetail() {
     },
   });
 
+  const uploadPhoto = () => photoInput.current?.click();
+  const onPhotoChosen = async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch(`/api/instructors/${i.id}/photo`, { method: 'POST', body: fd });
+    if (r.ok) { toast('Photo saved'); reload(); } else toast('Upload failed', 'bad');
+  };
+
+  const openEditHours = () => {
+    open(
+      <EditInstructorHours
+        instructorId={i.id} from={i.period_from} to={i.period_to}
+        currentTotal={i.logged.hours} onSaved={reload}
+      />,
+    );
+  };
+
   return (
     <>
       <div className="head">
         <div className="row" style={{ gap: 16 }}>
-          <span className="avatar lg">{initials(i.name)}</span>
+          <Avatar client={i} big />
           <div>
             <div className="eyebrow">Instructor</div>
             <h1>{i.name}</h1>
@@ -75,8 +123,32 @@ export default function InstructorDetail() {
           </div>
         </div>
         <div className="row">
+          <input type="file" accept="image/*" ref={photoInput} onChange={onPhotoChosen} hidden />
+          <button onClick={uploadPhoto}>Photo</button>
           <button onClick={() => open(<InstructorForm existing={i} onSaved={reload} />)}>Edit</button>
           <button className="danger" onClick={archive}>Archive</button>
+        </div>
+      </div>
+
+      {/* Two .filterbar rows rather than one: the dates belong together on
+          their own line, and the buttons acting on them sit under it. Both
+          rows use the same class, so the controls keep matching heights. */}
+      <div style={{ margin: '0 0 16px' }}>
+        <div className="filterbar">
+          <div>
+            <label>FROM</label>
+            <input type="date" value={draft.from}
+                   onChange={e => setDraft(d => ({ ...d, from: e.target.value }))} />
+          </div>
+          <div>
+            <label>TO</label>
+            <input type="date" value={draft.to}
+                   onChange={e => setDraft(d => ({ ...d, to: e.target.value }))} />
+          </div>
+        </div>
+        <div className="filterbar" style={{ marginTop: 10 }}>
+          <button className="pri" onClick={applyPeriod} disabled={!dirty}>Apply</button>
+          <button onClick={resetPeriod}>Reset to this month</button>
         </div>
       </div>
 
@@ -104,44 +176,49 @@ export default function InstructorDetail() {
         </div>
       </div>
 
-      {i.logged && i.logged.days ? (
-        <div className="grid g2" style={{ marginBottom: 16 }}>
-          <div className="box kpi">
+      <div className="grid g2" style={{ marginBottom: 16 }}>
+        <div className="box kpi">
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
             <div className="k">HOURS ON THE SALARY SHEET</div>
-            <div className="v" style={{ color: 'var(--brand)' }}>{i.logged.hours}</div>
-            <div className="n">{i.logged.days} days worked · {fmtISO(i.logged.from)} to {fmtISO(i.logged.to)}</div>
+            <button className="sm" onClick={openEditHours}>Edit</button>
           </div>
-          <div className="box kpi">
-            <div className="k">PAY FOR THOSE HOURS</div>
-            <div className="v" style={{ fontSize: 22, paddingTop: 6, color: 'var(--brand-deep)' }}>
-              {i.logged.pay.toLocaleString()} <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
-            </div>
-            <div className="n">at {t.hourly_rate.toLocaleString()} EGP per hour</div>
+          <div className="v" style={{ color: 'var(--brand)' }}>{i.logged.hours}</div>
+          <div className="n">
+            {i.logged.days
+              ? <>{i.logged.days} days worked · {fmtISO(i.logged.from)} to {fmtISO(i.logged.to)}</>
+              : 'No salary-sheet days in this period'}
           </div>
         </div>
-      ) : null}
+        <div className="box kpi">
+          <div className="k">PAY FOR THOSE HOURS</div>
+          <div className="v" style={{ fontSize: 22, paddingTop: 6, color: 'var(--brand-deep)' }}>
+            {i.logged.pay.toLocaleString()} <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
+          </div>
+          <div className="n">at {t.hourly_rate.toLocaleString()} EGP per hour</div>
+        </div>
+      </div>
 
       <h2>Upcoming sessions ({upcoming.length})</h2>
       {upcoming.length ? (
         <div className="box pad0">
           <DataTable
-            rows={upcoming} rowKey={r => r.id} search="Search sessions…"
+            rows={withDateSearch(upcoming)} rowKey={r => r.id} search="Search sessions…"
             onRowClick={r => nav(`/session/${r.id}`)}
             columns={sessionColumns()}
           />
         </div>
-      ) : <div className="box"><Empty>Nothing scheduled.</Empty></div>}
+      ) : <div className="box"><Empty>Nothing scheduled in this period.</Empty></div>}
 
       <h2>Past sessions ({past.length})</h2>
       {past.length ? (
         <div className="box pad0">
           <DataTable
-            rows={past.slice(0, 40)} rowKey={r => r.id} search="Search sessions…"
+            rows={withDateSearch(past.slice(0, 40))} rowKey={r => r.id} search="Search sessions…"
             onRowClick={r => nav(`/session/${r.id}`)}
             columns={sessionColumns()}
           />
         </div>
-      ) : <div className="box"><Empty>No sessions taught yet.</Empty></div>}
+      ) : <div className="box"><Empty>No sessions taught in this period.</Empty></div>}
     </>
   );
 }

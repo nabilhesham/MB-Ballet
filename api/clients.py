@@ -22,7 +22,10 @@ router = APIRouter()
 class ClientIn(BaseModel):
     name_en: str
     phone: Optional[str] = None
-    age: Optional[int] = None
+    # Float, not int: the roster sheets carry "4.8" and reception needs to
+    # type 3.5 for the youngest children. An int field here does not round a
+    # decimal, it rejects the whole request — which is what it did until now.
+    age: Optional[float] = None
     school: Optional[str] = None
     joined_on: Optional[str] = None
     notes: Optional[str] = None
@@ -37,6 +40,9 @@ class PlanIn(BaseModel):
     # Blank means "through the last session chosen" — the rule, rather than
     # a date someone typed. A value here is a deliberate override.
     expires_on: Optional[str] = None
+    # The day the money arrived. Blank is a real answer — the plan is unpaid,
+    # and shows as such until someone edits a date in.
+    paid_on: Optional[str] = None
     session_ids: list[int] = []
 
 
@@ -47,15 +53,23 @@ class CardIn(BaseModel):
 # ---------------------------------------------------------------- routes
 @router.get("/api/clients")
 def list_clients(q: str = "", status: str = "all"):
+    """
+    `status` does two unrelated jobs. "archived" picks which half of the list
+    to read — the same convention /api/instructors and /api/classes use.
+    "attention" is a filter *within* the active half, applied further down
+    once each row has been enriched with the plan state it needs; it is not a
+    third value of the same switch.
+    """
     conn = db.connect()
     try:
         access.settle_past_sessions(conn)
         like = f"%{q}%"
+        active = 0 if status == "archived" else 1
         data = rows(conn.execute(
             "SELECT c.* FROM clients c"
-            " WHERE c.active = 1 AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
+            " WHERE c.active = ? AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
             "   OR c.school LIKE ?)"
-            " ORDER BY c.name_en", (q, like, like, like)))
+            " ORDER BY c.name_en", (active, q, like, like, like)))
         today = date.today().isoformat()
         for d in data:
             sub = access.active_plan(conn, d["id"])
@@ -268,9 +282,9 @@ def add_plan(cid: int, body: PlanIn):
         expires = body.expires_on or access.last_of_sessions(conn, body.session_ids) or starts
         cur = conn.execute(
             "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
-            " starts_on, expires_on, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            " starts_on, expires_on, paid_on, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (cid, body.class_id, body.plan, body.sessions_total, body.price, starts,
-             expires, db.now()))
+             expires, body.paid_on or None, db.now()))
         sub_id = cur.lastrowid
         for sid in body.session_ids:
             s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
@@ -340,6 +354,9 @@ def issue_card(cid: int, body: CardIn):
 def delete_client(cid: int, hard: bool = False):
     conn = db.connect()
     try:
+        # So a booking whose session has already finished counts as history
+        # rather than as something still upcoming in the guard below.
+        access.settle_past_sessions(conn)
         c = one(conn.execute("SELECT * FROM clients WHERE id=?", (cid,)))
         if not c:
             raise HTTPException(404, "no such client")
@@ -357,12 +374,47 @@ def delete_client(cid: int, hard: bool = False):
                 conn.execute(q, (cid,))
             action = "delete"
         else:
+            # A client with dates still ahead of them is not finished with the
+            # academy, and archiving used to delete those bookings without
+            # saying so. Refuse instead, and let reception decide what to do
+            # with the sessions first. The predicate is the same one
+            # get_client builds its `upcoming` list from, so the number named
+            # here is the number on the profile they are looking at.
+            upcoming = conn.execute(
+                "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id = b.session_id"
+                " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
+                (cid, db.now())).fetchone()["n"]
+            if upcoming:
+                raise HTTPException(
+                    400, f"{c['name_en']} has {upcoming} upcoming session"
+                         f"{'' if upcoming == 1 else 's'} — remove or reassign "
+                         f"{'it' if upcoming == 1 else 'them'} before archiving")
             conn.execute("UPDATE clients SET active=0 WHERE id=?", (cid,))
             conn.execute("UPDATE credentials SET revoked_at=? WHERE client_id=?"
                          " AND revoked_at IS NULL", (db.now(), cid))
+            # The guard above ignores bookings whose session was cancelled, so
+            # those are the ones still left to release here.
             conn.execute("DELETE FROM bookings WHERE client_id=? AND status='booked'", (cid,))
             action = "archive"
         conn.commit()
         return {"ok": True, "action": action}
+    finally:
+        conn.close()
+
+
+@router.post("/api/clients/{cid}/unarchive")
+def unarchive_client(cid: int):
+    """
+    Brings the client and their history back. Their cards stay revoked —
+    credentials are revoked rather than deleted, so a restored client needs
+    one reissued.
+    """
+    conn = db.connect()
+    try:
+        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
+            raise HTTPException(404, "no such client")
+        conn.execute("UPDATE clients SET active=1 WHERE id=?", (cid,))
+        conn.commit()
+        return {"ok": True}
     finally:
         conn.close()

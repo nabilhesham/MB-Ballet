@@ -17,13 +17,24 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
   const { close } = useModal();
   const toast = useToast();
 
-  const [classId, setClassId] = useState(presetClassId ?? classes[0]?.id);
-  const [instructorId, setInstructorId] = useState('');
+  const initialClassId = presetClassId ?? classes[0]?.id;
+  const [classId, setClassId] = useState(initialClassId);
+  const [instructorId, setInstructorId] = useState(() => {
+    const k = classes.find(c => c.id === initialClassId);
+    return k?.instructor_id != null ? String(k.instructor_id) : '';
+  });
   const [start, setStart] = useState(localInput());
   const [weeks, setWeeks] = useState(8);
   const [days, setDays] = useState([]);
 
   const toggleDay = i => setDays(d => (d.includes(i) ? d.filter(x => x !== i) : [...d, i]));
+
+  const onClassChange = e => {
+    const id = Number(e.target.value);
+    setClassId(id);
+    const k = classes.find(c => c.id === id);
+    setInstructorId(k?.instructor_id != null ? String(k.instructor_id) : '');
+  };
 
   const save = async () => {
     const cls = classes.find(c => c.id === classId);
@@ -36,7 +47,16 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
         duration_hours: cls ? cls.duration_hours : null,
       } });
       close();
-      toast(`${r.created} sessions created`);
+      // A term is generated in one go, so a clash is reported rather than
+      // failing the batch — say how many and name the first, or reception
+      // has no idea a date is quietly missing from the timetable.
+      const n = r.skipped ? r.skipped.length : 0;
+      if (n) {
+        toast(`${r.created} created, ${n} skipped — ${r.skipped[0]}`
+          + (n > 1 ? ` (and ${n - 1} more)` : ''), 'bad');
+      } else {
+        toast(`${r.created} sessions created`);
+      }
       onSaved();
     } catch (e) { toast(e.message, 'bad'); }
   };
@@ -46,7 +66,7 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
       <h3>Repeat weekly</h3>
       <div className="mh">Builds a term timetable in one go. Existing sessions at the same time are skipped.</div>
       <label>CLASS</label>
-      <select value={classId} onChange={e => setClassId(Number(e.target.value))}>
+      <select value={classId} onChange={onClassChange}>
         {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
       </select>
       <label>INSTRUCTOR</label>

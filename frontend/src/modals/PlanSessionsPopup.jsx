@@ -4,11 +4,11 @@ import { api } from '../api';
 import { fmtDate, fmtTime } from '../lib/format';
 import { useModal } from '../components/Modal';
 import DataTable from '../components/DataTable';
-import { Pill, StatusPill } from '../components/Pill';
+import { PaidPill, Pill, StatusPill } from '../components/Pill';
 import Empty from '../components/Empty';
 
 /** Read-only popup from a payment-history row: every session that plan covered. */
-export default function PlanSessionsPopup({ clientId, planId, name }) {
+export default function PlanSessionsPopup({ clientId, planId, name, paidOn }) {
   const { close } = useModal();
   const [list, setList] = useState(null);
 
@@ -26,6 +26,7 @@ export default function PlanSessionsPopup({ clientId, planId, name }) {
       <h3>{name}</h3>
       <div className="mh">Every session this payment covered.</div>
       <div className="row" style={{ margin: '14px 0' }}>
+        <PaidPill paidOn={paidOn} />
         <Pill kind="ok">{present} attended</Pill>
         <Pill kind="bad">{absent} absent</Pill>
         <Pill kind="info">{list.length - present - absent} upcoming</Pill>

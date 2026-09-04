@@ -22,12 +22,18 @@ export default function SessionForm({
   const toast = useToast();
   const editing = !!session;
 
-  const [classId, setClassId] = useState(
-    session?.class_id ?? presetClassId ?? classes[0]?.id,
-  );
-  const [instructorId, setInstructorId] = useState(
-    session?.instructor_id != null ? String(session.instructor_id) : '',
-  );
+  const initialClassId = session?.class_id ?? presetClassId ?? classes[0]?.id;
+  const [classId, setClassId] = useState(initialClassId);
+  const [instructorId, setInstructorId] = useState(() => {
+    if (session?.instructor_id != null) return String(session.instructor_id);
+    // A new session with no instructor named yet falls back to its class's
+    // default — still a plain, changeable select, not a lock.
+    if (!editing) {
+      const k = classes.find(c => c.id === initialClassId);
+      if (k?.instructor_id != null) return String(k.instructor_id);
+    }
+    return '';
+  });
   const [when, setWhen] = useState(localInput(session?.starts_at ?? presetTs));
   const [duration, setDuration] = useState(
     session?.duration_hours ?? (classes.find(c => c.id === classId)?.duration_hours || 1.5),
@@ -40,6 +46,7 @@ export default function SessionForm({
     if (!editing) {
       const k = classes.find(c => c.id === id);
       if (k) setDuration(k.duration_hours);
+      setInstructorId(k?.instructor_id != null ? String(k.instructor_id) : '');
     }
   };
 
@@ -58,10 +65,10 @@ export default function SessionForm({
         // date corrected after the fact stops being reported as completed.
         if (new Date(when) > new Date()) body.status = 'scheduled';
         if (ins !== null) body.instructor_id = ins;
-        await api(`/sessions/${session.id}`, { method: 'PUT', body });
         // The server excludes null fields from a partial update, so clearing
-        // the instructor needs its own call — ported as-is from app.js.
-        if (ins === null) await api(`/sessions/${session.id}`, { method: 'PUT', body: { instructor_id: null } });
+        // the instructor back to none needs the dedicated query flag instead.
+        const qs = ins === null ? '?clear_instructor=true' : '';
+        await api(`/sessions/${session.id}${qs}`, { method: 'PUT', body });
         toast('Session updated');
       } else {
         await api('/sessions', { method: 'POST', body: {
