@@ -97,7 +97,9 @@
   #checkin:hover{background:#78D897}
   #undo{display:none}
   #undo.on{display:inline-flex}
-  .keys{color:var(--dim);font-size:11px;margin-top:16px;text-align:center}
+  .keys{color:var(--dim);font-size:11px;margin-top:16px;text-align:center;
+        transition:color .12s}
+  .keys.nudge{color:var(--warn);font-size:14px;font-weight:600}
 
   /* ---------- sidebar ---------- */
   aside{border-left:1px solid var(--line);background:#0A0E13;padding:20px 16px;
@@ -173,7 +175,7 @@
       <button id="checkin">CHECK IN</button>
       <button id="undo" class="danger">Undo</button>
     </div>
-    <div class="keys">Enter to check in · Esc to clear</div>
+    <div class="keys" id="keys">Esc to clear</div>
   </div>
 </main>
 
@@ -237,6 +239,33 @@ function beep(f,ms,delay=0){
     o.start(); o.stop(actx.currentTime+ms/1000); }, delay);
 }
 const beepOk=()=>beep(880,140), beepNo=()=>{beep(240,180);beep(240,180,220);};
+/* Between the two: refused, but nothing is wrong. Used for a second scan on
+   the same day, and for a scan arriving while a result is still up. */
+const beepWarn=()=>beep(520,150);
+
+/* ================================================================
+   ONE AT A TIME
+   A result stays on screen until Esc. While it is up the reader is
+   deaf: a second card, a second face in the camera, a second member
+   number — none of them replace what is showing. Two people scanning
+   in quick succession used to mean the first client's verdict was
+   swapped out before the receptionist had read it, and she had no way
+   to get it back. The card being ignored is told so out loud, because
+   a scanner that silently does nothing reads as broken hardware.
+   ================================================================ */
+const locked = () => current !== null;
+let keysBase = 'Esc to clear', nudgeTimer = null;
+function nudge(){
+  beepWarn();
+  const k = $('keys');
+  k.textContent = 'Press Esc to clear this before the next card';
+  k.classList.add('nudge');
+  clearTimeout(nudgeTimer);
+  nudgeTimer = setTimeout(() => {
+    k.classList.remove('nudge');
+    k.textContent = keysBase;
+  }, 2200);
+}
 
 /* ================================================================
    INPUT SOURCE — exactly two: the hardware scanner, or the camera.
@@ -263,6 +292,7 @@ $('btnManual').onclick = ()=>setMode('manual');
    The fallback when the scanner is unplugged and the camera will not focus.
    Runs exactly the same checks as a scan — the card is simply not involved. */
 async function lookupById(){
+  if(locked()){ nudge(); return; }   // one at a time, the number box included
   const raw = $('manualId').value.trim();
   const id = parseInt(raw.replace(/^0+/, ''), 10);
   if(!id){ $('manualId').select(); return; }
@@ -319,9 +349,12 @@ function setLed(){
 const GAP_MS = 80;              // tune with static/scanner-test.html once hardware arrives
 let buf="", lastKey=0;
 window.addEventListener('keydown', e=>{
+  /* Escape comes first, before every other guard: it is the only way a
+     result leaves the screen now, so it has to work from the manual-entry
+     box and from a focused button too, not just from the bare page. */
+  if(e.key==='Escape'){ reset(); return; }
   if(e.target.matches('input,textarea,select,button')) return;
   if(mode === 'manual') return;      // typing a number is not a scan
-  if(e.key==='Escape'){ reset(); return; }
   const now=performance.now(), gap=now-lastKey; lastKey=now;
 
   if(e.key==='Enter'){
@@ -373,6 +406,11 @@ const canvas=document.createElement('canvas');
 let lastCam="", lastCamAt=0;
 async function pump(){
   if(!camRunning) return;
+  /* While a result is up the camera simply looks away, rather than going
+     through scan() and nudging: a card held in front of the lens would
+     re-trigger every few seconds. Nothing is remembered either, so the
+     moment Esc clears the screen the card still in frame reads at once. */
+  if(locked()){ setTimeout(pump, 200); return; }
   try{
     let text=null;
     if(detector){ const h=await detector.detect(cam); if(h.length) text=h[0].rawValue; }
@@ -391,6 +429,7 @@ async function pump(){
 
 /* ================================================================ flow */
 async function scan(token){
+  if(locked()){ nudge(); return; }   // one at a time — see the note above
   clearTimeout(clearTimer);
   try{
     const r = await fetch('/api/access/verify', {method:'POST',
@@ -405,10 +444,16 @@ function show(r){
   current = r;
   idle.style.display='none'; card.classList.add('on');
 
+  /* Three states, not two. A refusal the server marked "warn" is amber and
+     says what happened — scanning twice in one day is the ordinary case, and
+     a red STOP for it reads as an accusation. Nothing is deducted either
+     way; the difference is only what the room is told. */
   const soft = r.granted && r.low_balance;
-  stage.className = r.granted ? (soft?'warn':'ok') : 'bad';
-  $('verdict').textContent = r.granted ? 'WELCOME' : 'STOP';
-  $('verdict').style.color = r.granted ? (soft?'var(--warn)':'var(--ok)') : 'var(--bad)';
+  const mild = !r.granted && r.severity === 'warn';
+  stage.className = r.granted ? (soft?'warn':'ok') : (mild?'warn':'bad');
+  $('verdict').textContent = r.granted ? 'WELCOME' : (mild ? 'ALREADY IN' : 'STOP');
+  $('verdict').style.color = r.granted
+    ? (soft?'var(--warn)':'var(--ok)') : (mild?'var(--warn)':'var(--bad)');
 
   let note = '';
   if(!r.granted) note = r.message;
@@ -484,27 +529,44 @@ function show(r){
     return `<span class="rchip">${fmtDay(a.starts_at)} · ${esc(a.class_name)} · ${tag}</span>`;
   }).join('');
 
+  /* A scan that matched one of today's sessions checks itself in — that is
+     the whole transaction, and making the receptionist press a button to
+     confirm what the card already proved was pure ceremony.
+
+     Today every granted scan carries a session: access._decide() refuses
+     outright when nothing is booked. The manual branch below is therefore
+     unreached, and kept deliberately — if that refusal is ever softened back
+     to "granted, but nothing matched" (which is what CLAUDE.md's
+     inform-don't-block rule describes), spending a slot on it must go back
+     to being a deliberate press rather than something that happens by
+     itself. */
+  const auto = r.granted && !!r.session;
   const btn = $('checkin');
   btn.style.display = r.granted ? 'inline-flex' : 'none';
-  btn.disabled = !r.granted;
-  btn.textContent = 'CHECK IN';
   btn.style.background = 'var(--ok)';
+  btn.disabled = auto;
+  btn.textContent = auto ? 'CHECKING IN…' : 'CHECK IN ANYWAY';
   $('undo').classList.remove('on');
 
-  r.granted ? beepOk() : beepNo();
-  
-  // --- AUTOMATIC CHECK-IN ADDITION ---
-  if(r.granted){
-    doCheckIn();
-  } else {
-    clearTimer = setTimeout(reset, 10000);
-  }
-  
+  keysBase = auto || !r.granted ? 'Esc to clear' : 'Enter to check in · Esc to clear';
+  $('keys').textContent = keysBase;
+  $('keys').classList.remove('nudge');
+
+  r.granted ? beepOk() : (mild ? beepWarn() : beepNo());
+
+  /* Nothing clears itself any more. The screen holds this client until
+     someone presses Esc, which is also what stops the next card replacing a
+     verdict nobody has finished reading. */
+  if(auto) doCheckIn();
+
   refresh();
 }
 
 async function doCheckIn(){
-  if(!current || !current.granted || $('checkin').disabled) return;
+  /* The auto path disables the button before calling in, so "already
+     disabled" cannot be the guard any more — `done` is. */
+  if(!current || !current.granted || current.done) return;
+  current.done = true;
   $('checkin').disabled = true;
   const r = await (await fetch('/api/access/checkin',{method:'POST',
     headers:{'Content-Type':'application/json'},
@@ -513,10 +575,11 @@ async function doCheckIn(){
     $('checkin').textContent = 'CHECKED IN — ' + r.sessions_remaining + ' LEFT';
     $('checkin').style.background = 'var(--ok)';
     $('undo').classList.add('on');
-    clearTimer = setTimeout(reset, 9000);
   }else{
     $('reason').textContent = r.error;
+    $('checkin').textContent = 'CHECK IN ANYWAY';
     $('checkin').disabled = false;
+    current.done = false;
   }
   refresh();
 }
@@ -528,9 +591,15 @@ $('undo').onclick = async () => {
 };
 
 function reset(){
-  clearTimeout(clearTimer); current=null;
+  clearTimeout(clearTimer); clearTimeout(nudgeTimer); current=null;
   card.classList.remove('on'); idle.style.display='flex'; stage.className='';
+  keysBase = 'Esc to clear';
+  $('keys').textContent = keysBase; $('keys').classList.remove('nudge');
+  /* Clearing the screen also unlocks the camera, so a card already in front
+     of the lens is read on the next pass without being presented again. */
+  lastCam = ""; lastCamAt = 0;
   updateIdle();
+  if(mode === 'manual') $('manualId').focus();
 }
 
 /* ---------------------------------------------------------------- sidebar */
@@ -541,6 +610,12 @@ async function refresh(){
     const st = d.stats;
     $('kIn').textContent = st.exp_arrived;
     $('kInN').textContent = st.exp_arrived === 1 ? 'client so far' : 'clients so far';
+
+    /* NOW & NEXT and RECENT are commented out of the markup above. Without
+       this guard the writes below threw on every 20s tick and the catch
+       swallowed it — harmless only by luck, since the counter happens to be
+       updated first. */
+    if(!$('sched') || !$('log')) return;
 
     const now = Date.now()/1000;
     $('sched').innerHTML = d.today_sessions.length ? d.today_sessions.map(s=>{

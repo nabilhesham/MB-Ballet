@@ -662,16 +662,33 @@ refused with "Already checked in today at HH:MM" and **nothing is deducted**.
 The earlier rolling ten-minute window was wrong: someone returning after lunch
 would have been charged twice. `access._todays_checkin()` owns this.
 
-**verify() and check_in() are separate calls.** verify() is read-only and
-returns an `event_id`. Nothing is deducted until reception presses the button. A
-scan that doesn't become a check-in must not cost a session. There is a
-60-second `undo()`.
+**A refusal has two temperatures.** `_deny()` carries a `severity`: `"stop"`
+is the default and reads red, `"warn"` reads amber and is what the
+second-scan-today case returns. Scanning twice is the ordinary thing a
+client does when they are not sure the first one took, and answering it with
+the same red STOP as a revoked card told the whole room she had done
+something wrong. Nothing is deducted either way — only the temperature
+differs. Reach for `"warn"` whenever a refusal means "nothing to do here"
+rather than "something is wrong".
 
-**Session matching is a suggestion, not a gate.** verify() finds sessions the
-client is enrolled in within roughly ±45 min. If none match it still returns
-`granted: true` with `no_session: true`, and the kiosk turns amber with "CHECK IN
-ANYWAY". Reception has judgement; the software should inform, not block. Do not
-turn this into a hard deny.
+**verify() and check_in() are still separate calls, but the kiosk now presses
+the button itself.** verify() stays read-only and returns an `event_id`;
+check_in() is what spends the slot, and the 60-second `undo()` is unchanged.
+What changed is who calls it: a scan that matched one of today's sessions
+checks itself in, because the card already proved everything the button was
+confirming. Undo, not a second confirmation, is the safety net. Any granted
+scan with **no** matched session keeps a manual button — see the next point
+for why that path is currently unreachable, and why the branch stays anyway.
+
+**Session matching is a hard deny today, and the docs used to claim
+otherwise.** The intent written down here was that verify() returns
+`granted: true` with `no_session: true` and the kiosk turns amber with
+"CHECK IN ANYWAY" — inform, don't block. That is **not** what the code does:
+`access._decide()` returns "No session booked today" as a refusal, and
+`no_session` appears nowhere in the codebase. Whichever way this is settled,
+settle both sides together; the kiosk's manual-check-in branch is written
+and commented for the softer behaviour so it can be restored without
+touching the auto path.
 
 **Session spend is guarded before the insert.** `access.book()` counts the
 plan's existing bookings and refuses once that count reaches
@@ -740,6 +757,40 @@ browser cannot actually do.
 
 The old dev panel (client dropdown, paste box) has been removed. Test without
 hardware using Camera mode and a card PNG on a phone screen.
+
+(There are three input sources now, not two — Number joined Scanner and
+Camera as the fallback for an unplugged scanner and a card the camera will
+not focus on. It runs the same checks; only the card is missing.)
+
+### One result at a time, cleared by hand
+
+**Nothing on the kiosk dismisses itself.** A verdict stays up until someone
+presses Esc. The old ten- and nine-second timers meant a queue of clients
+could roll the screen past a receptionist who was still reading it, and
+there was no way to get the last one back.
+
+**While a result is up, the reader is deaf.** A second card, a second face
+in the camera, a second member number — none of them replace what is
+showing; `locked()` gates `scan()`, `lookupById()` and the camera's `pump()`
+alike, because two people scanning in quick succession is exactly how one
+client's verdict used to be swapped out before it was read. A scan that is
+ignored **says so** — an amber line and a soft beep — since a scanner that
+silently does nothing reads as broken hardware. The camera is the one that
+stays quiet rather than nudging: a card sitting in front of the lens would
+re-trigger every few seconds, so `pump()` skips without remembering, and the
+card still in frame reads the instant Esc clears the screen.
+
+**Esc is handled before every other guard** in the keydown listener, so it
+works from the manual-entry box and from a focused button, not just from the
+bare page. It was previously unreachable in Number mode — which the
+clear-by-hand rule now depends on.
+
+**"Next class" is scoped to the card being held.** `_client_payload()` takes
+the credential's `class_id` and filters the lookup by it. A client taking
+Ballet and Flexibility was shown whichever came first across both, so the
+Ballet card could answer with a Flexibility date — true, but not the
+question asked. A member-number lookup names no class and still spans
+everything.
 
 ### One card per class
 

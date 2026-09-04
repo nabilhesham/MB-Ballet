@@ -36,8 +36,15 @@ def _log(conn, client_id, credential_id, session_id, decision, reason,
     return cur.lastrowid
 
 
-def _deny(message, detail=None, **base):
-    return {**base, "granted": False, "message": message, "detail": detail}
+def _deny(message, detail=None, severity="stop", **base):
+    """
+    A refusal. `severity` separates "something is wrong" from "nothing to do
+    here" — a client scanning twice has not done anything wrong, and the kiosk
+    reads a red STOP at them for it. "warn" is the amber middle: refused, but
+    routine. Nothing is deducted either way.
+    """
+    return {**base, "granted": False, "severity": severity,
+            "message": message, "detail": detail}
 
 
 def day_bounds(ts: int = None):
@@ -234,7 +241,7 @@ def settle_past_sessions(conn) -> int:
 
 
 # ---------------------------------------------------------------- scanning
-def _client_payload(conn, client, sub) -> dict:
+def _client_payload(conn, client, sub, class_id=None) -> dict:
     cid = client["id"]
     state = plan_state(conn, sub["id"]) if sub else {}
 
@@ -246,12 +253,22 @@ def _client_payload(conn, client, sub) -> dict:
         " WHERE b.client_id = ? AND b.status != 'booked'"
         " ORDER BY s.starts_at DESC LIMIT 4", (cid,)).fetchall()]
 
+    # "Next class" means the next one on the card being held. A client who
+    # takes Ballet and Flexibility was being shown whichever came first
+    # across both, so the Ballet card could answer with a Flexibility date —
+    # true, but not what was asked. Scoped to the card's class; a
+    # member-number lookup names no class and still spans everything.
+    nxt_params = [cid, db.now()]
+    class_clause = ""
+    if class_id:
+        class_clause = " AND s.class_id = ?"
+        nxt_params.append(class_id)
     nxt = conn.execute(
         "SELECT s.starts_at, c.name AS class_name FROM bookings b"
         "  JOIN sessions s ON s.id = b.session_id"
         "  JOIN classes c ON c.id = s.class_id"
         " WHERE b.client_id = ? AND b.status = 'booked' AND s.starts_at > ?"
-        " ORDER BY s.starts_at LIMIT 1", (cid, db.now())).fetchone()
+        f"{class_clause} ORDER BY s.starts_at LIMIT 1", nxt_params).fetchone()
 
     tot = conn.execute(
         "SELECT SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) present,"
@@ -310,7 +327,7 @@ def verify(conn, raw_token: str) -> dict:
         "client_id": client["id"], "credential_id": cred["id"],
         "name_en": client["name_en"], "photo_path": client["photo_path"],
         "card_class": cred["class_name"], "card_colour": cred["colour"],
-        **_client_payload(conn, client, sub),
+        **_client_payload(conn, client, sub, cred["class_id"]),
     }
     if sub is None and cred["class_id"]:
         _log(conn, client["id"], cred["id"], None, "deny", "no plan for that class")
@@ -344,7 +361,7 @@ def _decide(conn, client, cred, base, t):
         when = time.strftime("%H:%M", time.localtime(done["checked_in_at"]))
         _log(conn, cid, cred_id, None, "deny", "already checked in today")
         return _deny(f"Already checked in today at {when} for {done['class_name']}",
-                     detail="nothing was deducted", **base)
+                     detail="nothing was deducted", severity="warn", **base)
 
     # The card's own plan: freezing the ballet plan must not turn away a
     # client arriving for the flexibility class she is paid up in.
