@@ -130,19 +130,26 @@ export default function InstructorDetail() {
         </div>
       </div>
 
-      <div className="filterbar" style={{ margin: '0 0 16px' }}>
-        <div>
-          <label>FROM</label>
-          <input type="date" value={draft.from}
-                 onChange={e => setDraft(d => ({ ...d, from: e.target.value }))} />
+      {/* Two .filterbar rows rather than one: the dates belong together on
+          their own line, and the buttons acting on them sit under it. Both
+          rows use the same class, so the controls keep matching heights. */}
+      <div style={{ margin: '0 0 16px' }}>
+        <div className="filterbar">
+          <div>
+            <label>FROM</label>
+            <input type="date" value={draft.from}
+                   onChange={e => setDraft(d => ({ ...d, from: e.target.value }))} />
+          </div>
+          <div>
+            <label>TO</label>
+            <input type="date" value={draft.to}
+                   onChange={e => setDraft(d => ({ ...d, to: e.target.value }))} />
+          </div>
         </div>
-        <div>
-          <label>TO</label>
-          <input type="date" value={draft.to}
-                 onChange={e => setDraft(d => ({ ...d, to: e.target.value }))} />
+        <div className="filterbar" style={{ marginTop: 10 }}>
+          <button className="pri" onClick={applyPeriod} disabled={!dirty}>Apply</button>
+          <button onClick={resetPeriod}>Reset to this month</button>
         </div>
-        <button className="pri" onClick={applyPeriod} disabled={!dirty}>Apply</button>
-        <button onClick={resetPeriod}>Reset to this month</button>
       </div>
 
       <div className="grid g4" style={{ marginBottom: 16 }}>
