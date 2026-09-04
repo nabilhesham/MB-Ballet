@@ -277,6 +277,40 @@ def delete_session(sid: int, force: bool = False):
         conn.close()
 
 
+@router.get("/api/sessions/{sid}/bookable")
+def bookable_clients(sid: int):
+    """
+    Who may actually be added to this session: a client with an active plan
+    in *this session's class* that still has a slot with no date on it.
+
+    The same three conditions access.book() enforces, asked ahead of time so
+    the picker cannot offer someone it would then refuse — a plan for another
+    class, a frozen plan, or a plan whose every slot is already assigned.
+    Anyone already booked into this session is left out too.
+    """
+    conn = db.connect()
+    try:
+        access.settle_past_sessions(conn)
+        s = one(conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)))
+        if not s:
+            raise HTTPException(404, "no such session")
+        data = rows(conn.execute(
+            "SELECT c.id, c.name_en, c.phone, c.photo_path, sub.id AS plan_id,"
+            "       sub.plan, sub.sessions_total,"
+            "       (SELECT COUNT(*) FROM bookings b WHERE b.subscription_id = sub.id)"
+            "         AS assigned"
+            "  FROM subscriptions sub JOIN clients c ON c.id = sub.client_id"
+            " WHERE sub.class_id = ? AND sub.active = 1 AND sub.frozen_on IS NULL"
+            "   AND c.active = 1"
+            "   AND c.id NOT IN (SELECT client_id FROM bookings WHERE session_id = ?)"
+            " ORDER BY c.name_en", (s["class_id"], sid)))
+        for d in data:
+            d["free"] = d["sessions_total"] - d["assigned"]
+        return [d for d in data if d["free"] > 0]
+    finally:
+        conn.close()
+
+
 @router.post("/api/sessions/{sid}/book")
 def book_into_session(sid: int, body: BookIn):
     conn = db.connect()

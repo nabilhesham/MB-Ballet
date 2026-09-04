@@ -46,9 +46,14 @@ export default function InstructorDetail() {
   const { id } = useParams();
   const nav = useNavigate();
   const [[defaultFrom, defaultTo]] = useState(thisMonthBounds);
-  const [from, setFrom] = useState(defaultFrom);
-  const [to, setTo] = useState(defaultTo);
-  const { data: i, loading, error, reload } = useApi(`/instructors/${id}?from=${from}&to=${to}`);
+  // What the inputs hold, and what the page is actually showing, kept apart
+  // on purpose: a date input fires on every change, so binding the request
+  // straight to it reloaded the whole view mid-edit — once for a half-typed
+  // year, again for the real one. Nothing moves until Apply.
+  const [draft, setDraft] = useState({ from: defaultFrom, to: defaultTo });
+  const [range, setRange] = useState({ from: defaultFrom, to: defaultTo });
+  const { data: i, loading, error, reload } =
+    useApi(`/instructors/${id}?from=${range.from}&to=${range.to}`);
   const { open } = useModal();
   const confirm = useConfirm();
   const toast = useToast();
@@ -64,7 +69,16 @@ export default function InstructorDetail() {
     .sort((a, b) => a.starts_at - b.starts_at);
   const past = i.sessions.filter(x => x.starts_at < now);
 
-  const resetPeriod = () => { setFrom(defaultFrom); setTo(defaultTo); };
+  const resetPeriod = () => {
+    setDraft({ from: defaultFrom, to: defaultTo });
+    setRange({ from: defaultFrom, to: defaultTo });
+  };
+  const applyPeriod = () => {
+    if (!draft.from || !draft.to) return toast('Pick both dates', 'bad');
+    if (draft.from > draft.to) return toast('The start date is after the end date', 'bad');
+    return setRange(draft);
+  };
+  const dirty = draft.from !== range.from || draft.to !== range.to;
 
   const archive = () => confirm({
     title: 'Archive instructor',
@@ -116,18 +130,19 @@ export default function InstructorDetail() {
         </div>
       </div>
 
-      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'flex-end', margin: '0 0 16px' }}>
-        <div className="row" style={{ gap: 10 }}>
-          <div>
-            <label>FROM</label>
-            <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
-          </div>
-          <div>
-            <label>TO</label>
-            <input type="date" value={to} onChange={e => setTo(e.target.value)} />
-          </div>
-          <button className="sm" onClick={resetPeriod}>Reset to this month</button>
+      <div className="filterbar" style={{ margin: '0 0 16px' }}>
+        <div>
+          <label>FROM</label>
+          <input type="date" value={draft.from}
+                 onChange={e => setDraft(d => ({ ...d, from: e.target.value }))} />
         </div>
+        <div>
+          <label>TO</label>
+          <input type="date" value={draft.to}
+                 onChange={e => setDraft(d => ({ ...d, to: e.target.value }))} />
+        </div>
+        <button className="pri" onClick={applyPeriod} disabled={!dirty}>Apply</button>
+        <button onClick={resetPeriod}>Reset to this month</button>
       </div>
 
       <div className="grid g4" style={{ marginBottom: 16 }}>

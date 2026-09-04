@@ -229,6 +229,16 @@ select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns=
 .search{max-width:300px}
 .hint{font-size:12px;color:var(--dim);margin-top:6px}
 
+/* A row of filter inputs with the buttons that act on them. The buttons are
+   given the inputs' own height, because a default button is a few pixels
+   shorter than a date field and reads as stuck on the end rather than part
+   of the same control. Bottom-aligned so the labels above the inputs do not
+   push the buttons out of line. */
+.filterbar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.filterbar > div{display:flex;flex-direction:column}
+.filterbar label{margin-top:0}
+.filterbar input,.filterbar button,.filterbar .btn{height:42px}
+
 /* ---------------------------------------------------------------- modal */
 .veil{position:fixed;inset:0;background:rgba(38,20,42,.45);backdrop-filter:blur(4px);
       display:none;align-items:flex-start;justify-content:center;z-index:60;

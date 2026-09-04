@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 
 import { api } from '../api';
 import { useModal } from '../components/Modal';
@@ -6,15 +6,18 @@ import { useToast } from '../components/Toast';
 
 /**
  * Search-and-chip multi-select for booking several clients into one session
- * at once. The caller (SessionDetail) checks whether anyone is left to add
- * before opening this — matching app.js's bookIntoSession(), which toasts
- * and never opens the modal when every client is already booked in.
+ * at once.
+ *
+ * `clients` is already the eligible set — /api/sessions/{id}/bookable has
+ * filtered it to people holding an active, unfrozen plan in this session's
+ * class with a slot still free, and dropped anyone already booked in. The
+ * modal deliberately does no eligibility thinking of its own: the rule lives
+ * in access.book(), and a second copy here would be the copy that drifts.
  */
-export default function AddStudents({ sessionId, roster, allClients, onSaved }) {
+export default function AddStudents({ sessionId, className, clients, onSaved }) {
   const { close } = useModal();
   const toast = useToast();
-  const inSession = useMemo(() => new Set(roster.map(m => m.id)), [roster]);
-  const options = useMemo(() => allClients.filter(c => !inSession.has(c.id)), [allClients, inSession]);
+  const options = clients;
 
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState(new Map()); // id -> client
@@ -57,7 +60,11 @@ export default function AddStudents({ sessionId, roster, allClients, onSaved }) 
   return (
     <>
       <h3>Add students</h3>
-      <div className="mh">Uses one slot from each selected student's plan.</div>
+      <div className="mh">
+        Only clients with a free slot on a {className || 'matching'} plan are listed — a
+        session can only be booked against the plan that pays for its class. Adding one
+        uses a slot from that plan.
+      </div>
 
       <div className="chipbox">
         {selected.size === 0
@@ -81,7 +88,7 @@ export default function AddStudents({ sessionId, roster, allClients, onSaved }) 
           ? filtered.map(c => (
             <div key={c.id} className="pickrow" onClick={() => select(c)}>
               <span style={{ flex: 1 }}><b>{c.name_en}</b>{c.phone ? ` — ${c.phone}` : ''}</span>
-              <span className="pk-meta">{c.remaining ?? 'no plan'} left</span>
+              <span className="pk-meta">{c.free} free of {c.sessions_total}</span>
             </div>
           ))
           : <div className="dt-none">No matching clients available</div>}

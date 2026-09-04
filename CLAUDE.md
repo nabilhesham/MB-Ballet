@@ -58,6 +58,14 @@ also a print stylesheet. Deployed by copying a folder to a laptop and running
 one command — see the Stack section above for how a React build stays
 compatible with that on the machine that matters, the reception laptop.
 
+**A row of filter inputs and the buttons acting on them uses `.filterbar`**,
+which pins both to the same 42px height and bottom-aligns them. A default
+button is a few pixels shorter than a date field and reads as stuck on the
+end rather than part of the same control; the instructor page's from/to
+range is the first user. Such a range applies on a button, never on change —
+a date input fires on every edit, so binding a request straight to it
+reloads the view for a half-typed year.
+
 **Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
 a controlled component that replaced app.js's old `enhanceTables()`. Click a
 column header to sort; a long table gets a capped scrolling body whose header
@@ -482,6 +490,17 @@ three write paths (`add_plan`, `edit_plan`, `book`) already book a finished
 session straight to `absent`, so the list marks past rows and says why, and
 "auto-fill earliest" skips them: creating absences is a decision to make one
 date at a time, never in bulk.
+
+**A session can only be booked against the plan that pays for its class.**
+`access.book()` refuses when the client has no active plan in that session's
+class, when the named plan belongs to another class, when it is frozen, or
+when every one of its slots already has a date. The no-plan case used to
+fall through and insert a booking with `subscription_id` NULL — a session
+nobody paid for, in a class the client was never enrolled in.
+`GET /api/sessions/{sid}/bookable` asks the same four questions ahead of
+time so the add-student picker only ever offers people the endpoint would
+accept, and shows how many free slots each has. The rule lives in `book()`;
+the picker holds no copy of it.
 
 **One session at a time, academy-wide.** A slot that is taken is taken,
 whatever class wants it: `access.slot_conflict()` is the single answer to

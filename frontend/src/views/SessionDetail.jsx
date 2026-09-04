@@ -43,11 +43,17 @@ export default function SessionDetail() {
     open(<SessionForm session={s} classes={classes} instructors={instructors} onSaved={reload} />);
   };
 
+  // Only clients the server would actually accept: an active plan in this
+  // session's class, not frozen, with a slot still free. Asking for that
+  // list rather than every client is what stops the picker offering someone
+  // it would then refuse.
   const openAddStudent = async () => {
-    const all = await api('/clients');
-    const inSession = new Set(s.roster.map(m => m.id));
-    if (!all.some(c => !inSession.has(c.id))) return toast('Every client is already booked in', 'bad');
-    open(<AddStudents sessionId={s.id} roster={s.roster} allClients={all} onSaved={reload} />);
+    const eligible = await api(`/sessions/${s.id}/bookable`);
+    if (!eligible.length) {
+      return toast(`Nobody has a free slot on a ${s.class_name} plan — `
+        + 'add or renew a plan for that class first', 'bad');
+    }
+    open(<AddStudents sessionId={s.id} className={s.class_name} clients={eligible} onSaved={reload} />);
   };
 
   const unbook = (cid, name) => confirm({
