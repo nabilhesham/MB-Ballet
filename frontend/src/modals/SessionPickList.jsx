@@ -1,4 +1,5 @@
 import { fmtDay, fmtTime } from '../lib/format';
+import { isPast } from '../lib/planSessions';
 
 /**
  * The checkbox list of candidate sessions shared by PlanPicker, AssignRemaining,
@@ -10,15 +11,32 @@ import { fmtDay, fmtTime } from '../lib/format';
  * a session already marked present or absent is attendance history, not a
  * pick. `booked` is only present on rows fetched from /sessions, not on a
  * plan's own already-assigned sessions, so it's rendered only when it exists.
+ *
+ * The list reaches three weeks back (see lib/planSessions.js), and a finished
+ * session is booked straight to absent rather than left pending — so those
+ * rows say so. fmtDay prints no year, which would otherwise leave a past date
+ * looking exactly like an upcoming one.
  */
 export default function SessionPickList({ sessions, chosen, onToggle, locked = [] }) {
   if (!sessions.length) {
-    return <div className="empty">No upcoming sessions in this class. Schedule some first.</div>;
+    return <div className="empty">No sessions in this class to pick from. Schedule some first.</div>;
   }
+  // Said once, above the list, rather than on every row: the rows are narrow
+  // and the class name wraps into the meta text when they carry a sentence.
+  const anyPast = sessions.some(s => isPast(s) && !locked.includes(s.id));
+
   return (
-    <div className="picklist">
+    <>
+      {anyPast && (
+        <div className="hint" style={{ margin: '0 0 8px' }}>
+          Sessions marked <b style={{ color: 'var(--warn)' }}>past</b> have already finished —
+          assigning a slot to one records it as an absence.
+        </div>
+      )}
+      <div className="picklist">
       {sessions.map(s => {
         const isLocked = locked.includes(s.id);
+        const past = isPast(s);
         return (
           <label
             key={s.id}
@@ -35,10 +53,14 @@ export default function SessionPickList({ sessions, chosen, onToggle, locked = [
               {s.instructor_name || 'no instructor'}
               {s.booked != null ? ` · ${s.booked} booked` : ''}
               {isLocked ? ' · already attended' : ''}
+              {past && !isLocked
+                ? <b style={{ color: 'var(--warn)', fontWeight: 500 }}> · past</b>
+                : null}
             </span>
           </label>
         );
       })}
-    </div>
+      </div>
+    </>
   );
 }

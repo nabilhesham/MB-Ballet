@@ -122,6 +122,9 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                    open it.
   src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
                    Toast, Avatar, Pill, Empty.
+  src/lib/         format.js (timestamp -> what a receptionist reads) and
+                   planSessions.js (the window a plan's slots are filled
+                   from — see the three-weeks-back rule below).
 static/app/       Committed build output of frontend/ — what server.py
                   actually serves at `/`. Regenerate with `npm run build`
                   after any `frontend/src/` change; see Stack above.
@@ -397,7 +400,15 @@ system and everything else follows from it:
   records "yes" rather than an amount, and a plan whose price nobody wrote down
   must not be reported as zero revenue. `payment_note` keeps the cell verbatim
   ("package", "free", "680") because "package" and a blank mean different
-  things.
+  things. `paid_on` answers *when* the money arrived, where those two answer
+  what the sheet said about it — seeded from the roster's own PAID DATE
+  column (68 of 70 rows have one), and **nullable on purpose**: NULL is
+  read as unpaid and shown that way. It is set in the plan picker, edited
+  from the plan's Edit button, and shows as a pill on the client profile,
+  as the payment history's PAID column, and as a tag at reception. It never
+  blocks a check-in — reception is told, and decides. The printed card
+  deliberately omits it: that PNG is a snapshot nothing regenerates, so a
+  card printed while unpaid would read UNPAID for the life of the card.
 - **instructor_hours** is one row per instructor per working day, from the
   monthly salary sheet. Pay is `hours x hourly_rate` at read time, never
   stored, so correcting a rate re-prices the month instead of leaving a stale
@@ -451,6 +462,18 @@ why the class page shows "students with a booking" rather than a roster.
 `POST /api/clients/{id}/plan` rejects a mismatch between `sessions_total` and
 `session_ids`, and the picker keeps Save disabled until they match. A plan with
 unassigned slots is a promise nobody has written down.
+
+**A plan's slots can be filled from three weeks back, not just forward.**
+Reception writes a plan down after the client has already started coming, so
+the dates they actually attended have to be reachable. `lib/planSessions.js`
+holds that window and the four pickers that assign a plan's slots
+(`PlanPicker`, `EditPlan`, `AddSessionToPlan`, `AssignRemaining`) all fetch
+through it — moving an existing booking is deliberately not one of them. It
+also drops cancelled sessions, which `/api/sessions` does not filter. All
+three write paths (`add_plan`, `edit_plan`, `book`) already book a finished
+session straight to `absent`, so the list marks past rows and says why, and
+"auto-fill earliest" skips them: creating absences is a decision to make one
+date at a time, never in bulk.
 
 **One check-in per day.** A second scan the same day is refused with the time of
 the first, and nothing is deducted.

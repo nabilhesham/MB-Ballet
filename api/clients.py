@@ -37,6 +37,9 @@ class PlanIn(BaseModel):
     # Blank means "through the last session chosen" — the rule, rather than
     # a date someone typed. A value here is a deliberate override.
     expires_on: Optional[str] = None
+    # The day the money arrived. Blank is a real answer — the plan is unpaid,
+    # and shows as such until someone edits a date in.
+    paid_on: Optional[str] = None
     session_ids: list[int] = []
 
 
@@ -268,9 +271,9 @@ def add_plan(cid: int, body: PlanIn):
         expires = body.expires_on or access.last_of_sessions(conn, body.session_ids) or starts
         cur = conn.execute(
             "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
-            " starts_on, expires_on, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            " starts_on, expires_on, paid_on, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
             (cid, body.class_id, body.plan, body.sessions_total, body.price, starts,
-             expires, db.now()))
+             expires, body.paid_on or None, db.now()))
         sub_id = cur.lastrowid
         for sid in body.session_ids:
             s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()

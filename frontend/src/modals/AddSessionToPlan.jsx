@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api';
+import { fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import SessionPickList from './SessionPickList';
@@ -22,9 +23,7 @@ export default function AddSessionToPlan({ clientId, classesEnrolled, onSaved })
   const [saving, setSaving] = useState(false);
 
   const load = async cid => {
-    const now = Math.floor(Date.now() / 1000);
-    const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&class_id=${cid}&available_for=${clientId}`);
-    setSessions(list);
+    setSessions(await fetchPlanSessions(cid, clientId));
     setChosen([]);
   };
 

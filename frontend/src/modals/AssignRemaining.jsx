@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api';
+import { earliestUpcoming, fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import SessionPickList from './SessionPickList';
@@ -16,11 +17,7 @@ export default function AssignRemaining({ clientId, plan, onSaved }) {
 
   useEffect(() => {
     (async () => {
-      const now = Math.floor(Date.now() / 1000);
-      const list = await api(
-        `/sessions?start=${now}&end=${now + 180 * 86400}&class_id=${plan.class_id}&available_for=${clientId}`,
-      );
-      setSessions(list);
+      setSessions(await fetchPlanSessions(plan.class_id, clientId));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -62,7 +59,7 @@ export default function AssignRemaining({ clientId, plan, onSaved }) {
         <span className={'pill ' + (chosen.length === need ? 'ok' : 'warn')}>{chosen.length} of {need} chosen</span>
       </div>
       <div className="row" style={{ margin: '10px 0 8px' }}>
-        <button className="sm" onClick={() => setChosen(sessions.slice(0, need).map(s => s.id))}>Auto-fill earliest</button>
+        <button className="sm" onClick={() => setChosen(earliestUpcoming(sessions, need))}>Auto-fill earliest</button>
         <button className="sm" onClick={() => setChosen([])}>Clear</button>
       </div>
       <SessionPickList sessions={sessions} chosen={chosen} onToggle={toggle} />

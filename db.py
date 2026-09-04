@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     -- mean different things -- one is a bundle billed elsewhere, the other is
     -- a number nobody wrote down -- and revenue reporting must not confuse them.
     payment_note    TEXT,
+    -- The day the money actually arrived, from the roster sheet's own PAID
+    -- DATE column. NULL means unpaid, and is shown as such -- this answers
+    -- "when", where payment_note and price answer "what the sheet said".
+    -- Nullable on purpose: a plan sold before it is paid for is normal.
+    paid_on         TEXT,
     -- The ballet sheet sells months; the flexibility sheet sells session packs.
     months          INTEGER,
     -- "sunday - thursday", "saturday" -- which weekdays this pack is used on.
@@ -267,7 +272,7 @@ def migrate(conn) -> None:
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
                           ("class_id", "INTEGER"),
                           ("payment_note", "TEXT"), ("months", "INTEGER"),
-                          ("days_pattern", "TEXT")],
+                          ("days_pattern", "TEXT"), ("paid_on", "TEXT")],
     }
     for table, columns in add.items():
         try:

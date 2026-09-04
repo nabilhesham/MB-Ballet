@@ -431,6 +431,13 @@ function show(r){
   const meta = [];
   if(r.phone) meta.push(`<span class="pill grey">${esc(r.phone)}</span>`);
   if(r.plan) meta.push(`<span class="pill brand">${esc(r.plan)}</span>`);
+  /* Whether this plan has been paid for. Shown only when there is a plan to
+     say it about, and it never blocks a check-in — it is here so the money
+     conversation happens while the client is standing there, which is the
+     only moment it is worth anything. */
+  if(r.plan) meta.push(r.paid_on
+    ? `<span class="pill ok">paid ${esc(r.paid_on)}</span>`
+    : `<span class="pill warn">unpaid</span>`);
   if(r.expires_on) meta.push(`<span class="pill ${r.granted?'grey':'bad'}">until ${esc(r.expires_on)}</span>`);
   if(r.frozen) meta.push(`<span class="pill info">plan frozen${r.frozen_until?' to '+esc(r.frozen_until):''}</span>`);
   if(r.absences) meta.push(`<span class="pill ${r.absences>=3?'bad':'warn'}">${r.absences} absence${r.absences===1?'':'s'}</span>`);

@@ -8,7 +8,7 @@ import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
 import DataTable from '../components/DataTable';
 import Avatar from '../components/Avatar';
-import { Pill, StatusPill } from '../components/Pill';
+import { PaidPill, Pill, StatusPill } from '../components/Pill';
 import Empty from '../components/Empty';
 import ClientForm from '../modals/ClientForm';
 import PlanPicker from '../modals/PlanPicker';
@@ -100,7 +100,7 @@ export default function ClientDetail() {
   };
 
   const openPlanSessions = pl => {
-    open(<PlanSessionsPopup clientId={c.id} planId={pl.id} name={pl.plan} />, { wide: true });
+    open(<PlanSessionsPopup clientId={c.id} planId={pl.id} name={pl.plan} paidOn={pl.paid_on} />, { wide: true });
   };
 
   const openMove = async (fromSessionId, classId) => {
@@ -221,6 +221,7 @@ export default function ClientDetail() {
                 <div style={{ fontSize: 16, fontWeight: 600 }}>
                   <span className="dot" style={{ background: p.class_colour || '#87438E' }} />
                   {p.class_name || 'No class'}{' '}
+                  <PaidPill paidOn={p.paid_on} />{' '}
                   {p.frozen ? <Pill kind="info">frozen</Pill> : null}
                 </div>
                 <div className="sub">
@@ -326,6 +327,12 @@ export default function ClientDetail() {
                 {
                   label: 'PRICE', className: 'num mute', sortValue: r => r.price ?? -1,
                   cell: r => (r.price ? r.price.toLocaleString() : '—'),
+                },
+                {
+                  // Sorts unpaid plans together at one end rather than
+                  // scattering them among the dates.
+                  label: 'PAID', sortValue: r => r.paid_on || '',
+                  cell: r => <PaidPill paidOn={r.paid_on} />,
                 },
               ]}
             />

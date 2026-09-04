@@ -149,6 +149,10 @@ def plan_state(conn, sub_id: int) -> dict:
         "unassigned": max(0, sub["sessions_total"] - (c["assigned"] or 0)),
         "starts_on": sub["starts_on"], "expires_on": expires,
         "active": sub["active"], "price": sub["price"],
+        # NULL means unpaid. Everything that shows a paid/unpaid indicator —
+        # the profile, the payment history, the kiosk — reads it from here,
+        # so there is one answer rather than four re-derivations.
+        "paid_on": sub["paid_on"],
         "frozen": bool(sub["frozen_on"]),
         "frozen_on": sub["frozen_on"],
         "frozen_until": sub["frozen_until"],
@@ -261,6 +265,9 @@ def _client_payload(conn, client, sub) -> dict:
         "sessions_total": state.get("sessions_total"),
         "sessions_remaining": state.get("remaining"),
         "expires_on": state.get("expires_on"),
+        # Shown as a tag at reception. It never blocks a check-in — the
+        # receptionist is the one who decides what to do about it.
+        "paid_on": state.get("paid_on"),
         "visits": tot["present"] or 0,
         "absences": tot["absent"] or 0,
         "last_visit": tot["last_visit"],
@@ -565,7 +572,8 @@ def cancel_session(conn, session_id: int) -> dict:
 
 
 def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
-             expires_on: str = None, session_ids: list = None) -> dict:
+             expires_on: str = None, session_ids: list = None,
+             paid_on: str = None, clear_paid_on: bool = False) -> dict:
     """
     Change a plan's name, size, sessions or end date after it has been sold.
 
@@ -586,6 +594,10 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     leaving it out re-derives the date from whatever sessions the plan holds
     after this edit, via refresh_expiry() — so an edit that only adds or
     drops sessions moves the date automatically, in either direction.
+
+    clear_paid_on marks the plan unpaid again. It exists because the route
+    drops None fields before calling this, so paid_on=None cannot mean
+    "erase it" — the same reason edit_session() carries clear_instructor.
     """
     sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
     if sub is None:
@@ -649,6 +661,10 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
         fields["plan"] = plan
     if sessions_total is not None:
         fields["sessions_total"] = sessions_total
+    if clear_paid_on:
+        fields["paid_on"] = None
+    elif paid_on is not None:
+        fields["paid_on"] = paid_on
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?",
