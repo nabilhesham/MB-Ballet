@@ -860,13 +860,18 @@ works from the manual-entry box and from a focused button, not just from the
 bare page. It was previously unreachable in Number mode — which the
 clear-by-hand rule now depends on.
 
-**"No session today" offers a way out instead of only saying no.** That one
-refusal carries `code="no_session_today"`, which is the only thing the kiosk
-branches on, and it puts a **MANUAL CHECK-IN** button on the screen. Pressing
+**Two refusals offer a way out instead of only saying no.** They carry
+`code="no_session_today"` (nothing of theirs runs today) and
+`code="absent_today"` (their session has been and gone and they were swept
+absent, but they have turned up anyway). The code is the only thing the
+kiosk branches on, and either one puts a **MANUAL CHECK-IN** button on the
+screen; every other refusal gets none, because a revoked card or a frozen
+plan is not fixed by moving a session. Pressing
 it shows two lists: every session running today across all classes, and every
 slot of the client's own that could be given up — a date still ahead, or one
 they were already marked absent for, each tagged. Pick one from each and they
-are checked in to today's session.
+are checked in to today's session. The session they just missed appears in
+the second list as a slot to spend, never in the first as somewhere to go.
 
 `access.swap_and_check_in()` is deliberately built out of the ordinary
 pieces: `move_booking(allow_other_class=True)` to change the date, then the
@@ -937,9 +942,12 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
-      flexibility alone. The dashboard says how many plans carry no price
-      rather than quietly reporting them as zero. Either the sheet starts
-      recording the amount or the fee goes on the class.
+      flexibility alone. `month_intake()` still returns `mo_unpriced` — the
+      count of plans with no price — but the dashboard no longer shows it,
+      so that figure is now reported nowhere and the month's revenue reads
+      as a clean total while half its plans carry no amount at all. Either
+      the sheet starts recording the amount, or the fee goes on the class,
+      or the count comes back onto the screen.
 - [ ] Rotating phone tokens: `access.py` has the `kind='phone'` path with a 90s
       freshness window, but nothing generates them client-side.
 - [ ] `settle_past_sessions` runs in-process. If the laptop is off overnight it

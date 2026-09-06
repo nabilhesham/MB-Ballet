@@ -454,9 +454,14 @@ def _decide(conn, client, cred, base, t):
                      code="no_session_today", **base)
 
     if row["status"] == "absent":
+        # Their session has been and gone and they were swept absent, but here
+        # they are. The slot is theirs and still unspent as far as attendance
+        # goes, so it can be moved onto something else running today — the
+        # same swap "no session today" offers, hence the same button.
         _log(conn, cid, cred_id, row["session_id"], "deny", "already absent")
         return _deny("Already marked absent for today's session",
-                     detail="change it from the session page if that is wrong", **base)
+                     detail="they can still be moved onto another session today",
+                     code="absent_today", **base)
 
     mins = round((row["starts_at"] - t) / 60)
     event_id = _log(conn, cid, cred_id, row["session_id"], "allow", None)

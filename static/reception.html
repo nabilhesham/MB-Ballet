@@ -575,10 +575,16 @@ function show(r){
   const auto = r.granted && !!r.session;
   const btn = $('checkin');
   btn.style.display = r.granted ? 'inline-flex' : 'none';
-  // Nothing of theirs today, but we know who they are — offer the swap
-  // rather than only saying no.
+  /* Two refusals are worth a way out rather than only a no, and both are the
+     same remedy — move one of their own slots onto something running now:
+       no_session_today  nothing of theirs runs today at all
+       absent_today      their session has been and gone and they were swept
+                         absent, but they have turned up anyway
+     Any other refusal (revoked card, frozen plan, unknown code) gets no
+     button: those are not fixed by moving a session. */
+  const CAN_SWAP = ['no_session_today', 'absent_today'];
   $('manual').style.display =
-    (!r.granted && r.code === 'no_session_today' && r.client_id) ? 'inline-flex' : 'none';
+    (!r.granted && CAN_SWAP.includes(r.code) && r.client_id) ? 'inline-flex' : 'none';
   btn.style.background = 'var(--ok)';
   btn.disabled = auto;
   btn.textContent = auto ? 'CHECKING IN…' : 'CHECK IN ANYWAY';
