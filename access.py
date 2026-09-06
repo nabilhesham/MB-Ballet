@@ -419,8 +419,16 @@ def _decide(conn, client, cred, base, t):
     params = [cid, start, end]
     class_clause = ""
     if cred and cred["class_id"]:
-        class_clause = " AND s.class_id = ?"
-        params.append(cred["class_id"])
+        # The card names a *plan*, not a date. So match the booking this
+        # class's plan paid for, whatever session it now sits on: a booking
+        # moved to another class by move_booking() is still this plan's slot,
+        # and this card is still what proves it. Matching on the session's
+        # own class instead would turn away a client whose Ballet slot was
+        # moved onto a Flexibility date — the exact case that move exists for.
+        # Bookings with no plan behind them (older rows) keep the old rule.
+        class_clause = (" AND (sub.class_id = ?"
+                        "      OR (b.subscription_id IS NULL AND s.class_id = ?))")
+        params += [cred["class_id"], cred["class_id"]]
 
     row = conn.execute(
         "SELECT b.id AS booking_id, b.status, s.id AS session_id, s.starts_at,"
@@ -428,6 +436,7 @@ def _decide(conn, client, cred, base, t):
         "       i.name AS instructor_name"
         "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
         "  JOIN classes c ON c.id = s.class_id"
+        "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
         "  LEFT JOIN instructors i ON i.id = s.instructor_id"
         " WHERE b.client_id = ? AND s.starts_at BETWEEN ? AND ?"
         f"   AND s.status != 'cancelled'{class_clause}"
@@ -533,7 +542,8 @@ def set_status(conn, session_id: int, client_id: int, status: str) -> dict:
     return {"ok": True, "status": status}
 
 
-def book(conn, client_id: int, session_id: int, subscription_id: int = None) -> dict:
+def book(conn, client_id: int, session_id: int, subscription_id: int = None,
+         allow_other_class: bool = False) -> dict:
     if conn.execute("SELECT 1 FROM bookings WHERE client_id=? AND session_id=?",
                     (client_id, session_id)).fetchone():
         return {"ok": False, "error": "already booked into this session"}
@@ -566,8 +576,11 @@ def book(conn, client_id: int, session_id: int, subscription_id: int = None) -> 
         (subscription_id,)).fetchone()
     if sub_row is None:
         return {"ok": False, "error": "no such plan"}
-    if sub_row["class_id"] != s["class_id"]:
-        # The one rule the whole card-per-class model rests on.
+    if sub_row["class_id"] != s["class_id"] and not allow_other_class:
+        # Selling and topping up a plan stay class-locked. Only the
+        # after-the-fact corrections on the client profile pass
+        # allow_other_class, and they must name the plan explicitly — there
+        # is no plan in this session's class for active_plan() to find.
         return {"ok": False, "error": f"that plan is not a {cname} plan"}
     if sub_row["frozen_on"]:
         # Freezing is what released this slot in the first place; it is
@@ -604,8 +617,27 @@ def unbook(conn, client_id: int, session_id: int) -> dict:
     return {"ok": True}
 
 
-def move_booking(conn, client_id: int, from_session: int, to_session: int) -> dict:
-    """Move a client to another session of the same class."""
+def move_booking(conn, client_id: int, from_session: int, to_session: int,
+                 allow_other_class: bool = False, status: str = None) -> dict:
+    """
+    Point an existing booking at a different session.
+
+    The booking keeps the plan that paid for it — only the date it sits on
+    changes. `allow_other_class` lets that date belong to another class,
+    which is how reception records "she missed Ballet on Tuesday but came to
+    Flexibility on Wednesday instead". The slot is still the Ballet plan's,
+    and the Ballet card is still what opens the door for it (see _decide,
+    which matches on the plan's class rather than the session's).
+
+    Selling a plan stays class-locked — add_plan() and edit_plan() are
+    untouched. This is a correction made after the fact, not a way to buy
+    one class and spend it on another.
+
+    `status` writes the final attendance state in the same breath, so
+    "mark present on the session they actually attended" is one transaction
+    rather than a move that settle_past_sessions() could flip to absent
+    before the status lands.
+    """
     b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
                      (client_id, from_session)).fetchone()
     if b is None:
@@ -618,11 +650,15 @@ def move_booking(conn, client_id: int, from_session: int, to_session: int) -> di
     dst = conn.execute("SELECT class_id FROM sessions WHERE id=?", (to_session,)).fetchone()
     if dst is None:
         return {"ok": False, "error": "no such session"}
-    if src["class_id"] != dst["class_id"]:
+    if src["class_id"] != dst["class_id"] and not allow_other_class:
         return {"ok": False, "error": "can only move within the same class"}
 
-    conn.execute("UPDATE bookings SET session_id=?, status='booked', checked_in_at=NULL"
-                 " WHERE id=?", (to_session, b["id"]))
+    if status is not None and status not in ("present", "absent", "booked"):
+        return {"ok": False, "error": "status must be present, absent or booked"}
+    new_status = status or "booked"
+    conn.execute("UPDATE bookings SET session_id=?, status=?, checked_in_at=? WHERE id=?",
+                 (to_session, new_status,
+                  db.now() if new_status == "present" else None, b["id"]))
     # Moving a booking to a different date can move the plan's last session
     # too — earlier or later — so it needs the same refresh book()/unbook() do.
     if b["subscription_id"] is not None:

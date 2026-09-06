@@ -172,7 +172,11 @@ cleanup.sh        Removes leftovers from earlier versions.
 sheets/           The academy's own workbooks — the seed reads these.
                   Real names and numbers, so not in git. See sheets/README.md.
 static/scanner-test.html   Scanner timing diagnostic, for tuning GAP_MS.
-cards/  photos/   Generated assets. Not in git.
+cards/  photos/   Generated assets. Not in git. A photo is written with a
+                  timestamp in its name (`client_00060_1788711822.png`) and
+                  the previous one deleted: a stable filename meant the
+                  browser kept serving the cached old picture, so a
+                  re-uploaded photo looked like it had not saved.
 academy.db        The database. Not in git. This IS the business record.
 .env              ENTRY_SECRET. Not in git, ever.
 ```
@@ -501,6 +505,24 @@ nobody paid for, in a class the client was never enrolled in.
 time so the add-student picker only ever offers people the endpoint would
 accept, and shows how many free slots each has. The rule lives in `book()`;
 the picker holds no copy of it.
+
+**Selling is class-locked; correcting afterwards is not.** The rule above
+governs *buying* — `add_plan()`, `edit_plan()` and the plan pickers only ever
+offer the plan's own class. But once a slot is sold, the three corrections on
+the client profile — move an upcoming session, add a session to a plan, and
+"they were actually present at this one" — may point that slot at **any**
+class's session, by passing `allow_other_class` to `book()` or
+`move_booking()`. The booking keeps the plan that paid for it; only the date
+changes. This is what records "she missed Ballet on Tuesday and came to
+Flexibility on Wednesday instead" without selling a second plan.
+
+The card still works for it, because **the scan matches the booking's
+*plan's* class, not the session's** — see `_decide()`, which joins
+`subscriptions` for exactly this. A Ballet card finds the Ballet-funded slot
+wherever it now sits; a Flexibility card still cannot spend Ballet credit, so
+one card per class keeps meaning something. Bookings with no plan behind them
+(older rows, `subscription_id` NULL) fall back to matching on the session's
+class.
 
 **One session at a time, academy-wide.** A slot that is taken is taken,
 whatever class wants it: `access.slot_conflict()` is the single answer to
@@ -834,10 +856,14 @@ everything.
 
 ### One card per class
 
-`credentials.class_id` decides which session a scan looks for. A client holding
-a Ballet card and a Flexibility card gets the right session either way, and
+`credentials.class_id` decides which *plan* a scan spends. A client holding a
+Ballet card and a Flexibility card gets the right session either way, and
 presenting the wrong card for today returns "No session booked today for
 Flexibility" rather than silently checking them into the other class.
+
+Note it is the plan's class, not the session's: a slot moved to another
+class's session (see the correction rule above) is still found by the card of
+the plan that paid for it.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
 the filename so two cards coexist. `cards.card_path()` derives that name and is

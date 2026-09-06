@@ -1,5 +1,6 @@
 """/api/clients/* — client profiles, their plans and cards."""
 
+import glob
 import os
 import shutil
 from datetime import date
@@ -217,7 +218,17 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "use jpg, png or webp")
-    path = f"photos/client_{cid:05d}{ext}"
+    # A fresh filename per upload. Writing back to the same path meant the
+    # browser kept serving the cached old picture after a re-upload, so a new
+    # photo looked like it had not saved at all — reloading the profile did
+    # not help, because the URL had not changed. The previous files are
+    # removed so the folder does not fill up with every photo ever taken.
+    path = f"photos/client_{cid:05d}_{db.now()}{ext}"
+    for old in glob.glob(f"photos/client_{cid:05d}*"):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     conn = db.connect()

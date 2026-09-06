@@ -51,6 +51,11 @@ class RepeatIn(BaseModel):
 
 class BookIn(BaseModel):
     client_id: int
+    # Naming the plan is what lets a session of another class be booked: with
+    # no plan in that session's class there is nothing for book() to resolve
+    # on its own. Only the client profile's corrections send these two.
+    subscription_id: Optional[int] = None
+    allow_other_class: bool = False
 
 
 class StatusIn(BaseModel):
@@ -60,6 +65,10 @@ class StatusIn(BaseModel):
 
 class MoveIn(BaseModel):
     to_session_id: int
+    # Corrections made on the client profile may land on another class's
+    # session; the booking keeps the plan that paid for it either way.
+    allow_other_class: bool = False
+    status: Optional[str] = None
 
 
 # ---------------------------------------------------------------- routes
@@ -315,7 +324,9 @@ def bookable_clients(sid: int):
 def book_into_session(sid: int, body: BookIn):
     conn = db.connect()
     try:
-        r = access.book(conn, body.client_id, sid)
+        r = access.book(conn, body.client_id, sid,
+                        subscription_id=body.subscription_id,
+                        allow_other_class=body.allow_other_class)
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
         conn.close()
@@ -345,7 +356,9 @@ def set_attend_status(sid: int, body: StatusIn):
 def move_booking(cid: int, from_sid: int, body: MoveIn):
     conn = db.connect()
     try:
-        r = access.move_booking(conn, cid, from_sid, body.to_session_id)
+        r = access.move_booking(conn, cid, from_sid, body.to_session_id,
+                                allow_other_class=body.allow_other_class,
+                                status=body.status)
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
         conn.close()

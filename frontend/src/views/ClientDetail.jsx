@@ -131,11 +131,18 @@ export default function ClientDetail() {
     open(<PlanSessionsPopup clientId={c.id} planId={pl.id} name={pl.plan} paidOn={pl.paid_on} />, { wide: true });
   };
 
-  const openMove = async (fromSessionId, classId) => {
+  // Every class, not just this booking's own — the slot keeps the plan that
+  // paid for it, so moving across classes is a correction reception is
+  // allowed to make. Selling a plan stays class-locked; see PlanPicker.
+  const openMove = async fromSessionId => {
     const now = Math.floor(Date.now() / 1000);
-    const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&class_id=${classId}&available_for=${c.id}`);
-    if (!list.length) return toast('No other sessions of this class to move to', 'bad');
-    open(<MoveBooking clientId={c.id} fromSessionId={fromSessionId} sessions={list} onSaved={reload} />);
+    const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&available_for=${c.id}`);
+    const open_ = list.filter(s => s.status !== 'cancelled');
+    if (!open_.length) return toast('No other sessions to move to', 'bad');
+    return open(
+      <MoveBooking clientId={c.id} fromSessionId={fromSessionId} sessions={open_} onSaved={reload} />,
+      { wide: true },
+    );
   };
 
   const dropBooking = (sessionId) => confirm({
@@ -406,7 +413,7 @@ export default function ClientDetail() {
                   label: '', sortable: false, className: 'right',
                   cell: r => (
                     <div className="row tight" style={{ justifyContent: 'flex-end' }}>
-                      <button className="sm" onClick={() => openMove(r.session_id, r.class_id)}>Move</button>
+                      <button className="sm" onClick={() => openMove(r.session_id)}>Move</button>
                       <button className="sm ghost" onClick={() => dropBooking(r.session_id)}>✕</button>
                     </div>
                   ),

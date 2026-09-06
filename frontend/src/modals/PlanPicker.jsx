@@ -82,8 +82,24 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
         price: price === '' ? null : Number(price), starts_on: start, expires_on: endsOn,
         paid_on: paidOn || null, session_ids: chosen,
       } });
+      // Renewing replaces the plan the old card was issued against, and the
+      // card prints the session count and end date of the plan it was made
+      // for — so the old one is out of date the moment this saves. Issue the
+      // replacement here rather than leaving reception to remember; the
+      // endpoint revokes the previous card for this class as it goes.
+      if (presetClassId) {
+        try {
+          await api(`/clients/${clientId}/card`, {
+            method: 'POST', body: { class_id: classId },
+          });
+          toast('Plan renewed — new card issued, print it for the client');
+        } catch (e) {
+          toast(`Plan renewed, but the card could not be issued: ${e.message}`, 'bad');
+        }
+      } else {
+        toast('Plan saved — issue the card for this class next');
+      }
       close();
-      toast('Plan saved — issue the card for this class next');
       onSaved();
     } catch (e) { toast(e.message, 'bad'); }
   };

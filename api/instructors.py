@@ -1,5 +1,6 @@
 """/api/instructors/* — instructor roster, hours and pay."""
 
+import glob
 import os
 import shutil
 from typing import Optional
@@ -166,7 +167,14 @@ async def upload_photo(iid: int, file: UploadFile = File(...)):
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "use jpg, png or webp")
-    path = f"photos/instructor_{iid:05d}{ext}"
+    # Timestamped for the same reason as the client photo: a stable filename
+    # let the browser keep showing the cached previous picture.
+    path = f"photos/instructor_{iid:05d}_{db.now()}{ext}"
+    for old in glob.glob(f"photos/instructor_{iid:05d}*"):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     conn = db.connect()

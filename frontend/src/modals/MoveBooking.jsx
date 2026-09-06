@@ -1,47 +1,53 @@
 import { useState } from 'react';
 
 import { api } from '../api';
-import { fmtFull } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
+import SessionPickTable from './SessionPickTable';
 
 /**
- * Move an upcoming booking to another date of the same class. The caller
- * fetches the candidate session list and only opens this if it's non-empty
- * (matching app.js's moveBooking(), which toasts and never opens the modal
- * otherwise) — so this component always has at least one option.
+ * Move an upcoming booking to another session — of any class.
+ *
+ * The slot stays paid for by the plan that bought it; only the date it sits
+ * on changes. That is what lets reception say "she could not make Ballet on
+ * Tuesday, put her in Flexibility on Wednesday" without selling a second
+ * plan, and her existing card still opens the door for it, because the scan
+ * matches the plan's class rather than the session's.
  */
 export default function MoveBooking({ clientId, fromSessionId, sessions, onSaved }) {
   const { close } = useModal();
   const toast = useToast();
-  const [to, setTo] = useState(sessions[0].id);
+  const [to, setTo] = useState(null);
+  const [saving, setSaving] = useState(false);
 
   const save = async () => {
+    if (!to) return toast('Pick a session to move to', 'bad');
+    setSaving(true);
     try {
-      await api(`/clients/${clientId}/move-booking/${fromSessionId}`, {
-        method: 'POST', body: { to_session_id: to },
+      const r = await api(`/clients/${clientId}/move-booking/${fromSessionId}`, {
+        method: 'POST', body: { to_session_id: to, allow_other_class: true },
       });
+      if (!r.ok) { setSaving(false); return toast(r.error, 'bad'); }
       close();
       toast('Session moved');
-      onSaved();
-    } catch (e) { toast(e.message, 'bad'); }
+      return onSaved();
+    } catch (e) { setSaving(false); return toast(e.message, 'bad'); }
   };
 
   return (
     <>
       <h3>Move this session</h3>
-      <div className="mh">Only sessions of the same class are offered.</div>
-      <label>MOVE TO</label>
-      <select value={to} onChange={e => setTo(Number(e.target.value))}>
-        {sessions.map(s => (
-          <option key={s.id} value={s.id}>
-            {fmtFull(s.starts_at)} — {s.instructor_name || 'no instructor'} ({s.booked} booked)
-          </option>
-        ))}
-      </select>
+      <div className="mh">
+        Any class is offered. The slot keeps the plan that paid for it, so their
+        existing card still checks them in.
+      </div>
+      <SessionPickTable
+        sessions={sessions} chosenId={to} onPick={setTo}
+        emptyText="No other sessions to move to."
+      />
       <div className="acts">
         <button onClick={close}>Cancel</button>
-        <button className="pri" onClick={save}>Move</button>
+        <button className="pri" disabled={!to || saving} onClick={save}>Move</button>
       </div>
     </>
   );
