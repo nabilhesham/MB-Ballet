@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtISO, hrs, isoDay, todayISO } from '../lib/format';
+import { fmtFull, hrs, isoDay, todayISO } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -191,27 +191,12 @@ export default function InstructorDetail() {
         </div>
       </div>
 
-      <div className="grid g2" style={{ marginBottom: 16 }}>
-        <div className="box kpi">
-          {/* Read-only now: corrections belong to hours taught, and only one
-              of the two figures may carry them or a single correction would
-              be counted twice. This is what the sheet itself said. */}
-          <div className="k">HOURS ON THE SALARY SHEET</div>
-          <div className="v" style={{ color: 'var(--brand)' }}>{i.logged.hours}</div>
-          <div className="n">
-            {i.logged.days
-              ? <>{i.logged.days} days worked · {fmtISO(i.logged.from)} to {fmtISO(i.logged.to)}</>
-              : 'No salary-sheet days in this period'}
-          </div>
-        </div>
-        <div className="box kpi">
-          <div className="k">PAY FOR THOSE HOURS</div>
-          <div className="v" style={{ fontSize: 22, paddingTop: 6, color: 'var(--brand-deep)' }}>
-            {i.logged.pay.toLocaleString()} <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
-          </div>
-          <div className="n">at {t.hourly_rate.toLocaleString()} EGP per hour</div>
-        </div>
-      </div>
+      {/* The salary-sheet pair that used to sit here is gone. Those two read
+          instructor_hours, which the monthly payroll workbook fills; the four
+          cards above are computed from the timetable and reception's own
+          corrections, and answer the same questions per period without a
+          second figure to reconcile. GET /api/instructors/{id} still returns
+          `logged` for anyone who wants the payroll number back. */}
 
       <h2>Upcoming sessions ({upcoming.length})</h2>
       {upcoming.length ? (

@@ -36,14 +36,18 @@ def _log(conn, client_id, credential_id, session_id, decision, reason,
     return cur.lastrowid
 
 
-def _deny(message, detail=None, severity="stop", **base):
+def _deny(message, detail=None, severity="stop", code=None, **base):
     """
     A refusal. `severity` separates "something is wrong" from "nothing to do
     here" — a client scanning twice has not done anything wrong, and the kiosk
     reads a red STOP at them for it. "warn" is the amber middle: refused, but
     routine. Nothing is deducted either way.
+
+    `code` names the refusal for the one screen that needs to act on which
+    refusal it was, rather than only show it: "no_session_today" is what puts
+    the manual check-in button on the kiosk.
     """
-    return {**base, "granted": False, "severity": severity,
+    return {**base, "granted": False, "severity": severity, "code": code,
             "message": message, "detail": detail}
 
 
@@ -446,7 +450,8 @@ def _decide(conn, client, cred, base, t):
         cls = f" for {base.get('card_class')}" if base.get("card_class") else ""
         _log(conn, cid, cred_id, None, "deny", "no session today")
         return _deny(f"No session booked today{cls}",
-                     detail="check their upcoming sessions on their profile", **base)
+                     detail="check their upcoming sessions on their profile",
+                     code="no_session_today", **base)
 
     if row["status"] == "absent":
         _log(conn, cid, cred_id, row["session_id"], "deny", "already absent")
@@ -511,6 +516,74 @@ def check_in(conn, event_id: int) -> dict:
     conn.commit()
     state = plan_state(conn, b["subscription_id"]) if b["subscription_id"] else {}
     return {"ok": True, "sessions_remaining": state.get("remaining")}
+
+
+def swap_options(conn, client_id: int) -> dict:
+    """
+    What reception can offer someone standing at the desk with nothing booked
+    today: every session running today, and every slot of their own they
+    could give up for one.
+
+    A giveable slot is a date still ahead of them, or one they were already
+    marked absent for — a paid slot they lost. Each is tagged so the screen
+    can say which is which, because giving up a future date and reclaiming a
+    missed one are different decisions.
+    """
+    settle_past_sessions(conn)
+    start, end = day_bounds()
+    now = db.now()
+
+    today = [dict(r) for r in conn.execute(
+        "SELECT s.id, s.starts_at, s.duration_hours, c.name AS class_name, c.colour,"
+        "       i.name AS instructor_name,"
+        "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id = s.id) AS booked"
+        "  FROM sessions s JOIN classes c ON c.id = s.class_id"
+        "  LEFT JOIN instructors i ON i.id = s.instructor_id"
+        " WHERE s.starts_at BETWEEN ? AND ? AND s.status != 'cancelled'"
+        "   AND NOT EXISTS (SELECT 1 FROM bookings b"
+        "                    WHERE b.session_id = s.id AND b.client_id = ?)"
+        " ORDER BY s.starts_at", (start, end, client_id)).fetchall()]
+
+    slots = [dict(r) for r in conn.execute(
+        "SELECT b.session_id, b.status, s.starts_at, c.name AS class_name, c.colour,"
+        "       sub.plan AS plan_name, pc.name AS plan_class"
+        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
+        "  JOIN classes c ON c.id = s.class_id"
+        "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
+        "  LEFT JOIN classes pc ON pc.id = sub.class_id"
+        " WHERE b.client_id = ? AND s.status != 'cancelled'"
+        "   AND ((b.status = 'booked' AND s.starts_at > ?) OR b.status = 'absent')",
+        (client_id, now)).fetchall()]
+    for s in slots:
+        s["tag"] = "upcoming" if s["status"] == "booked" else "absent"
+    # Dates still ahead first, soonest first — the slot reception gives up by
+    # default. Missed ones after, most recent first, since an absence from
+    # last week is likelier to be the one being reclaimed than one from May.
+    slots.sort(key=lambda s: (s["tag"] != "upcoming",
+                              s["starts_at"] if s["tag"] == "upcoming" else -s["starts_at"]))
+    return {"today": today, "slots": slots}
+
+
+def swap_and_check_in(conn, client_id: int, from_session: int, to_session: int,
+                      credential_id: int = None) -> dict:
+    """
+    Give up one of the client's own slots for a session running today, and
+    check them in to it.
+
+    Deliberately built out of the ordinary pieces: move_booking() to change
+    the date, then the same _log()/check_in() pair a scan goes through. That
+    is what makes the 60-second Undo work here exactly as it does for a
+    normal scan, and keeps the day's check-in count honest.
+    """
+    moved = move_booking(conn, client_id, from_session, to_session,
+                         allow_other_class=True)
+    if not moved["ok"]:
+        return moved
+    event_id = _log(conn, client_id, credential_id, to_session, "allow",
+                    "manual swap", source="manual")
+    r = check_in(conn, event_id)
+    r["event_id"] = event_id
+    return r
 
 
 def undo(conn, event_id: int) -> dict:

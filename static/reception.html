@@ -101,6 +101,25 @@
         transition:color .12s}
   .keys.nudge{color:var(--warn);font-size:14px;font-weight:600}
 
+  /* Manual swap: two lists side by side, one row picked in each. */
+  #swap{display:none;margin-bottom:20px}
+  #swap.on{display:block}
+  .swaphead{font-size:14px;color:var(--ink);margin-bottom:12px}
+  .swapcols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .swapk{font-family:var(--mono);font-size:8.5px;letter-spacing:1.3px;
+         color:var(--dim);margin-bottom:7px}
+  .swapcols > div > div:last-child{max-height:34vh;overflow-y:auto}
+  .swaprow{display:flex;align-items:center;gap:9px;width:100%;text-align:left;
+           background:var(--surface);border:1px solid var(--line);border-radius:9px;
+           padding:10px 12px;margin-bottom:7px;font-size:13px;color:var(--ink);
+           cursor:pointer}
+  .swaprow:hover{background:var(--surface-2)}
+  .swaprow.on{border-color:var(--brand-deep);background:var(--brand-soft)}
+  .swaprow .w{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .swaprow .t{font-family:var(--mono);font-size:11px;color:var(--mute)}
+  .swapnone{color:var(--dim);font-size:12.5px;padding:10px 2px}
+  #manual,#swapGo{display:none}
+
   /* ---------- sidebar ---------- */
   aside{border-left:1px solid var(--line);background:#0A0E13;padding:20px 16px;
         display:flex;flex-direction:column;overflow-y:scroll;/*overflow:hidden*/}
@@ -171,8 +190,21 @@
     <div class="stats" id="stats"></div>
     <div class="recent" id="recent"></div>
 
+    <!-- Nothing booked today, but they are standing here. Give up one of
+         their own slots for something running today. Hidden until the
+         MANUAL CHECK-IN button is pressed. -->
+    <div id="swap">
+      <div class="swaphead">Pick a session today, and the slot to use for it</div>
+      <div class="swapcols">
+        <div><div class="swapk">TODAY'S SESSIONS</div><div id="swapToday"></div></div>
+        <div><div class="swapk">THEIR SLOTS</div><div id="swapSlots"></div></div>
+      </div>
+    </div>
+
     <div class="actions">
+      <button id="manual">MANUAL CHECK-IN</button>
       <button id="checkin">CHECK IN</button>
+      <button id="swapGo">CHECK IN</button>
       <button id="undo" class="danger">Undo</button>
     </div>
     <div class="keys" id="keys">Esc to clear</div>
@@ -543,6 +575,10 @@ function show(r){
   const auto = r.granted && !!r.session;
   const btn = $('checkin');
   btn.style.display = r.granted ? 'inline-flex' : 'none';
+  // Nothing of theirs today, but we know who they are — offer the swap
+  // rather than only saying no.
+  $('manual').style.display =
+    (!r.granted && r.code === 'no_session_today' && r.client_id) ? 'inline-flex' : 'none';
   btn.style.background = 'var(--ok)';
   btn.disabled = auto;
   btn.textContent = auto ? 'CHECKING IN…' : 'CHECK IN ANYWAY';
@@ -561,6 +597,96 @@ function show(r){
 
   refresh();
 }
+
+/* ================================================================
+   MANUAL SWAP
+   They are here, but nothing of theirs runs today. Rather than let
+   them in for free, give up one slot they already own — a date still
+   ahead, or one they were marked absent for — and spend it on
+   something running now. The plan that paid for the slot is unchanged,
+   so their card keeps working afterwards.
+   Esc at any point leaves without checking anyone in.
+   ================================================================ */
+let swapPick = { to:null, from:null };
+
+async function openSwap(){
+  if(!current || !current.client_id) return;
+  $('manual').style.display = 'none';
+  let o;
+  try{
+    o = await (await fetch('/api/access/swap-options/' + current.client_id)).json();
+  }catch(e){ $('reason').textContent = 'Could not load today\'s sessions'; return; }
+
+  swapPick = { to:null, from:null };
+  const rowsHtml = (items, kind) => items.length ? items.map(x => {
+    const id = kind === 'to' ? x.id : x.session_id;
+    const tag = kind === 'from'
+      ? `<span class="pill ${x.tag === 'absent' ? 'bad' : 'info'}">${x.tag}</span>` : '';
+    const when = kind === 'to' ? fmtTime(x.starts_at) : fmtDay(x.starts_at);
+    return `<button class="swaprow" data-kind="${kind}" data-id="${id}">
+      <span class="t">${when}</span>
+      <span class="w"><span class="dot" style="background:${esc(x.colour)}"></span>${esc(x.class_name)}</span>
+      ${tag}</button>`;
+  }).join('') : `<div class="swapnone">${kind === 'to'
+      ? 'Nothing runs today that they are not already in.'
+      : 'They have no upcoming or missed sessions to give up.'}</div>`;
+
+  $('swapToday').innerHTML = rowsHtml(o.today, 'to');
+  $('swapSlots').innerHTML = rowsHtml(o.slots, 'from');
+  $('swap').classList.add('on');
+  $('stats').style.display = 'none';
+  $('recent').style.display = 'none';
+  $('swapGo').style.display = 'inline-flex';
+  $('swapGo').disabled = true;
+  $('keys').textContent = keysBase = 'Pick one from each list · Esc to leave without checking in';
+
+  document.querySelectorAll('.swaprow').forEach(btn => {
+    btn.onclick = () => {
+      const kind = btn.dataset.kind;
+      swapPick[kind] = Number(btn.dataset.id);
+      const holder = kind === 'to' ? 'swapToday' : 'swapSlots';
+      $(holder).querySelectorAll('.swaprow').forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      $('swapGo').disabled = !(swapPick.to && swapPick.from);
+    };
+  });
+}
+
+async function doSwapCheckIn(){
+  if(!swapPick.to || !swapPick.from || !current) return;
+  $('swapGo').disabled = true;
+  const r = await (await fetch('/api/access/swap-checkin', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({client_id: current.client_id,
+                         from_session_id: swapPick.from,
+                         to_session_id: swapPick.to,
+                         credential_id: current.credential_id})})).json();
+  if(r.ok){
+    current.event_id = r.event_id;
+    current.done = true;
+    $('swap').classList.remove('on');
+    $('stats').style.display = '';
+    $('recent').style.display = '';
+    $('swapGo').style.display = 'none';
+    stage.className = 'ok';
+    $('verdict').textContent = 'WELCOME';
+    $('verdict').style.color = 'var(--ok)';
+    $('reason').textContent = 'Moved onto today\'s session';
+    $('checkin').style.display = 'inline-flex';
+    $('checkin').disabled = true;
+    $('checkin').textContent = 'CHECKED IN — ' + r.sessions_remaining + ' LEFT';
+    $('undo').classList.add('on');
+    $('keys').textContent = keysBase = 'Esc to clear';
+    beepOk();
+  }else{
+    $('reason').textContent = r.error || 'Could not check them in';
+    $('swapGo').disabled = false;
+    beepNo();
+  }
+  refresh();
+}
+$('manual').onclick = openSwap;
+$('swapGo').onclick = doSwapCheckIn;
 
 async function doCheckIn(){
   /* The auto path disables the button before calling in, so "already
@@ -592,6 +718,12 @@ $('undo').onclick = async () => {
 
 function reset(){
   clearTimeout(clearTimer); clearTimeout(nudgeTimer); current=null;
+  // Esc out of a half-finished swap checks nobody in.
+  swapPick = { to:null, from:null };
+  $('swap').classList.remove('on');
+  $('swapGo').style.display = 'none';
+  $('manual').style.display = 'none';
+  $('stats').style.display = ''; $('recent').style.display = '';
   card.classList.remove('on'); idle.style.display='flex'; stage.className='';
   keysBase = 'Esc to clear';
   $('keys').textContent = keysBase; $('keys').classList.remove('nudge');

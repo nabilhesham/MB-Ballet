@@ -111,7 +111,7 @@ deletes and never touches data.
 ```
 db.py             Schema + connection helpers. All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
-access.py         Access rules: verify / check_in / undo / manual_check_in.
+access.py         Access rules: verify / check_in / undo / swap_and_check_in.
 cards.py          Member card PNG generation.
 server.py         FastAPI app, paths, startup, static mounts. Thin — routes
                   live in api/, business rules live in access.py.
@@ -859,6 +859,22 @@ card still in frame reads the instant Esc clears the screen.
 works from the manual-entry box and from a focused button, not just from the
 bare page. It was previously unreachable in Number mode — which the
 clear-by-hand rule now depends on.
+
+**"No session today" offers a way out instead of only saying no.** That one
+refusal carries `code="no_session_today"`, which is the only thing the kiosk
+branches on, and it puts a **MANUAL CHECK-IN** button on the screen. Pressing
+it shows two lists: every session running today across all classes, and every
+slot of the client's own that could be given up — a date still ahead, or one
+they were already marked absent for, each tagged. Pick one from each and they
+are checked in to today's session.
+
+`access.swap_and_check_in()` is deliberately built out of the ordinary
+pieces: `move_booking(allow_other_class=True)` to change the date, then the
+same `_log()`/`check_in()` pair a scan goes through. That is what makes the
+60-second Undo work here exactly as it does for a scan, and keeps the day's
+count honest. The slot keeps the plan that paid for it, so the card still
+works afterwards. **Esc at any point checks nobody in** — the swap only
+happens on the confirm button.
 
 **"Next class" is scoped to the card being held.** `_client_payload()` takes
 the credential's `class_id` and filters the lookup by it. A client taking
