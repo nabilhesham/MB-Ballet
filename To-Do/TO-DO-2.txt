@@ -1,0 +1,40 @@
+class view:
+1- i need to add instructor in the class in the create class or edit class so when the session is created it will take this instructor by default and the same for all the existed sessions under this class that hasn't the instructor been assigned to it and when changing the class instructor all the existing upcoming sessions the instructor will be overdried to this instructor and will also keep the ability to change the session's instructor anytime.
+2- add the ability to delete class and if that's happened remove any upcoming session under this class and the clients assigned to these sessions will retrieve the quota of this sessions because they will have unassigned sessions in their plan.
+
+
+instructor view:
+1- add the ability to change the hours tough manually in the card of the hours tough because there maybe exception when instructor that extra time so i will add that from the edit button in the hours taught and then when save update the earned card will be updated based on this change.
+2- add ability to add photo to the instructor like what we did in the client photo.
+3- add a new view called archived instructors and will add button to for to it called archive and the button of add client in the instructors view and don't add it in the side bar and also in the archived instructors it will be a table list with search like any other scrollable table and also in the raw of the instructor has a button to un archive this instructor .
+4- in the past sessions table for the instructor add in the search bar the ability to search for certain date.
+5- the view for the instructor (all the view cards and tables upcoming and past) the default period will be this month and will the ability the from / to datetime to choose any date range and calculate the whole view based on that so all the instructor data will be store so i can retrieve it with datetime range. and also add a button next to the datetime range to reset to the default period of this month.
+6 - make the date picker from - to range apply with button apply not automatically when changing the date .
+7 - make the reset button for date picker aligned and the same size of the raw and like that also the apply button  because they are smaller that the date picker .
+
+
+regarding the plan:
+1 - in the create / edit plan i want to add paid date input and it will optional and if paid date assigned we will display the paid date in the plan and if not assigned we will display unpaid and these indicator will be in the payment and cards for each plan for the client and the payment history also in the client view and also if this client checked in will display a tag whether he paid or not in the plan related.
+2- in the add or edit plan add the ability for the list of sessions to select previous sessions 3 weeks before only so just  it will be not the list of upcoming for this class but also this list will have previous / old sessions in the past 3 weeks.
+3- add paid column in the payment history table of each plan of the client.
+
+
+client view:
+1- when add / edit the client in the age input i want it a decimal number like 3.5 not a full number like 3 or 4 i want both.
+2- add the ability of archive client and hence that this client will be added in a new view called archived clients and will add button to it called archive because the button of add client in the client view and don't add it in the side bar and also in the archived clients it will be a table list with search like any other scrollable table and also in the raw of the client has a button to un archive this client .
+3- in the client view the archive button we can use it only if the user used all this sessions and if there are upcoming sessions will render error that you can't archive this client because he/she has upcoming sessions.
+
+
+reception view:
+1- if a client checked in make the disappear for the display manually with esc and don't make it disappear automatically.
+2- if by fault the client scanned twice or another client scan and another one scan after him don't accept the second scan or any scan of the first unless we hit esc to make the first scan disappear then the second user can scan after that , this to prevent duplication and to make the reception have the time to read the data of each client checking in and this change i need it reflected in the all the methods of check in the cam, the scanner the manual entry for the client id.
+3- if the client has a session today and checked it before the time of the session in time of the day will check this client in automatically and remove the manual check in for this scenario.
+4- if the client checked in one time for and then checked in again in the same day for the same session we already developed this solution and will not deduct the session from his quota but in the display of the second scan don't display stop and replace it with warning.
+5- if the user check in the card for the his/her next class display the next class related to this plan not his total plans.
+
+session view :
+1- when adding student to the session if  this session not in the same class any of the plans of this client don't add it also if it's in the same class check if the client has available slots in this plan to add this session.
+so in the add student in the session if the student don't have available slots for this class in this plan don't add it . so the clients can't have session not in their plans
+
+all over the app:
+1- if session assigned in certain datetime this slot will not be available to assign an other session in this period for example if a session 3:01 pm to 4:01 pm i can put another session in 4:01 to any date time but not the same period in the same day and that will reflect in the calendar, the sessions create whether what in which class it will be on the level of the app.

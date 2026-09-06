@@ -1,0 +1,11 @@
+1- new plan:
+	- cognates message
+	-  QR card
+	- upcoming sessions list
+	- renew plan date
+2- the day before that last session in certain plan:
+	- reminder that the plan will be ended in the next session
+	- message to renew his plan
+3- manual events to be sent to all the clients
+4- manual message to be sent to a certain client.
+
