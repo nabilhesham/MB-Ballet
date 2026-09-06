@@ -850,38 +850,69 @@ def logged_hours(conn, instructor_id: int, period_from: str, period_to: str) -> 
         "SELECT COALESCE(SUM(hours),0) h, COUNT(*) days, MIN(work_date) a, MAX(work_date) b"
         " FROM instructor_hours WHERE instructor_id=? AND work_date BETWEEN ? AND ?",
         (instructor_id, period_from, period_to)).fetchone()
-    adjustments = conn.execute(
-        "SELECT COALESCE(SUM(delta_hours),0) d FROM instructor_hour_adjustments"
-        " WHERE instructor_id=? AND adjustment_date BETWEEN ? AND ?",
-        (instructor_id, period_from, period_to)).fetchone()
     rate_row = conn.execute("SELECT hourly_rate FROM instructors WHERE id=?",
                             (instructor_id,)).fetchone()
     rate = (rate_row["hourly_rate"] or 0) if rate_row else 0
-    hours = round((sheet["h"] or 0) + (adjustments["d"] or 0), 2)
+    hours = round(sheet["h"] or 0, 2)
     return {
         "hours": hours, "days": sheet["days"], "from": sheet["a"], "to": sheet["b"],
         "pay": round(hours * rate, 2),
     }
 
 
-def adjust_logged_hours(conn, instructor_id: int, period_from: str, period_to: str,
+def taught_hours(conn, instructor_id: int, period_from: str, period_to: str) -> dict:
+    """
+    Hours actually taught in a period: what the timetable says, plus any
+    manual corrections (`instructor_hour_adjustments`).
+
+    This is the figure reception edits and the one pay is worked out from —
+    an instructor who stayed an extra hour taught it whether or not a session
+    row says so. The corrections used to be layered onto the salary sheet's
+    total instead; they belong here, and only one of the two figures may
+    carry them or a single correction would be counted twice.
+
+    `scheduled` and `adjustment` are returned apart from their sum so the
+    screen can show what was corrected rather than a number that silently
+    disagrees with the sessions listed beneath it.
+    """
+    start_ts, end_ts = date_range_ts(period_from, period_to)
+    t = conn.execute(
+        "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
+        " WHERE instructor_id=? AND status='completed'"
+        "   AND starts_at >= ? AND starts_at < ?",
+        (instructor_id, start_ts, end_ts)).fetchone()
+    adj = conn.execute(
+        "SELECT COALESCE(SUM(delta_hours),0) d FROM instructor_hour_adjustments"
+        " WHERE instructor_id=? AND adjustment_date BETWEEN ? AND ?",
+        (instructor_id, period_from, period_to)).fetchone()
+    scheduled = round(t["h"] or 0, 2)
+    adjustment = round(adj["d"] or 0, 2)
+    return {"sessions": t["n"], "scheduled": scheduled, "adjustment": adjustment,
+            "hours": round(scheduled + adjustment, 2)}
+
+
+def adjust_taught_hours(conn, instructor_id: int, day: str,
                         new_total: float, note: str = None) -> dict:
     """
-    Reception's "edit the total" action. Computes the delta against the
-    period's current total and records it as one new dated row -- never
-    rewrites or deletes an existing instructor_hours row, so a correction is
-    its own auditable fact rather than lost inside an edited import. Dated to
-    the end of the period being viewed, so it stays in scope whenever that
-    period -- or any range containing it -- is looked at again later.
+    Reception's "edit the hours taught" action, for **one day**.
+
+    A day, not a range, because a correction belongs to the day it happened
+    on: dated that way the deltas accumulate into a real daily history, and
+    any wider range that contains the day picks it up by summing. Spread
+    across a month there would be no telling which day the extra hour was.
+
+    Recorded as one new dated row rather than by rewriting a session's
+    duration or a salary-sheet row, so the correction stays its own auditable
+    fact and what the timetable and the sheet actually said stays visible.
     """
-    current = logged_hours(conn, instructor_id, period_from, period_to)
+    current = taught_hours(conn, instructor_id, day, day)
     delta = round(new_total - current["hours"], 2)
     conn.execute(
         "INSERT INTO instructor_hour_adjustments (instructor_id, adjustment_date, delta_hours,"
         " note, created_at) VALUES (?,?,?,?,?)",
-        (instructor_id, period_to, delta, note, db.now()))
+        (instructor_id, day, delta, note, db.now()))
     conn.commit()
-    return logged_hours(conn, instructor_id, period_from, period_to)
+    return taught_hours(conn, instructor_id, day, day)
 
 
 def month_intake(conn, month: str = None) -> dict:

@@ -3,10 +3,11 @@
 import glob
 import os
 import shutil
+from datetime import date
 from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 import access
 import db
@@ -25,8 +26,9 @@ class InstructorIn(BaseModel):
 
 
 class HoursAdjustIn(BaseModel):
-    from_: str = Field(alias="from")
-    to: str
+    # One day, not a range: a correction has to land on the day it happened
+    # on, or the daily history it builds up means nothing.
+    day: str
     new_total: float
     note: Optional[str] = None
 
@@ -89,10 +91,12 @@ def update_instructor(iid: int, body: InstructorIn):
 @router.get("/api/instructors/{iid}")
 def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), to: Optional[str] = None):
     """
-    Everything on this page is scoped to a period, defaulting to this
-    calendar month when no from/to is given — reception picking a different
-    range recalculates every figure, including what's "upcoming", from the
-    same query params.
+    Everything on this page is scoped to a period, defaulting to **today**
+    when no from/to is given — the question asked most often is "what did she
+    do today", and a day is also the only period whose hours can be edited
+    (see adjust_taught_hours). A wider range is picked with the from/to
+    inputs and recalculates every figure, including what's "upcoming", from
+    the same query params.
     """
     conn = db.connect()
     try:
@@ -101,7 +105,8 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
         if not i:
             raise HTTPException(404, "no such instructor")
 
-        period_from, period_to = (from_, to) if from_ and to else access.month_bounds()
+        today = date.today().isoformat()
+        period_from, period_to = (from_, to) if from_ and to else (today, today)
         if period_to < period_from:
             raise HTTPException(400, "the end of the range must not be before its start")
         start_ts, end_ts = access.date_range_ts(period_from, period_to)
@@ -134,12 +139,20 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
         # billed for, and both are worth seeing.
         rate = i["hourly_rate"] or 0
         i["logged"] = access.logged_hours(conn, iid, period_from, period_to)
+        # Hours taught carries reception's corrections, so pay follows the
+        # corrected figure rather than the raw timetable.
+        taught = access.taught_hours(conn, iid, period_from, period_to)
         i["period_from"], i["period_to"] = period_from, period_to
+        # A day is the only period whose hours may be edited — a correction
+        # has to land on the day it happened on to be worth anything later.
+        i["is_single_day"] = period_from == period_to
         i["totals"] = {
             "sessions_taught": t["n"],
-            "hours_taught": round(t["h"], 2),
+            "hours_taught": taught["hours"],
+            "hours_scheduled": taught["scheduled"],
+            "hours_adjustment": taught["adjustment"],
             "hourly_rate": rate,
-            "earned": round(t["h"] * rate, 2),
+            "earned": round(taught["hours"] * rate, 2),
             "upcoming": up["n"],
             "upcoming_hours": round(up["h"], 2),
             "upcoming_value": round(up["h"] * rate, 2),
@@ -155,9 +168,9 @@ def adjust_hours(iid: int, body: HoursAdjustIn):
     try:
         if not conn.execute("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
             raise HTTPException(404, "no such instructor")
-        if body.to < body.from_:
-            raise HTTPException(400, "the end of the range must not be before its start")
-        return access.adjust_logged_hours(conn, iid, body.from_, body.to, body.new_total, body.note)
+        if body.new_total < 0:
+            raise HTTPException(400, "hours cannot be negative")
+        return access.adjust_taught_hours(conn, iid, body.day, body.new_total, body.note)
     finally:
         conn.close()
 

@@ -11,19 +11,24 @@ import SessionPickTable from './SessionPickTable';
 /**
  * Correct a past attendance record from a client's history table.
  *
- * Marking someone present asks *which* session they were present at, across
- * every class — because the usual reason a row is wrong is that they came on
- * a different day, or to a different class, rather than that the tick was
- * simply missed. Their own session is first in the list and selected, so the
- * ordinary correction is still one click; picking any other row moves the
- * booking there and marks it present in the same step.
+ * Two separate corrections, kept as two buttons. "Mark present" fixes a tick
+ * that was simply missed and touches nothing else. "Present at another
+ * session" is for when they actually came on a different day, or to a
+ * different class — it moves the booking there and marks it present in one
+ * step.
+ *
+ * That second list is the last week plus everything still to come, not the
+ * whole timetable: a correction is made within days of the session, and
+ * offering two hundred rows to find one buries it.
  */
+const BACK_DAYS = 7;
+const FORWARD_DAYS = 180;
 export default function EditAttendance({ clientId, sessionId, className, status, ts, onSaved }) {
   const { close } = useModal();
   const toast = useToast();
   const [picking, setPicking] = useState(false);
   const [sessions, setSessions] = useState(null);
-  const [chosen, setChosen] = useState(sessionId);
+  const [chosen, setChosen] = useState(null);
   const [saving, setSaving] = useState(false);
 
   const fix = async newStatus => {
@@ -38,14 +43,12 @@ export default function EditAttendance({ clientId, sessionId, className, status,
   const startPicking = async () => {
     setPicking(true);
     const now = Math.floor(Date.now() / 1000);
-    // A wide window either side: the session they really attended is usually
-    // near the one that was marked wrong, but not always.
-    const list = await api(`/sessions?start=${now - 120 * 86400}&end=${now + 120 * 86400}`);
+    const list = await api(`/sessions?start=${now - BACK_DAYS * 86400}`
+      + `&end=${now + FORWARD_DAYS * 86400}&available_for=${clientId}`);
     setSessions(list.filter(s => s.status !== 'cancelled'));
   };
 
   const savePresent = async () => {
-    if (chosen === sessionId) return fix('present');
     setSaving(true);
     try {
       const r = await api(`/clients/${clientId}/move-booking/${sessionId}`, {
@@ -64,8 +67,9 @@ export default function EditAttendance({ clientId, sessionId, className, status,
       <>
         <h3>Which session did they attend?</h3>
         <div className="mh">
-          Their own session is first. Pick a different one — of any class — and the
-          slot moves there and is marked present.
+          The last week and everything upcoming, across every class. The slot moves
+          to whichever you pick and is marked present — it keeps the plan that paid
+          for it, so their card still works.
         </div>
         {sessions === null
           ? <Empty>Loading…</Empty>
@@ -96,8 +100,15 @@ export default function EditAttendance({ clientId, sessionId, className, status,
       </div>
       <div className="acts">
         <button onClick={close}>Cancel</button>
-        <button className={status === 'absent' ? 'pri' : ''} onClick={() => fix('absent')}>Mark absent</button>
-        <button className={status === 'present' ? 'pri' : ''} onClick={startPicking}>Mark present</button>
+        <button className={status === 'absent' ? 'pri' : ''} onClick={() => fix('absent')}>
+          Mark absent
+        </button>
+        <button className={status === 'present' ? 'pri' : ''} onClick={() => fix('present')}>
+          Mark present
+        </button>
+      </div>
+      <div className="row" style={{ justifyContent: 'flex-end', marginTop: 10 }}>
+        <button className="sm" onClick={startPicking}>Present at another session…</button>
       </div>
     </>
   );

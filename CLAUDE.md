@@ -435,17 +435,30 @@ system and everything else follows from it:
   total behind. It is what payroll is actually paid on; "sessions taught" is
   the app's own count, and the instructor page shows both because a gap
   between them is worth seeing.
-- **instructor_hour_adjustments** is a manual correction, layered on top of
-  `instructor_hours` without ever touching it. Reception's "edit the hours"
-  button on the instructor page shows one editable total for the period being
-  viewed; under that, `access.adjust_logged_hours()` writes one new dated
-  delta row rather than rewriting or deleting a real salary-sheet row, so what
-  the sheet actually said stays visible. The row is dated to the *end* of the
-  period being edited, so it stays in scope whenever that period — or any
-  wider range containing it — is looked at again. `access.logged_hours()` is
-  what sums both tables together into the figure shown; "days worked" counts
-  only real `instructor_hours` rows, since a correction is not a claim of an
-  extra day worked.
+- **instructor_hour_adjustments** corrects **hours taught** — the timetable
+  figure, not the salary sheet. An instructor who stayed for an extra
+  rehearsal taught it whether or not a session row says so, and pay follows
+  the corrected number (`totals.earned`). `access.taught_hours()` returns
+  `scheduled` and `adjustment` separately as well as their sum, so the screen
+  can show what was corrected rather than a total that silently disagrees
+  with the sessions listed under it.
+
+  **Only one of the two hour figures may carry the corrections**, or a single
+  correction is counted twice; `access.logged_hours()` is therefore pure
+  salary sheet now, and its card is read-only. (Adjustments used to be summed
+  into it instead — any rows written before that change now move to hours
+  taught.)
+
+  **A correction belongs to one day.** `access.adjust_taught_hours()` takes a
+  date, not a range: dated that way the deltas accumulate into a real daily
+  history, and any wider range picks them up by summing, where a
+  month-long correction would leave no trace of which day the extra hour
+  was. That is why the Edit button appears only when the instructor page is
+  showing a single day, and why the page defaults to today. It writes a new
+  dated delta row rather than editing a session's duration or a salary-sheet
+  row, so the timetable and the sheet still say what they always said.
+  "Days worked" counts only real `instructor_hours` rows, since a correction
+  is not a claim of an extra day worked.
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
 

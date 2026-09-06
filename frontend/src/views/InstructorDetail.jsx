@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtISO, hrs, isoDay, thisMonthBounds } from '../lib/format';
+import { fmtFull, fmtISO, hrs, isoDay, todayISO } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -45,7 +45,10 @@ const withDateSearch = list => list.map(s => ({ ...s, _search_date: `${isoDay(s.
 export default function InstructorDetail() {
   const { id } = useParams();
   const nav = useNavigate();
-  const [[defaultFrom, defaultTo]] = useState(thisMonthBounds);
+  // Today, not this month: "what did she do today" is the question asked
+  // most, and a single day is also the only period whose hours can be
+  // edited, so the default lands somewhere the Edit button is available.
+  const [[defaultFrom, defaultTo]] = useState(() => [todayISO(), todayISO()]);
   // What the inputs hold, and what the page is actually showing, kept apart
   // on purpose: a date input fires on every change, so binding the request
   // straight to it reloaded the whole view mid-edit — once for a half-typed
@@ -105,8 +108,8 @@ export default function InstructorDetail() {
   const openEditHours = () => {
     open(
       <EditInstructorHours
-        instructorId={i.id} from={i.period_from} to={i.period_to}
-        currentTotal={i.logged.hours} onSaved={reload}
+        instructorId={i.id} day={i.period_from} currentTotal={t.hours_taught}
+        scheduled={t.hours_scheduled} onSaved={reload}
       />,
     );
   };
@@ -148,7 +151,7 @@ export default function InstructorDetail() {
         </div>
         <div className="filterbar" style={{ marginTop: 10 }}>
           <button className="pri" onClick={applyPeriod} disabled={!dirty}>Apply</button>
-          <button onClick={resetPeriod}>Reset to this month</button>
+          <button onClick={resetPeriod}>Reset to today</button>
         </div>
       </div>
 
@@ -158,9 +161,21 @@ export default function InstructorDetail() {
           <div className="n">{t.upcoming} still upcoming</div>
         </div>
         <div className="box kpi">
-          <div className="k">HOURS TAUGHT</div>
+          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <div className="k">HOURS TAUGHT</div>
+            {/* Only on a single day: a correction has to land on the day it
+                happened on, so a range has nothing to edit. */}
+            {i.is_single_day
+              ? <button className="sm" onClick={openEditHours}>Edit</button>
+              : <span className="sub" title="Pick a single day to edit">day only</span>}
+          </div>
           <div className="v" style={{ color: 'var(--ok)' }}>{t.hours_taught}</div>
-          <div className="n">{t.upcoming_hours} h scheduled</div>
+          <div className="n">
+            {t.hours_adjustment
+              ? <>{t.hours_scheduled} h on the timetable {t.hours_adjustment > 0 ? '+' : ''}
+                {t.hours_adjustment} h corrected</>
+              : <>{t.upcoming_hours} h scheduled</>}
+          </div>
         </div>
         <div className="box kpi">
           <div className="k">RATE</div>
@@ -178,10 +193,10 @@ export default function InstructorDetail() {
 
       <div className="grid g2" style={{ marginBottom: 16 }}>
         <div className="box kpi">
-          <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <div className="k">HOURS ON THE SALARY SHEET</div>
-            <button className="sm" onClick={openEditHours}>Edit</button>
-          </div>
+          {/* Read-only now: corrections belong to hours taught, and only one
+              of the two figures may carry them or a single correction would
+              be counted twice. This is what the sheet itself said. */}
+          <div className="k">HOURS ON THE SALARY SHEET</div>
           <div className="v" style={{ color: 'var(--brand)' }}>{i.logged.hours}</div>
           <div className="n">
             {i.logged.days
