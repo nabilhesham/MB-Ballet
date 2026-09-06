@@ -1,0 +1,16 @@
+Client view:
+1- in the attendance history if a client is absent and we click on it and when choosing make preset i will get list of sessions of all the classes not this class only this update in the attendance history only not the add plan
+2- in the upcoming sessions when add session or move session i want to choose from the list of all sessions under all the classes and the client will use the same QR that he have to check in i. This session however it’s in another class so we will behave it as one of this sessions plan however it’s from another class but this update in the edit only not the add plan also the list will have columns session and also the class and add string input search like the one in the sessions view so  i can search for the class name, the session name or date
+3- when saving the new photo of the client the view will reload so the new photo to be shown
+4- when click the renew plan button automatically reissue new QR card for this plan.
+
+Instructor view :
+1- the edit hours will be in the hours taught not in the hours on the salary sheet and the edit button only shows of the period is day like today or any other day
+2- default period will be day not month so the view will display by default today
+3- by this update we will save the history of each instructor for the daily data.
+4- when saving the new photo of the instructor the view will reload so the new photo to be shown
+
+Reception view:
+1- if the client  check-in in a day that don’t have session in it make sure to display stop that he doesn’t have sessions today and display manual check in button that when click on it will have the list of all this day of the check in sessions for all the classes so we can transfer / move his first upcoming session with the session that we will choose that’s if he still have upcoming sessions and if the client has absent session in this plan add the ability also to change the absent session to the chosen session by displaying his absent session to choose which one will be replaced with the chosen one of today’s sessions so i think it’s better to display both lists of today’s sessions and the list of the client plan sessions and tag each one whether it’s upcoming or absent and the receptions will choose which on of the client sessions will be replaced with the chosen today’s sessions and if we choose the session the client will be checked in to
+This session and if we hit esc he will not be checked in
+2 - the manual check in  and transfer the client from session to session may also be if the client "Already marked absent for today's session" i mean if already absent in today and the client came after the session duration we can manual check in the client to another session today .
