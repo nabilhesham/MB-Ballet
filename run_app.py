@@ -76,6 +76,22 @@ def free_port(host: str, start: int, tries: int = 20) -> int:
     return 0
 
 
+def app_url(port: int, path: str = "/reception") -> str:
+    """
+    The URL to open, carrying a stamp that differs on every launch.
+
+    server.py now tells the browser not to cache anything that keeps its
+    name across builds, which is the real fix for "I replaced the folder and
+    still see the old app". But a copy cached *before* that header existed
+    is already sitting in the browser on every laptop running an older
+    build, and a browser will go on serving one of those for days without
+    asking anybody. A URL it has never seen cannot be answered out of that
+    cache, so the first launch after an upgrade lands on the new app instead
+    of needing ctrl-shift-R pressed on each page by hand.
+    """
+    return f"http://{HOST}:{port}{path}?v={int(time.time())}"
+
+
 def log_error(exc_text: str) -> str:
     path = os.path.join(app_dir(), "error.log")
     with open(path, "a", encoding="utf-8") as f:
@@ -120,7 +136,7 @@ def main() -> int:
             print()
             print("  The academy system is already running.")
             print(f"  Opening it at http://{HOST}:{PORT}")
-            webbrowser.open(f"http://{HOST}:{PORT}/reception")
+            webbrowser.open(app_url(PORT))
             time.sleep(3)
             return 0
 
@@ -147,7 +163,7 @@ def main() -> int:
 
     def open_browser():
         time.sleep(2.0)
-        webbrowser.open(f"http://{HOST}:{port}/reception")
+        webbrowser.open(app_url(port))
 
     threading.Thread(target=open_browser, daemon=True).start()
     banner(port)

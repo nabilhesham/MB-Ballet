@@ -193,7 +193,13 @@ echo      Closing it stops the program.
 echo    ----------------------------------------------------------
 echo.
 
-start "" http://127.0.0.1:8000/reception
+REM  The ?v= is a different number every launch, so the browser cannot answer
+REM  this out of a copy it cached before an upgrade. server.py sends no-store
+REM  on everything that keeps its name across builds, which is the real fix --
+REM  this only covers the pages a browser cached before that header existed.
+REM  Kept on one line with no parentheses, pipes or redirects: see the note at
+REM  the top of this file about what cmd.exe does to a parenthesised block.
+start "" http://127.0.0.1:8000/reception?v=%RANDOM%%RANDOM%
 "%VPY%" server.py
 
 echo.

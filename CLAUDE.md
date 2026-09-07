@@ -42,6 +42,35 @@ commit the refreshed `static/app/` in the same commit. Nothing rebuilds it
 automatically — a source change with no matching `static/app/` change ships
 as a silent no-op.
 
+**Replacing the folder on the laptop is enough — the browser is told not to
+cache the app.** It did not used to be: copying a new build over the old one
+left the receptionist looking at last month's screens until someone pressed
+ctrl-shift-R on every page in turn. Nothing was cached deliberately. A
+response with *no* `Cache-Control` at all lets a browser invent its own
+freshness, and the usual heuristic — a tenth of the file's age — means an
+`index.html` that has sat on disk for a month is treated as fresh for days;
+it then keeps asking for the hashed bundle that stale copy names, which it
+also still holds, so the new folder is invisible.
+
+`server.py`'s `cache_policy` middleware ends that by saying what every
+response is, and there are only two kinds:
+
+| what | header | why |
+|---|---|---|
+| `/static/app/assets/*` | `max-age=31536000, immutable` | the build hashes these names, so a new build is a new URL and this one can never be stale — that is the entire point of hashing them |
+| everything else | `no-store` | the entry HTML, `style.css`, `reception.html`, the API, a reissued card: all keep their names across builds, so a cached copy is a stale copy |
+
+The cost is refetching a few small files over localhost, which is not
+measurable. Do not "optimise" the second row — losing this means a
+receptionist being shown an old build with no way to know it.
+
+The three launchers also open the browser at `…?v=<a number that differs
+every launch>` (`app_url()` in `run_app.py`, `%RANDOM%%RANDOM%` in
+`START.bat`, `date +%s` in `start.sh`). That is not a second mechanism doing
+the same job: it covers the one case the header cannot, a page a browser
+cached *before* the header existed, which it will go on serving for days
+without asking. A URL it has never seen cannot come out of that cache.
+
 **Visual language.** The palette comes straight from the academy logo — the
 purple `#87438E` of the dancer and the pink `#EAAECA` of the panel behind her.
 The admin is light: paper background, purple accent, serif headings
@@ -113,7 +142,8 @@ db.py             Schema + connection helpers. All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
 cards.py          Member card PNG generation.
-server.py         FastAPI app, paths, startup, static mounts. Thin — routes
+server.py         FastAPI app, paths, startup, cache policy, static mounts.
+                  Thin — routes
                   live in api/, business rules live in access.py.
 api/              One router module per resource, wired into server.py with
                   ordinary static imports (helpers.py, clients.py, plans.py,
@@ -146,6 +176,8 @@ static/reception.html  Kiosk check-in screen (standalone, own JS, untouched
                   by the React rewrite — see the note below).
 START.bat         Windows double-click launcher.
 start.sh          Same thing for terminal / Mac / Linux.
+                  (Both open the browser with a per-launch ?v= — see the
+                  cache note in Stack above.)
 Check Setup.bat   Reports what the launcher can see. For diagnosing setup.
 BUILD_EXE.bat     Run once on Windows to produce the standalone .exe. Rebuilds
                   the frontend first if Node is present; uses the committed
