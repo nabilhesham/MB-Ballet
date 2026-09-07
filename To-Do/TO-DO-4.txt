@@ -1,0 +1,14 @@
+client view:
+1- in edit plan add the ability to change class with search input for the classes list and if choose another class from the list then the list of the sessions to choose from will be changed based on the class chosen.
+2- add search input for the classes in the add plan.
+3- in the plan if edit plan end date make sure in reflects in the QR card because when changing the end on and reissue the card the card valid date is not changing.
+4- i have a bug when had a client with 0 quota and i changed the end on date in the plan when i check in this client it get me unknown card as if this card not in the database of the plans whether the manual change or the automatic last session date.
+5- add the ability to delete plan for ever and the client will be removed from the upcoming session related to this plan.
+6- when edit the plan automatically reissue the QR code card
+7- in edit plan i need the ability to  change the class even if the user already checked-in in sessions related to this class or attended sessions in the old class and when changing the class will change the list of the upcoming sessions related to this class and leave the already attended in touched as like when changing the sessions in this plan to disabled the change of the attended sessions so the only list will change is the upcoming sessions related to this class.
+
+reception view:
+1- display the notes of the client and the notes of the plan related to the plan checked in when the client check in.
+
+session view:
+1- remove add student from the session view only so we can add the client to the session from the client view only .
