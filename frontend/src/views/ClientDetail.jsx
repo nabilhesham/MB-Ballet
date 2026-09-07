@@ -245,6 +245,13 @@ export default function ClientDetail() {
         </div>
       </div>
 
+      {c.notes && (
+        <div className="box" style={{ marginBottom: 22, whiteSpace: 'pre-wrap' }}>
+          <div className="eyebrow" style={{ margin: '0 0 7px' }}>NOTES</div>
+          <div style={{ color: 'var(--mute)', lineHeight: 1.7 }}>{c.notes}</div>
+        </div>
+      )}
+
       <h2>Plans and cards</h2>
       <div className="sub" style={{ marginBottom: 12 }}>
         A plan is bought for one class and pays only for that class's sessions.
@@ -318,6 +325,12 @@ export default function ClientDetail() {
                 <b>Frozen</b> since {p.frozen_on}
                 {p.frozen_until ? <> — lifts on <b>{p.frozen_until}</b></> : ' — until you lift it'}.
                 Scanning this card is refused and the expiry moves out by the length of the pause.
+              </div>
+            )}
+
+            {p.notes && (
+              <div className="sub" style={{ margin: '14px 0 0', whiteSpace: 'pre-wrap' }}>
+                {p.notes}
               </div>
             )}
 

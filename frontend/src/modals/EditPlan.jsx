@@ -31,6 +31,7 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   // picks once more.
   const [endsTouched, setEndsTouched] = useState(false);
   const [paidOn, setPaidOn] = useState(plan.paid_on || '');
+  const [notes, setNotes] = useState(plan.notes || '');
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
   const [locked, setLocked] = useState([]);
@@ -92,7 +93,7 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         method: 'PUT',
         body: {
           plan: name, sessions_total: Number(need), expires_on: endsOn,
-          paid_on: paidOn || null, session_ids: chosen,
+          paid_on: paidOn || null, notes, session_ids: chosen,
         },
       });
       if (!r.ok) return toast(r.error, 'bad');
@@ -134,6 +135,9 @@ export default function EditPlan({ clientId, plan, onSaved }) {
           <div className="hint">Clear it to mark this plan unpaid again.</div>
         </div>
       </div>
+      <label>NOTES (OPTIONAL)</label>
+      <textarea value={notes} onChange={e => setNotes(e.target.value)}
+                placeholder="About this plan — the client's own notes live on their profile" />
 
       <div className="divider" />
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>

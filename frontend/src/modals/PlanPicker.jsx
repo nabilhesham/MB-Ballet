@@ -30,6 +30,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
   // Blank is a real answer, not a missing one: the plan is unpaid until a
   // date is put here, and reads that way everywhere it is shown.
   const [paidOn, setPaidOn] = useState('');
+  const [notes, setNotes] = useState('');
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
 
@@ -80,7 +81,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       await api(`/clients/${clientId}/plan`, { method: 'POST', body: {
         class_id: classId, plan: name, sessions_total: Number(need),
         price: price === '' ? null : Number(price), starts_on: start, expires_on: endsOn,
-        paid_on: paidOn || null, session_ids: chosen,
+        paid_on: paidOn || null, notes: notes.trim() || null, session_ids: chosen,
       } });
       // Renewing replaces the plan the old card was issued against, and the
       // card prints the session count and end date of the plan it was made
@@ -152,6 +153,9 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
           <div className="hint">Leave blank if they have not paid yet — the plan shows as unpaid.</div>
         </div>
       </div>
+      <label>NOTES (OPTIONAL)</label>
+      <textarea value={notes} onChange={e => setNotes(e.target.value)}
+                placeholder="About this plan — the client's own notes live on their profile" />
 
       <div className="divider" />
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>

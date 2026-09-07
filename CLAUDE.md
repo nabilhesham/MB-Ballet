@@ -429,6 +429,13 @@ system and everything else follows from it:
   blocks a check-in — reception is told, and decides. The printed card
   deliberately omits it: that PNG is a snapshot nothing regenerates, so a
   card printed while unpaid would read UNPAID for the life of the card.
+  `notes` is about *this purchase* — "paid half now, half in October" — and
+  is deliberately a second, separate field from `clients.notes`, which is
+  about the person. Both optional, both shown on the profile: the client's
+  under the KPI row, the plan's on its own card. Editing a plan sends the
+  notes as an ordinary field, so `""` clears it — unlike `paid_on`, which
+  needs `?clear_paid_on=true` because the route drops None before
+  `edit_plan()` ever sees it.
 - **instructor_hours** is one row per instructor per working day, from the
   monthly salary sheet. Pay is `hours x hourly_rate` at read time, never
   stored, so correcting a rate re-prices the month instead of leaving a stale
@@ -536,6 +543,14 @@ wherever it now sits; a Flexibility card still cannot spend Ballet credit, so
 one card per class keeps meaning something. Bookings with no plan behind them
 (older rows, `subscription_id` NULL) fall back to matching on the session's
 class.
+
+**Deleting sessions in bulk keeps the same rule one-at-a-time deletion
+has.** `POST /api/sessions/bulk-delete` refuses any session carrying
+attendance unless `force`, and **names the ones it kept back rather than
+failing the batch** — clearing a term with one taught week in the middle of
+it should remove the other eleven and say why the twelfth stayed. Bookings
+are deleted directly, so like `delete_session` it must refresh the expiry of
+every plan that funded them.
 
 **One session at a time, academy-wide.** A slot that is taken is taken,
 whatever class wants it: `access.slot_conflict()` is the single answer to

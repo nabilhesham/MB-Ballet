@@ -38,12 +38,13 @@ def list_classes(status: str = "active"):
     try:
         active = 0 if status == "archived" else 1
         return rows(conn.execute(
-            "SELECT c.*,"
+            "SELECT c.*, i.name AS instructor_name,"
             "  (SELECT COUNT(*) FROM sessions s WHERE s.class_id=c.id"
             "     AND s.starts_at > ? AND s.status='scheduled') AS upcoming,"
             "  (SELECT COUNT(DISTINCT b.client_id) FROM bookings b"
             "     JOIN sessions s ON s.id=b.session_id WHERE s.class_id=c.id) AS students"
-            " FROM classes c WHERE c.active=? ORDER BY c.name", (db.now(), active)))
+            " FROM classes c LEFT JOIN instructors i ON i.id = c.instructor_id"
+            " WHERE c.active=? ORDER BY c.name", (db.now(), active)))
     finally:
         conn.close()
 

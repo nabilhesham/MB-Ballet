@@ -63,6 +63,11 @@ class StatusIn(BaseModel):
     status: str
 
 
+class BulkDeleteIn(BaseModel):
+    ids: list[int]
+    force: bool = False
+
+
 class MoveIn(BaseModel):
     to_session_id: int
     # Corrections made on the client profile may land on another class's
@@ -282,6 +287,53 @@ def delete_session(sid: int, force: bool = False):
             access.refresh_expiry(conn, sub_id)
         conn.commit()
         return {"ok": True, "released": n}
+    finally:
+        conn.close()
+
+
+@router.post("/api/sessions/bulk-delete")
+def bulk_delete_sessions(body: BulkDeleteIn):
+    """
+    Delete several sessions at once, applying the same rule delete_session
+    applies to one: a session carrying attendance is kept back unless force
+    is set, because losing the record of who turned up is worse than a
+    cluttered timetable.
+
+    Kept-back sessions are named in the response rather than failing the
+    batch — clearing a term with one taught week in the middle of it should
+    remove the other eleven and say why the twelfth stayed.
+    """
+    conn = db.connect()
+    try:
+        deleted, released, blocked = 0, 0, []
+        for sid in body.ids:
+            s = one(conn.execute(
+                "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
+                "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)))
+            if not s:
+                continue
+            held = conn.execute(
+                "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
+                (sid,)).fetchone()["n"]
+            if held and not body.force:
+                blocked.append({**s, "attendance": held})
+                continue
+            n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
+                             (sid,)).fetchone()["n"]
+            # Same bypass of access.unbook() as delete_session, so the plans
+            # these bookings funded need their expiry refreshed by hand.
+            subs = {r["subscription_id"] for r in conn.execute(
+                "SELECT DISTINCT subscription_id FROM bookings"
+                " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
+            conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
+            conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
+            conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+            for sub_id in subs:
+                access.refresh_expiry(conn, sub_id)
+            deleted += 1
+            released += n
+        conn.commit()
+        return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
     finally:
         conn.close()
 

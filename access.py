@@ -207,6 +207,7 @@ def plan_state(conn, sub_id: int) -> dict:
         # the profile, the payment history, the kiosk — reads it from here,
         # so there is one answer rather than four re-derivations.
         "paid_on": sub["paid_on"],
+        "notes": sub["notes"],
         "frozen": bool(sub["frozen_on"]),
         "frozen_on": sub["frozen_on"],
         "frozen_until": sub["frozen_until"],
@@ -765,7 +766,8 @@ def cancel_session(conn, session_id: int) -> dict:
 
 def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
              expires_on: str = None, session_ids: list = None,
-             paid_on: str = None, clear_paid_on: bool = False) -> dict:
+             paid_on: str = None, clear_paid_on: bool = False,
+             notes: str = None) -> dict:
     """
     Change a plan's name, size, sessions or end date after it has been sold.
 
@@ -857,6 +859,11 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
         fields["paid_on"] = None
     elif paid_on is not None:
         fields["paid_on"] = paid_on
+    if notes is not None:
+        # "" is a real value here — it clears the note — so this checks for
+        # None rather than falsiness, unlike paid_on which needs its own flag
+        # because the route drops None before we ever see it.
+        fields["notes"] = notes.strip() or None
     if fields:
         sets = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?",

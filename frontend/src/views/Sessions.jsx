@@ -1,8 +1,10 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { api, useApi } from '../api';
 import { fmtFull, hrs } from '../lib/format';
 import { useModal } from '../components/Modal';
+import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
 import DataTable from '../components/DataTable';
 import { Pill } from '../components/Pill';
@@ -10,8 +12,16 @@ import Empty from '../components/Empty';
 import SessionForm from '../modals/SessionForm';
 import RepeatSessions from '../modals/RepeatSessions';
 
-function sessionColumns() {
+/* The checkbox column relies on DataTable's own onCellClick, which stops the
+   click reaching the row — so ticking a box never also opens the session. */
+function sessionColumns(selected, toggle) {
   return [
+    {
+      label: '', sortable: false, style: { width: 40 }, onCellClick: r => toggle(r.id),
+      cell: r => (
+        <input type="checkbox" readOnly checked={selected.has(r.id)} style={{ width: 'auto' }} />
+      ),
+    },
     { label: 'WHEN', sortValue: r => r.starts_at, cell: r => fmtFull(r.starts_at) },
     {
       label: 'CLASS', sortValue: r => r.class_name,
@@ -44,8 +54,10 @@ export default function Sessions() {
   const now = Math.floor(Date.now() / 1000);
   const { data: list, loading, error, reload } = useApi(`/sessions?start=${now - 21 * 86400}&end=${now + 42 * 86400}`);
   const { open } = useModal();
+  const confirm = useConfirm();
   const toast = useToast();
   const nav = useNavigate();
+  const [selected, setSelected] = useState(() => new Set());
 
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
@@ -64,7 +76,45 @@ export default function Sessions() {
     open(<SessionForm classes={classes} instructors={instructors} onSaved={reload} />);
   };
 
-  const columns = sessionColumns();
+  const toggle = id => setSelected(s => {
+    const n = new Set(s);
+    if (n.has(id)) n.delete(id); else n.add(id);
+    return n;
+  });
+  const selectAll = xs => setSelected(s => new Set([...s, ...xs.map(x => x.id)]));
+
+  const deleteSelected = () => {
+    const ids = [...selected];
+    const withAttendance = list.filter(s => ids.includes(s.id) && s.attended > 0).length;
+    confirm({
+      title: `Delete ${ids.length} session${ids.length === 1 ? '' : 's'}`,
+      message: (
+        <>
+          {ids.length === 1 ? 'This session' : 'These sessions'} and any bookings on
+          {ids.length === 1 ? ' it' : ' them'} will be removed, and the slots go back to the
+          clients' plans as unassigned.
+          {withAttendance > 0 && (
+            <> {withAttendance} of them {withAttendance === 1 ? 'has' : 'have'} attendance
+              recorded and <b>will be kept</b> — cancel {withAttendance === 1 ? 'it' : 'those'} from
+              the session page instead if that is what you want.</>
+          )}
+        </>
+      ),
+      label: 'Delete',
+      onConfirm: async () => {
+        try {
+          const r = await api('/sessions/bulk-delete', { method: 'POST', body: { ids } });
+          setSelected(new Set());
+          const kept = r.blocked.length
+            ? `, ${r.blocked.length} kept (attendance recorded)` : '';
+          toast(`${r.deleted} deleted${kept}`, r.blocked.length ? 'bad' : undefined);
+          reload();
+        } catch (e) { toast(e.message, 'bad'); }
+      },
+    });
+  };
+
+  const columns = sessionColumns(selected, toggle);
 
   return (
     <>
@@ -76,7 +126,22 @@ export default function Sessions() {
         </div>
       </div>
 
-      <h2>Upcoming</h2>
+      {selected.size > 0 && (
+        <div className="warnline row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <span><b>{selected.size}</b> session{selected.size === 1 ? '' : 's'} selected</span>
+          <span className="row tight">
+            <button className="sm" onClick={() => setSelected(new Set())}>Clear</button>
+            <button className="sm danger" onClick={deleteSelected}>Delete selected</button>
+          </span>
+        </div>
+      )}
+
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <h2>Upcoming</h2>
+        {upcoming.length > 0 && (
+          <button className="sm" onClick={() => selectAll(upcoming)}>Select all upcoming</button>
+        )}
+      </div>
       <div className="box pad0 dt-host">
         <DataTable
           rows={upcoming} rowKey={r => r.id} search="Search by class, instructor or status…"
@@ -84,7 +149,12 @@ export default function Sessions() {
         />
       </div>
 
-      <h2>Past three weeks</h2>
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <h2>Past three weeks</h2>
+        {past.length > 0 && (
+          <button className="sm" onClick={() => selectAll(past)}>Select all past</button>
+        )}
+      </div>
       <div className="box pad0 dt-host">
         <DataTable
           rows={past} rowKey={r => r.id} search="Search by class, instructor or status…"
