@@ -109,9 +109,15 @@ ok "Database ready"
 printf "\n  %sStarting on http://127.0.0.1:8000%s\n" "$bold" "$off"
 printf "  %sPress Ctrl+C to stop.%s\n\n" "$dim" "$off"
 
+# The ?v= is a different number every launch, so the browser cannot answer
+# this out of a copy it cached before an upgrade. server.py sends no-store on
+# everything that keeps its name across builds, which is the real fix — this
+# only covers pages a browser cached before that header existed.
+url="http://127.0.0.1:8000/?v=$(date +%s)"
+
 ( sleep 2
-  if command -v xdg-open >/dev/null 2>&1; then xdg-open http://127.0.0.1:8000 >/dev/null 2>&1
-  elif command -v open   >/dev/null 2>&1; then open http://127.0.0.1:8000 >/dev/null 2>&1
+  if command -v xdg-open >/dev/null 2>&1; then xdg-open "$url" >/dev/null 2>&1
+  elif command -v open   >/dev/null 2>&1; then open "$url" >/dev/null 2>&1
   fi ) &
 
 exec "$VPY" server.py

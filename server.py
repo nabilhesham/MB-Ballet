@@ -112,6 +112,47 @@ async def _settle_loop():
         await asyncio.sleep(3600)
 
 
+# ================================================================ caching
+#
+# A replaced build kept showing the old app until someone pressed
+# ctrl-shift-R on every page in turn. Nothing was being cached on purpose:
+# a response with no Cache-Control at all lets the browser invent its own
+# freshness, and the usual heuristic — a tenth of the file's age — means an
+# index.html that has sat on disk for a month is treated as fresh for days.
+# The browser then goes on asking for the hashed bundle that copy names,
+# which it also still holds. Replacing the folder changes nothing it can see.
+#
+# So every response now says what it is. There are only two kinds:
+#
+#   /static/app/assets/*   named by the build with a content hash, so a new
+#                          build is a new URL and this one can never go
+#                          stale. Cached for a year and never revalidated —
+#                          that is the whole point of hashing the names.
+#
+#   everything else        keeps its name across builds — the entry HTML,
+#                          style.css, reception.html, the API, a reissued
+#                          card — so a cached copy is a stale copy. no-store.
+#
+# The cost is one revalidation-free refetch of small files over localhost,
+# which is not measurable. The alternative is a receptionist being shown
+# last month's app with no way to know it.
+HASHED_ASSETS = "/static/app/assets/"
+
+
+@app.middleware("http")
+async def cache_policy(request, call_next):
+    r = await call_next(request)
+    if request.url.path.startswith(HASHED_ASSETS):
+        r.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        # Belt and braces for anything between the browser and here that
+        # predates Cache-Control. Costs two short headers on a local request.
+        r.headers["Pragma"] = "no-cache"
+        r.headers["Expires"] = "0"
+    return r
+
+
 # ================================================================ static
 app.mount("/photos", StaticFiles(directory="photos"), name="photos")
 app.mount("/cards", StaticFiles(directory="cards"), name="cards")
