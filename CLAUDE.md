@@ -648,16 +648,26 @@ whatever the new count is.
 
 **It can also move the plan to another class** — `class_id`, the searchable
 class list at the top of the modal. That is a correction of "this was written
-down against the wrong class", not a way to reuse a plan, so it takes the
-plan's sessions with it: the new class's dates are picked in the same save
-(`session_ids` is required, the same contract as changing the count), the old
-class's are dropped, and the card for the class it left is revoked unless
-another live plan still stands behind that class. Two refusals keep it
-honest — a plan with any attended session cannot change class at all (that
-history *is* the old class), and it cannot move onto a class where the client
-already has a live plan, since one plan per class per client is what makes
-`active_plan()` answer at all. The modal shows the class locked, with the
-reason, rather than offering a move the server would refuse.
+down against the wrong class", so it takes the plan's slots with it: the new
+class's dates are picked in the same save (`session_ids` is required, the same
+contract as changing the count), the old class's *upcoming* ones are dropped,
+and the card for the class it left is revoked unless another live plan still
+stands behind that class.
+
+**What a move never touches is attendance.** A session already present or
+absent stays on the plan exactly as it was, still on its own date in the
+class it happened in — protected by the same rule that stops any edit
+dropping one, so only what is still ahead of the client changes. A client
+who attended four Grade 6 sessions before the plan was corrected keeps those
+four. This works because a card proves the booking's *plan's* class, not the
+session's (see `_decide()`), which is the same property the cross-class
+corrections rest on: the new class's card finds those older slots too. The
+modal keeps them listed, locked and ticked across the class change, and says
+so.
+
+The one refusal left is a client who already has a live plan in the class it
+is moving to — one plan per class per client is what makes `active_plan()`
+answer at all, so renew that one rather than ending up with two.
 
 **Saving an edit reissues the card.** The card prints the end date and the
 session count of the plan it was made for, and nothing regenerates it — so

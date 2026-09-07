@@ -808,15 +808,24 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     "erase it" — the same reason edit_session() carries clear_instructor.
 
     Moving a plan to another class is a correction of "this was written down
-    against the wrong class", not a way to reuse a plan the client has
-    already spent — so it is refused once any of its sessions has been
-    attended, and refused if the client already has a live plan in the class
-    it is moving to (renew that one instead of ending up with two). It
-    carries its own sessions with it: the new class's sessions have to be
-    picked in the same call, exactly as changing the count does, and the old
-    class's dates are dropped. The card for the class it left proves a plan
-    that is no longer there, so it is revoked unless another live plan holds
-    that class up — issuing the new class's card is the caller's next step.
+    against the wrong class". It carries its slots with it: the new class's
+    sessions have to be picked in the same call, exactly as changing the
+    count does, and the old class's *upcoming* dates are dropped.
+
+    What it never touches is attendance. A session already present or absent
+    stays on the plan exactly as it was, still pointing at the old class's
+    date, protected by the same rule that stops any edit dropping one — so a
+    client who attended four Grade 6 sessions before the plan was corrected
+    keeps those four, and only what is still ahead of them moves. The plan's
+    own class is what a card proves, not the session's (see _decide()), so
+    the new class's card finds those older slots too.
+
+    The one refusal left is a client who already has a live plan in the class
+    it is moving to: one plan per class per client is what makes
+    active_plan() answer at all, so renew that one instead of ending up with
+    two. The card for the class it left proves a plan that is no longer
+    there, so it is revoked unless another live plan holds that class up —
+    issuing the new class's card is the caller's next step.
     """
     sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
     if sub is None:
@@ -852,11 +861,6 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
 
     total = sessions_total if sessions_total is not None else sub["sessions_total"]
     target_class = class_id if moving else sub["class_id"]
-
-    if moving and attended_ids:
-        return {"ok": False,
-                "error": f"{len(attended_ids)} of this plan's sessions have already been"
-                         " attended — a plan cannot change class once it has been used"}
 
     if session_ids is not None:
         if len(set(session_ids)) != len(session_ids):

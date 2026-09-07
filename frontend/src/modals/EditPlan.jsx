@@ -19,10 +19,11 @@ import SessionPickList from './SessionPickList';
  * shown locked, not offered for un-ticking.
  *
  * Changing the class is a correction of "this was written down against the
- * wrong one", so it takes the plan's sessions with it: the old class's dates
- * are dropped and the new class's are picked here, in the same save. Once a
- * session on the plan has been attended that correction is no longer honest
- * and the class field is shown locked instead — the server refuses it too.
+ * wrong one", so it takes the plan's slots with it: the old class's upcoming
+ * dates are dropped and the new class's are picked here, in the same save.
+ * Attendance is never moved — a session already present or absent stays on
+ * the plan, locked, still on its own date in the class it happened in, so
+ * only what is still ahead of the client changes.
  */
 export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   const { close } = useModal();
@@ -42,9 +43,11 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
   const [locked, setLocked] = useState([]);
-  // The plan's own already-assigned sessions, kept aside so switching back to
-  // the class it started in restores them rather than losing them to a
-  // /sessions call that (rightly) does not offer sessions already booked.
+  // The plan's own already-assigned sessions, kept aside for two jobs:
+  // switching back to the class it started in restores them (a /sessions
+  // call rightly does not offer dates the client is already booked into),
+  // and the attended ones travel with the plan into whatever class it moves
+  // to, since they are history and never move.
   const [own, setOwn] = useState([]);
 
   useEffect(() => {
@@ -75,11 +78,13 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
     if (id === classId) return;
     setClassId(id);
     const available = await fetchPlanSessions(id, clientId);
+    // Moving class re-picks only what is still ahead. The attended sessions
+    // come along unchanged — they stay listed, stay locked and stay ticked,
+    // which is also what the server requires: no edit may drop one.
     const back = id === plan.class_id;
-    setSessions(back
-      ? [...own, ...available].sort((a, b) => a.starts_at - b.starts_at)
-      : available);
-    setChosen(back ? own.map(r => r.id) : []);
+    const keep = back ? own : own.filter(r => locked.includes(r.id));
+    setSessions([...keep, ...available].sort((a, b) => a.starts_at - b.starts_at));
+    setChosen(keep.map(r => r.id));
   };
 
   const onNeedChange = e => {
@@ -140,7 +145,8 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   if (!loaded) return <Empty>Loading…</Empty>;
 
   const canSave = chosen.length === need && need > 0;
-  const movable = classes.length > 1 && !locked.length;
+  const movable = classes.length > 1;
+  const moved = classId !== plan.class_id;
   const k = classes.find(x => x.id === classId);
   const className = k ? k.name : plan.class_name;
 
@@ -150,10 +156,10 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
       <div className="mh">
         A plan is bought for one class and pays only for that class's sessions.
         {movable
-          ? ' Moving it to another class brings its sessions with it — the old'
-            + " class's dates are dropped and its card is revoked."
-          : ' Its class is fixed once a session on it has been attended —'
-            + ' renew instead to move the client to a different class.'}
+          ? ' Moving it to another class re-picks the dates still ahead and revokes'
+            + ' the old class\'s card. Sessions already attended stay exactly as they'
+            + ' are, on the day they happened.'
+          : ' There is only one class to buy for.'}
       </div>
 
       <label>CLASS</label>
@@ -164,14 +170,19 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
             <div className="pickrow disabled">
               <span className="dot" style={{ background: plan.class_colour }} />
               <span className="pk-class">{plan.class_name}</span>
-              <span className="pk-meta">
-                {locked.length
-                  ? `${locked.length} session${locked.length === 1 ? '' : 's'} already attended`
-                  : 'the only class'}
-              </span>
+              <span className="pk-meta">the only class</span>
             </div>
           </div>
         )}
+      {moved && locked.length > 0 && (
+        <div className="hint" style={{ marginTop: 8 }}>
+          {locked.length === 1
+            ? `One attended session in ${plan.class_name} stays on this plan, on the day it happened.`
+            : `${locked.length} attended sessions in ${plan.class_name} stay on this plan, `
+              + 'on the days they happened.'}
+          {' '}Moving the plan does not rewrite them — only the dates still ahead change.
+        </div>
+      )}
 
       <div className="fieldrow">
         <div><label>PLAN NAME</label><input value={name} onChange={e => setName(e.target.value)} /></div>
@@ -204,7 +215,8 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>
         Only {className || 'this class'}'s sessions are offered, including the last three
-        weeks. Sessions already attended are locked and always count toward the total.
+        weeks. Sessions already attended are locked and always count toward the total
+        {moved ? ', including the ones from the class this plan is moving out of' : ''}.
       </div>
       {chosen.length !== need && (
         <div className="warnline" style={{ margin: '0 0 10px' }}>
