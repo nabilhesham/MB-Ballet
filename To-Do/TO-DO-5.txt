@@ -1,0 +1,2 @@
+the app itself:
+1- when starting the app from any of the executable or command or the build versions whether windows or mac we need to make hard reset of the cache in the browser before opening the app in the browser automatically . because when i am replace the old built version with the new version i am still seeing the old version and i had to make hard reset in the browser to reflect the new changes in the new pages for each page and i don't want that . what i want is when executing the build version or from command just reset the browser cache for the app
