@@ -1,105 +1,90 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api';
-import { fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
-import SessionPickList from './SessionPickList';
+import Empty from '../components/Empty';
+import SessionPickTable from './SessionPickTable';
 
 /**
- * Book a client into an upcoming session of a class they already hold a plan
- * in — spends a slot the same way a scan at reception does. Only classes
- * with an unassigned slot are offered (the caller filters `classesEnrolled`
- * before opening this, same as app.js's addClientSession()).
+ * Give one of a plan's unused slots a date.
+ *
+ * Two separate choices, and keeping them separate is the point: the plan
+ * decides *who pays*, and it must be a plan with a slot still free; the
+ * session decides *when they come*, and that may be any class. So a client
+ * with a spare Ballet slot can be put into a Flexibility session without
+ * buying a second plan, and their Ballet card still checks them in.
+ *
+ * Selling a plan is not like this — PlanPicker only ever offers its own
+ * class's sessions. This is a correction, not a sale.
  */
 export default function AddSessionToPlan({ clientId, classesEnrolled, onSaved }) {
   const { close } = useModal();
   const toast = useToast();
 
-  const [classId, setClassId] = useState(classesEnrolled[0].class_id);
-  const need = classesEnrolled.find(k => k.class_id === classId)?.unassigned || 0;
-  const [sessions, setSessions] = useState([]);
-  const [chosen, setChosen] = useState([]);
+  const [planId, setPlanId] = useState(classesEnrolled[0].plan_id);
+  const plan = classesEnrolled.find(k => k.plan_id === planId);
+  const need = plan?.unassigned || 0;
+  const [sessions, setSessions] = useState(null);
+  const [chosen, setChosen] = useState(null);
   const [saving, setSaving] = useState(false);
 
-  const load = async cid => {
-    setSessions(await fetchPlanSessions(cid, clientId));
-    setChosen([]);
-  };
-
-  useEffect(() => { load(classId); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
-
-  const onClassChange = e => {
-    const id = Number(e.target.value);
-    setClassId(id);
-    load(id);
-  };
-
-  const toggle = sid => setChosen(c => {
-    if (c.includes(sid)) return c.filter(x => x !== sid);
-    if (c.length >= need) {
-      toast(`Only ${need} unassigned session${need === 1 ? '' : 's'} left on this plan — untick one first`, 'bad');
-      return c;
-    }
-    return [...c, sid];
-  });
+  useEffect(() => {
+    (async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&available_for=${clientId}`);
+      setSessions(list.filter(s => s.status !== 'cancelled'));
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const save = async () => {
-    if (!chosen.length) return;
+    if (!chosen) return toast('Pick a session', 'bad');
     setSaving(true);
-    const results = await Promise.allSettled(
-      chosen.map(sid => api(`/sessions/${sid}/book`, { method: 'POST', body: { client_id: clientId } })),
-    );
-    const fail = results.filter(r => r.status === 'rejected');
-    const ok = results.length - fail.length;
-    if (!fail.length) {
-      close(); toast(`Added ${ok} session${ok === 1 ? '' : 's'}`); onSaved();
-    } else if (ok) {
-      close(); toast(`Added ${ok}, ${fail.length} failed`, 'bad'); onSaved();
-    } else {
-      toast(fail[0].reason?.message || 'Could not add session', 'bad');
-      setSaving(false);
-    }
+    try {
+      const r = await api(`/sessions/${chosen}/book`, {
+        method: 'POST',
+        body: { client_id: clientId, subscription_id: planId, allow_other_class: true },
+      });
+      if (!r.ok) { setSaving(false); return toast(r.error, 'bad'); }
+      close();
+      toast('Session added');
+      return onSaved();
+    } catch (e) { setSaving(false); return toast(e.message, 'bad'); }
   };
 
   return (
     <>
       <h3>Add a session</h3>
       <div className="mh">
-        Only a class with an unassigned slot on its plan is offered —
-        booking one spends that slot, the same as a scan.
+        The plan pays for the slot; the session can be any class. Their card still
+        checks them in, because it proves the plan rather than the class on the day.
       </div>
 
-      {classesEnrolled.length > 1 && (
-        <>
-          <label>CLASS</label>
-          <select value={classId} onChange={onClassChange}>
-            {classesEnrolled.map(k => (
-              <option key={k.class_id} value={k.class_id}>{k.class_name} — {k.unassigned} unassigned</option>
-            ))}
-          </select>
-        </>
-      )}
-
-      <div
-        className="row"
-        style={{
-          justifyContent: 'space-between', alignItems: 'baseline',
-          marginTop: classesEnrolled.length > 1 ? 14 : 0,
-        }}
-      >
-        <b style={{ fontSize: 14 }}>Choose the session(s)</b>
-        <span className={'pill ' + (chosen.length ? 'ok' : 'warn')}>{chosen.length} of {need} chosen</span>
-      </div>
-      <div className="sub" style={{ margin: '6px 0 10px' }}>
+      <label>PAID FROM</label>
+      <select value={planId} onChange={e => setPlanId(Number(e.target.value))}>
+        {classesEnrolled.map(k => (
+          <option key={k.plan_id} value={k.plan_id}>
+            {k.class_name} — {k.unassigned} slot{k.unassigned === 1 ? '' : 's'} free
+          </option>
+        ))}
+      </select>
+      <div className="hint" style={{ marginBottom: 12 }}>
         {need} unassigned session{need === 1 ? '' : 's'} left on this plan.
       </div>
 
-      <SessionPickList sessions={sessions} chosen={chosen} onToggle={toggle} />
+      {sessions === null
+        ? <Empty>Loading…</Empty>
+        : (
+          <SessionPickTable
+            sessions={sessions} chosenId={chosen} onPick={setChosen}
+            emptyText="No sessions they are not already booked into."
+          />
+        )}
 
       <div className="acts">
         <button onClick={close}>Cancel</button>
-        <button className="pri" disabled={saving || chosen.length === 0} onClick={save}>Add</button>
+        <button className="pri" disabled={!chosen || saving} onClick={save}>Add</button>
       </div>
     </>
   );

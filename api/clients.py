@@ -1,5 +1,6 @@
 """/api/clients/* — client profiles, their plans and cards."""
 
+import glob
 import os
 import shutil
 from datetime import date
@@ -43,6 +44,8 @@ class PlanIn(BaseModel):
     # The day the money arrived. Blank is a real answer — the plan is unpaid,
     # and shows as such until someone edits a date in.
     paid_on: Optional[str] = None
+    # About this purchase, not about the person — clients.notes covers that.
+    notes: Optional[str] = None
     session_ids: list[int] = []
 
 
@@ -217,7 +220,17 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "use jpg, png or webp")
-    path = f"photos/client_{cid:05d}{ext}"
+    # A fresh filename per upload. Writing back to the same path meant the
+    # browser kept serving the cached old picture after a re-upload, so a new
+    # photo looked like it had not saved at all — reloading the profile did
+    # not help, because the URL had not changed. The previous files are
+    # removed so the folder does not fill up with every photo ever taken.
+    path = f"photos/client_{cid:05d}_{db.now()}{ext}"
+    for old in glob.glob(f"photos/client_{cid:05d}*"):
+        try:
+            os.remove(old)
+        except OSError:
+            pass
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     conn = db.connect()
@@ -282,9 +295,10 @@ def add_plan(cid: int, body: PlanIn):
         expires = body.expires_on or access.last_of_sessions(conn, body.session_ids) or starts
         cur = conn.execute(
             "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
-            " starts_on, expires_on, paid_on, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            " starts_on, expires_on, paid_on, notes, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (cid, body.class_id, body.plan, body.sessions_total, body.price, starts,
-             expires, body.paid_on or None, db.now()))
+             expires, body.paid_on or None, (body.notes or "").strip() or None, db.now()))
         sub_id = cur.lastrowid
         for sid in body.session_ids:
             s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()

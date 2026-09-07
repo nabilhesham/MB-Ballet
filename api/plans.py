@@ -26,6 +26,7 @@ class PlanEdit(BaseModel):
     expires_on: Optional[str] = None
     session_ids: Optional[list[int]] = None
     paid_on: Optional[str] = None
+    notes: Optional[str] = None
 
 
 # ---------------------------------------------------------------- routes

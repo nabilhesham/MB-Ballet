@@ -51,6 +51,11 @@ class RepeatIn(BaseModel):
 
 class BookIn(BaseModel):
     client_id: int
+    # Naming the plan is what lets a session of another class be booked: with
+    # no plan in that session's class there is nothing for book() to resolve
+    # on its own. Only the client profile's corrections send these two.
+    subscription_id: Optional[int] = None
+    allow_other_class: bool = False
 
 
 class StatusIn(BaseModel):
@@ -58,8 +63,17 @@ class StatusIn(BaseModel):
     status: str
 
 
+class BulkDeleteIn(BaseModel):
+    ids: list[int]
+    force: bool = False
+
+
 class MoveIn(BaseModel):
     to_session_id: int
+    # Corrections made on the client profile may land on another class's
+    # session; the booking keeps the plan that paid for it either way.
+    allow_other_class: bool = False
+    status: Optional[str] = None
 
 
 # ---------------------------------------------------------------- routes
@@ -277,6 +291,53 @@ def delete_session(sid: int, force: bool = False):
         conn.close()
 
 
+@router.post("/api/sessions/bulk-delete")
+def bulk_delete_sessions(body: BulkDeleteIn):
+    """
+    Delete several sessions at once, applying the same rule delete_session
+    applies to one: a session carrying attendance is kept back unless force
+    is set, because losing the record of who turned up is worse than a
+    cluttered timetable.
+
+    Kept-back sessions are named in the response rather than failing the
+    batch — clearing a term with one taught week in the middle of it should
+    remove the other eleven and say why the twelfth stayed.
+    """
+    conn = db.connect()
+    try:
+        deleted, released, blocked = 0, 0, []
+        for sid in body.ids:
+            s = one(conn.execute(
+                "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
+                "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)))
+            if not s:
+                continue
+            held = conn.execute(
+                "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
+                (sid,)).fetchone()["n"]
+            if held and not body.force:
+                blocked.append({**s, "attendance": held})
+                continue
+            n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
+                             (sid,)).fetchone()["n"]
+            # Same bypass of access.unbook() as delete_session, so the plans
+            # these bookings funded need their expiry refreshed by hand.
+            subs = {r["subscription_id"] for r in conn.execute(
+                "SELECT DISTINCT subscription_id FROM bookings"
+                " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
+            conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
+            conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
+            conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+            for sub_id in subs:
+                access.refresh_expiry(conn, sub_id)
+            deleted += 1
+            released += n
+        conn.commit()
+        return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
+    finally:
+        conn.close()
+
+
 @router.get("/api/sessions/{sid}/bookable")
 def bookable_clients(sid: int):
     """
@@ -315,7 +376,9 @@ def bookable_clients(sid: int):
 def book_into_session(sid: int, body: BookIn):
     conn = db.connect()
     try:
-        r = access.book(conn, body.client_id, sid)
+        r = access.book(conn, body.client_id, sid,
+                        subscription_id=body.subscription_id,
+                        allow_other_class=body.allow_other_class)
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
         conn.close()
@@ -345,7 +408,9 @@ def set_attend_status(sid: int, body: StatusIn):
 def move_booking(cid: int, from_sid: int, body: MoveIn):
     conn = db.connect()
     try:
-        r = access.move_booking(conn, cid, from_sid, body.to_session_id)
+        r = access.move_booking(conn, cid, from_sid, body.to_session_id,
+                                allow_other_class=body.allow_other_class,
+                                status=body.status)
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
         conn.close()

@@ -79,9 +79,6 @@ export default function Dashboard() {
           </div>
           <div className="n">
             {s.mo_revenue.toLocaleString()} from every plan sold this month
-            {s.mo_unpriced
-              ? <> · <span style={{ color: 'var(--warn)' }}>{s.mo_unpriced} with no price on the sheet</span></>
-              : ''}
           </div>
         </div>
       </div>

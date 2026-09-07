@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     -- "when", where payment_note and price answer "what the sheet said".
     -- Nullable on purpose: a plan sold before it is paid for is normal.
     paid_on         TEXT,
+    -- Anything reception wants remembered about this particular plan --
+    -- "paid half now, half in October", "sister's card". Separate from
+    -- clients.notes, which is about the person rather than the purchase.
+    notes           TEXT,
     -- The ballet sheet sells months; the flexibility sheet sells session packs.
     months          INTEGER,
     -- "sunday - thursday", "saturday" -- which weekdays this pack is used on.
@@ -272,7 +276,8 @@ def migrate(conn) -> None:
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
                           ("class_id", "INTEGER"),
                           ("payment_note", "TEXT"), ("months", "INTEGER"),
-                          ("days_pattern", "TEXT"), ("paid_on", "TEXT")],
+                          ("days_pattern", "TEXT"), ("paid_on", "TEXT"),
+                          ("notes", "TEXT")],
     }
     for table, columns in add.items():
         try:

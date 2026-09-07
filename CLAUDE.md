@@ -111,7 +111,7 @@ deletes and never touches data.
 ```
 db.py             Schema + connection helpers. All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
-access.py         Access rules: verify / check_in / undo / manual_check_in.
+access.py         Access rules: verify / check_in / undo / swap_and_check_in.
 cards.py          Member card PNG generation.
 server.py         FastAPI app, paths, startup, static mounts. Thin — routes
                   live in api/, business rules live in access.py.
@@ -172,7 +172,11 @@ cleanup.sh        Removes leftovers from earlier versions.
 sheets/           The academy's own workbooks — the seed reads these.
                   Real names and numbers, so not in git. See sheets/README.md.
 static/scanner-test.html   Scanner timing diagnostic, for tuning GAP_MS.
-cards/  photos/   Generated assets. Not in git.
+cards/  photos/   Generated assets. Not in git. A photo is written with a
+                  timestamp in its name (`client_00060_1788711822.png`) and
+                  the previous one deleted: a stable filename meant the
+                  browser kept serving the cached old picture, so a
+                  re-uploaded photo looked like it had not saved.
 academy.db        The database. Not in git. This IS the business record.
 .env              ENTRY_SECRET. Not in git, ever.
 ```
@@ -425,23 +429,43 @@ system and everything else follows from it:
   blocks a check-in — reception is told, and decides. The printed card
   deliberately omits it: that PNG is a snapshot nothing regenerates, so a
   card printed while unpaid would read UNPAID for the life of the card.
+  `notes` is about *this purchase* — "paid half now, half in October" — and
+  is deliberately a second, separate field from `clients.notes`, which is
+  about the person. Both optional, both shown on the profile: the client's
+  under the KPI row, the plan's on its own card. Editing a plan sends the
+  notes as an ordinary field, so `""` clears it — unlike `paid_on`, which
+  needs `?clear_paid_on=true` because the route drops None before
+  `edit_plan()` ever sees it.
 - **instructor_hours** is one row per instructor per working day, from the
   monthly salary sheet. Pay is `hours x hourly_rate` at read time, never
   stored, so correcting a rate re-prices the month instead of leaving a stale
   total behind. It is what payroll is actually paid on; "sessions taught" is
   the app's own count, and the instructor page shows both because a gap
   between them is worth seeing.
-- **instructor_hour_adjustments** is a manual correction, layered on top of
-  `instructor_hours` without ever touching it. Reception's "edit the hours"
-  button on the instructor page shows one editable total for the period being
-  viewed; under that, `access.adjust_logged_hours()` writes one new dated
-  delta row rather than rewriting or deleting a real salary-sheet row, so what
-  the sheet actually said stays visible. The row is dated to the *end* of the
-  period being edited, so it stays in scope whenever that period — or any
-  wider range containing it — is looked at again. `access.logged_hours()` is
-  what sums both tables together into the figure shown; "days worked" counts
-  only real `instructor_hours` rows, since a correction is not a claim of an
-  extra day worked.
+- **instructor_hour_adjustments** corrects **hours taught** — the timetable
+  figure, not the salary sheet. An instructor who stayed for an extra
+  rehearsal taught it whether or not a session row says so, and pay follows
+  the corrected number (`totals.earned`). `access.taught_hours()` returns
+  `scheduled` and `adjustment` separately as well as their sum, so the screen
+  can show what was corrected rather than a total that silently disagrees
+  with the sessions listed under it.
+
+  **Only one of the two hour figures may carry the corrections**, or a single
+  correction is counted twice; `access.logged_hours()` is therefore pure
+  salary sheet now, and its card is read-only. (Adjustments used to be summed
+  into it instead — any rows written before that change now move to hours
+  taught.)
+
+  **A correction belongs to one day.** `access.adjust_taught_hours()` takes a
+  date, not a range: dated that way the deltas accumulate into a real daily
+  history, and any wider range picks them up by summing, where a
+  month-long correction would leave no trace of which day the extra hour
+  was. That is why the Edit button appears only when the instructor page is
+  showing a single day, and why the page defaults to today. It writes a new
+  dated delta row rather than editing a session's duration or a salary-sheet
+  row, so the timetable and the sheet still say what they always said.
+  "Days worked" counts only real `instructor_hours` rows, since a correction
+  is not a claim of an extra day worked.
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
 
@@ -501,6 +525,32 @@ nobody paid for, in a class the client was never enrolled in.
 time so the add-student picker only ever offers people the endpoint would
 accept, and shows how many free slots each has. The rule lives in `book()`;
 the picker holds no copy of it.
+
+**Selling is class-locked; correcting afterwards is not.** The rule above
+governs *buying* — `add_plan()`, `edit_plan()` and the plan pickers only ever
+offer the plan's own class. But once a slot is sold, the three corrections on
+the client profile — move an upcoming session, add a session to a plan, and
+"they were actually present at this one" — may point that slot at **any**
+class's session, by passing `allow_other_class` to `book()` or
+`move_booking()`. The booking keeps the plan that paid for it; only the date
+changes. This is what records "she missed Ballet on Tuesday and came to
+Flexibility on Wednesday instead" without selling a second plan.
+
+The card still works for it, because **the scan matches the booking's
+*plan's* class, not the session's** — see `_decide()`, which joins
+`subscriptions` for exactly this. A Ballet card finds the Ballet-funded slot
+wherever it now sits; a Flexibility card still cannot spend Ballet credit, so
+one card per class keeps meaning something. Bookings with no plan behind them
+(older rows, `subscription_id` NULL) fall back to matching on the session's
+class.
+
+**Deleting sessions in bulk keeps the same rule one-at-a-time deletion
+has.** `POST /api/sessions/bulk-delete` refuses any session carrying
+attendance unless `force`, and **names the ones it kept back rather than
+failing the batch** — clearing a term with one taught week in the middle of
+it should remove the other eleven and say why the twelfth stayed. Bookings
+are deleted directly, so like `delete_session` it must refresh the expiry of
+every plan that funded them.
 
 **One session at a time, academy-wide.** A slot that is taken is taken,
 whatever class wants it: `access.slot_conflict()` is the single answer to
@@ -825,6 +875,27 @@ works from the manual-entry box and from a focused button, not just from the
 bare page. It was previously unreachable in Number mode — which the
 clear-by-hand rule now depends on.
 
+**Two refusals offer a way out instead of only saying no.** They carry
+`code="no_session_today"` (nothing of theirs runs today) and
+`code="absent_today"` (their session has been and gone and they were swept
+absent, but they have turned up anyway). The code is the only thing the
+kiosk branches on, and either one puts a **MANUAL CHECK-IN** button on the
+screen; every other refusal gets none, because a revoked card or a frozen
+plan is not fixed by moving a session. Pressing
+it shows two lists: every session running today across all classes, and every
+slot of the client's own that could be given up — a date still ahead, or one
+they were already marked absent for, each tagged. Pick one from each and they
+are checked in to today's session. The session they just missed appears in
+the second list as a slot to spend, never in the first as somewhere to go.
+
+`access.swap_and_check_in()` is deliberately built out of the ordinary
+pieces: `move_booking(allow_other_class=True)` to change the date, then the
+same `_log()`/`check_in()` pair a scan goes through. That is what makes the
+60-second Undo work here exactly as it does for a scan, and keeps the day's
+count honest. The slot keeps the plan that paid for it, so the card still
+works afterwards. **Esc at any point checks nobody in** — the swap only
+happens on the confirm button.
+
 **"Next class" is scoped to the card being held.** `_client_payload()` takes
 the credential's `class_id` and filters the lookup by it. A client taking
 Ballet and Flexibility was shown whichever came first across both, so the
@@ -834,10 +905,14 @@ everything.
 
 ### One card per class
 
-`credentials.class_id` decides which session a scan looks for. A client holding
-a Ballet card and a Flexibility card gets the right session either way, and
+`credentials.class_id` decides which *plan* a scan spends. A client holding a
+Ballet card and a Flexibility card gets the right session either way, and
 presenting the wrong card for today returns "No session booked today for
 Flexibility" rather than silently checking them into the other class.
+
+Note it is the plan's class, not the session's: a slot moved to another
+class's session (see the correction rule above) is still found by the card of
+the plan that paid for it.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
 the filename so two cards coexist. `cards.card_path()` derives that name and is
@@ -882,9 +957,12 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       current model.
 - [ ] Ballet prices. The ballet roster's PAID column only ever says "yes", so
       those plans import unpriced and the month's revenue figure counts
-      flexibility alone. The dashboard says how many plans carry no price
-      rather than quietly reporting them as zero. Either the sheet starts
-      recording the amount or the fee goes on the class.
+      flexibility alone. `month_intake()` still returns `mo_unpriced` — the
+      count of plans with no price — but the dashboard no longer shows it,
+      so that figure is now reported nowhere and the month's revenue reads
+      as a clean total while half its plans carry no amount at all. Either
+      the sheet starts recording the amount, or the fee goes on the class,
+      or the count comes back onto the screen.
 - [ ] Rotating phone tokens: `access.py` has the `kind='phone'` path with a 90s
       freshness window, but nothing generates them client-side.
 - [ ] `settle_past_sessions` runs in-process. If the laptop is off overnight it
