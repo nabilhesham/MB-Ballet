@@ -147,14 +147,21 @@ def get_client(cid: int):
             for p in c["active_plans"] if p["class_id"]]
 
         c["cards"] = rows(conn.execute(
-            "SELECT cr.id, cr.token, cr.class_id, cl.name AS class_name, cl.colour"
+            "SELECT cr.id, cr.token, cr.class_id, cr.issued_at,"
+            "       cl.name AS class_name, cl.colour"
             "  FROM credentials cr LEFT JOIN classes cl ON cl.id = cr.class_id"
             " WHERE cr.client_id=? AND cr.revoked_at IS NULL"
             " ORDER BY cl.name", (cid,)))
         # The PNG the card was written to, so the profile can offer it for
         # download and print without guessing at the filename in the browser.
+        #
+        # ?v=issued_at is not decoration. Reissuing overwrites the same path,
+        # so the browser kept serving the card it had already cached and an
+        # edited end date never appeared on it — the file was right and the
+        # picture was old. The stamp changes on every issue, which is exactly
+        # when the image changes.
         for cd in c["cards"]:
-            cd["card_url"] = "/" + cards.card_path(cid, cd["class_name"])
+            cd["card_url"] = f"/{cards.card_path(cid, cd['class_name'])}?v={cd['issued_at']}"
 
         now = db.now()
         c["upcoming"] = rows(conn.execute(
@@ -358,7 +365,7 @@ def issue_card(cid: int, body: CardIn):
         path = cards.build_card(cid, c["name_en"], token, state["sessions_total"],
                                 state["expires_on"],
                                 class_name=klass["name"], colour=klass["colour"])
-        return {"token": token, "card_url": "/" + path,
+        return {"token": token, "card_url": f"/{path}?v={db.now()}",
                 "revoked": old["token"] if old else None}
     finally:
         conn.close()

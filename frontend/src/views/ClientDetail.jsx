@@ -118,8 +118,45 @@ export default function ClientDetail() {
     open(<AssignRemaining clientId={c.id} plan={plan} onSaved={reload} />, { wide: true });
   };
 
-  const openEditPlan = plan => {
-    open(<EditPlan clientId={c.id} plan={plan} onSaved={reload} />, { wide: true });
+  // The class list comes with it: editing a plan may move it to another
+  // class (a correction of one written down against the wrong one), and the
+  // picker searches that list rather than making reception read a dropdown.
+  const openEditPlan = async plan => {
+    const classes = await api('/classes');
+    open(<EditPlan clientId={c.id} plan={plan} classes={classes} onSaved={reload} />, { wide: true });
+  };
+
+  // The one deletion in the app that can take attendance with it: a plan's
+  // bookings *are* its attendance, so there is no way to keep the record and
+  // remove the plan. The dialog therefore says what goes before it goes,
+  // counted from the plan on screen — archiving (Freeze/Renew) is the
+  // alternative and is what almost every case wants instead.
+  const deletePlan = plan => {
+    const upcoming = Math.max(0, plan.assigned - plan.used);
+    return confirm({
+      title: `Delete this ${plan.class_name || 'plan'} plan for good`,
+      message: (
+        <>
+          <b>{plan.plan}</b> and every booking it paid for are removed — this cannot
+          be undone.{' '}
+          {upcoming
+            ? `${c.name_en} comes off ${upcoming} upcoming session${upcoming === 1 ? '' : 's'}. `
+            : ''}
+          {plan.used
+            ? `${plan.used} attended session${plan.used === 1 ? '' : 's'} on it `
+              + `${plan.used === 1 ? 'is' : 'are'} erased from the record too. `
+            : ''}
+          The card for this class stops working unless another plan in it is still live.
+        </>
+      ),
+      label: 'Delete for good',
+      onConfirm: async () => {
+        const r = await api(`/plans/${plan.id}`, { method: 'DELETE' });
+        toast(`Plan deleted — ${r.bookings} booking${r.bookings === 1 ? '' : 's'} removed`
+          + (r.cards_revoked ? ', card revoked' : ''));
+        reload();
+      },
+    });
   };
 
   const openAddSession = () => {
@@ -285,6 +322,7 @@ export default function ClientDetail() {
                     ? <button className="sm" onClick={() => openFreeze(p)}>Freeze</button>
                     : <button className="sm" disabled title={p.freeze_blocked_because}>Freeze</button>)}
                 <button className="sm" onClick={() => openNewPlan(p.class_id)}>Renew</button>
+                <button className="sm danger" onClick={() => deletePlan(p)}>Delete</button>
               </div>
             </div>
 

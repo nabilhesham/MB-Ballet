@@ -79,6 +79,17 @@
   #sess .cn{font-family:var(--serif);font-size:22px;font-weight:600}
   #sess .meta2{font-family:var(--mono);font-size:12px;color:var(--mute);margin-top:5px}
 
+  /* Notes sit between the class and the numbers: after "who is this and what
+     are they here for", before the counts, which is the order they are read
+     in. Amber edge because a note is something to act on, never a refusal. */
+  #notes{display:none;text-align:left;margin-bottom:18px}
+  #notes.on{display:block}
+  .note{background:var(--surface);border:1px solid var(--line);
+        border-left:4px solid var(--warn);border-radius:10px;padding:12px 16px}
+  .note + .note{margin-top:8px}
+  .note .k{font-family:var(--mono);font-size:8.5px;letter-spacing:1.3px;color:var(--dim)}
+  .note .t{font-size:15px;color:var(--ink);margin-top:4px;line-height:1.5;white-space:pre-wrap}
+
   .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:22px}
   .stat{background:var(--surface);border:1px solid var(--line);border-radius:10px;
         padding:13px 14px;text-align:left}
@@ -186,6 +197,8 @@
     </div>
 
     <div id="sess"><div class="cn" id="sessName"></div><div class="meta2" id="sessMeta"></div></div>
+
+    <div id="notes"></div>
 
     <div class="stats" id="stats"></div>
     <div class="recent" id="recent"></div>
@@ -537,6 +550,20 @@ function show(r){
     $('sessMeta').textContent =
       `${when} · ${s.instructor_name||'no instructor'} · ${s.duration_hours} h`;
   } else $('sess').classList.remove('on');
+
+  /* ---- what someone wrote down about them ---- */
+  /* This is the only moment a note is worth anything: the person is standing
+     there and can be spoken to. Nobody looks one up afterwards. The two are
+     shown separately and labelled because they answer different questions —
+     the client's note is about the person, the plan's is about this purchase
+     ("paid half now, half in October"). */
+  const notes = [];
+  if(r.client_notes) notes.push(['CLIENT NOTE', r.client_notes]);
+  if(r.plan_notes) notes.push([r.plan ? `PLAN NOTE — ${r.plan}` : 'PLAN NOTE', r.plan_notes]);
+  $('notes').innerHTML = notes.map(n =>
+    `<div class="note"><div class="k">${esc(n[0])}</div><div class="t">${esc(n[1])}</div></div>`
+  ).join('');
+  $('notes').classList.toggle('on', notes.length > 0);
 
   /* ---- numbers ---- */
   const left = r.sessions_remaining;

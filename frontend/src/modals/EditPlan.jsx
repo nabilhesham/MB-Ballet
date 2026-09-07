@@ -5,25 +5,33 @@ import { isoDay } from '../lib/format';
 import { fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
+import ClassPick from '../components/ClassPick';
 import Empty from '../components/Empty';
 import SessionPickList from './SessionPickList';
 
 /**
- * Edit a plan already sold: its name, its number of sessions, and its end
- * date. The class is shown but not editable — changing it would orphan the
- * plan's bookings and its card, and renewing is how a client moves class.
+ * Edit a plan already sold: its name, its class, its number of sessions, and
+ * its end date.
  *
  * Changing the count re-opens the same session picker PlanPicker uses, so
  * the plan can never be left with a count that doesn't match its bookings.
  * A session already marked present or absent is attendance history and is
  * shown locked, not offered for un-ticking.
+ *
+ * Changing the class is a correction of "this was written down against the
+ * wrong one", so it takes the plan's slots with it: the old class's upcoming
+ * dates are dropped and the new class's are picked here, in the same save.
+ * Attendance is never moved — a session already present or absent stays on
+ * the plan, locked, still on its own date in the class it happened in, so
+ * only what is still ahead of the client changes.
  */
-export default function EditPlan({ clientId, plan, onSaved }) {
+export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   const { close } = useModal();
   const toast = useToast();
 
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState(plan.plan);
+  const [classId, setClassId] = useState(plan.class_id);
   const [need, setNeed] = useState(plan.sessions_total);
   const [endsOn, setEndsOn] = useState(plan.expires_on);
   // Same rule as PlanPicker: reception can still type its own end date, but
@@ -35,6 +43,12 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
   const [locked, setLocked] = useState([]);
+  // The plan's own already-assigned sessions, kept aside for two jobs:
+  // switching back to the class it started in restores them (a /sessions
+  // call rightly does not offer dates the client is already booked into),
+  // and the attended ones travel with the plan into whatever class it moves
+  // to, since they are history and never move.
+  const [own, setOwn] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -43,6 +57,7 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         fetchPlanSessions(plan.class_id, clientId),
       ]);
       const existingNorm = existing.map(r => ({ ...r, id: r.session_id }));
+      setOwn(existingNorm);
       setSessions([...existingNorm, ...available].sort((a, b) => a.starts_at - b.starts_at));
       setChosen(existingNorm.map(r => r.id));
       setLocked(existingNorm.filter(r => r.status !== 'booked').map(r => r.id));
@@ -58,6 +73,19 @@ export default function EditPlan({ clientId, plan, onSaved }) {
     setEndsOn(last ? isoDay(last) : plan.expires_on);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chosen, sessions, endsTouched, loaded]);
+
+  const onClassChange = async id => {
+    if (id === classId) return;
+    setClassId(id);
+    const available = await fetchPlanSessions(id, clientId);
+    // Moving class re-picks only what is still ahead. The attended sessions
+    // come along unchanged — they stay listed, stay locked and stay ticked,
+    // which is also what the server requires: no edit may drop one.
+    const back = id === plan.class_id;
+    const keep = back ? own : own.filter(r => locked.includes(r.id));
+    setSessions([...keep, ...available].sort((a, b) => a.starts_at - b.starts_at));
+    setChosen(keep.map(r => r.id));
+  };
 
   const onNeedChange = e => {
     const n = Number(e.target.value) || 0;
@@ -92,13 +120,24 @@ export default function EditPlan({ clientId, plan, onSaved }) {
       const r = await api(`/plans/${plan.id}${paidOn ? '' : '?clear_paid_on=true'}`, {
         method: 'PUT',
         body: {
-          plan: name, sessions_total: Number(need), expires_on: endsOn,
+          plan: name, class_id: classId, sessions_total: Number(need), expires_on: endsOn,
           paid_on: paidOn || null, notes, session_ids: chosen,
         },
       });
       if (!r.ok) return toast(r.error, 'bad');
       close();
-      toast('Plan updated — reissue the card to print the new numbers');
+      // The card prints the plan's end date and session count, and a printed
+      // card is a snapshot nothing regenerates — so an edited plan leaves an
+      // out-of-date card in the client's hand. Reissue it here rather than
+      // leaving reception to remember; the endpoint revokes the previous card
+      // for this class as it goes, and a class change needs the new class's
+      // card anyway.
+      try {
+        await api(`/clients/${clientId}/card`, { method: 'POST', body: { class_id: classId } });
+        toast('Plan updated — new card issued, print it for the client');
+      } catch (e) {
+        toast(`Plan updated, but the card could not be reissued: ${e.message}`, 'bad');
+      }
       onSaved();
     } catch (e) { toast(e.message, 'bad'); }
   };
@@ -106,14 +145,44 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   if (!loaded) return <Empty>Loading…</Empty>;
 
   const canSave = chosen.length === need && need > 0;
+  const movable = classes.length > 1;
+  const moved = classId !== plan.class_id;
+  const k = classes.find(x => x.id === classId);
+  const className = k ? k.name : plan.class_name;
 
   return (
     <>
       <h3>Edit plan</h3>
       <div className="mh">
-        {plan.class_name} — the class a plan is bought for cannot be changed here.
-        Renew instead to move a client to a different class.
+        A plan is bought for one class and pays only for that class's sessions.
+        {movable
+          ? ' Moving it to another class re-picks the dates still ahead and revokes'
+            + ' the old class\'s card. Sessions already attended stay exactly as they'
+            + ' are, on the day they happened.'
+          : ' There is only one class to buy for.'}
       </div>
+
+      <label>CLASS</label>
+      {movable
+        ? <ClassPick classes={classes} value={classId} onChange={onClassChange} />
+        : (
+          <div className="picklist">
+            <div className="pickrow disabled">
+              <span className="dot" style={{ background: plan.class_colour }} />
+              <span className="pk-class">{plan.class_name}</span>
+              <span className="pk-meta">the only class</span>
+            </div>
+          </div>
+        )}
+      {moved && locked.length > 0 && (
+        <div className="hint" style={{ marginTop: 8 }}>
+          {locked.length === 1
+            ? `One attended session in ${plan.class_name} stays on this plan, on the day it happened.`
+            : `${locked.length} attended sessions in ${plan.class_name} stay on this plan, `
+              + 'on the days they happened.'}
+          {' '}Moving the plan does not rewrite them — only the dates still ahead change.
+        </div>
+      )}
 
       <div className="fieldrow">
         <div><label>PLAN NAME</label><input value={name} onChange={e => setName(e.target.value)} /></div>
@@ -145,8 +214,9 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         <span className={'pill ' + (chosen.length === need ? 'ok' : 'warn')}>{chosen.length} of {need} chosen</span>
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>
-        Only {plan.class_name || 'this class'}'s sessions are offered, including the last three
-        weeks. Sessions already attended are locked and always count toward the total.
+        Only {className || 'this class'}'s sessions are offered, including the last three
+        weeks. Sessions already attended are locked and always count toward the total
+        {moved ? ', including the ones from the class this plan is moving out of' : ''}.
       </div>
       {chosen.length !== need && (
         <div className="warnline" style={{ margin: '0 0 10px' }}>
