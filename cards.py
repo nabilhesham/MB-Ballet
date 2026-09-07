@@ -15,7 +15,12 @@ Design notes, so the next person does not undo them by accident:
     back through Linux, Windows and macOS options before giving up.
   - The member number is printed large and clearly. Reception types it in when
     the scanner and camera are both unavailable, so it has to be readable
-    across a counter, not hidden in small print.
+    across a counter, not hidden in small print. The same goes for the two
+    figures under the QR — the session count and the end date are what a
+    client asks about while standing there.
+  - Dates are printed day-first (11-09-2026). The rest of the app speaks ISO,
+    which sorts and cannot be misread; a card is read by a person, and this
+    is the one place a date leaves the system on paper. See _ddmmyyyy.
 """
 
 import os
@@ -142,6 +147,23 @@ def _fit_name(draw, name, width, start=64, floor=32):
     return lines, _font("serif_b", 20)
 
 
+def _ddmmyyyy(iso: str) -> str:
+    """
+    2026-09-11 -> 11-09-2026.
+
+    The database and every screen in the app speak ISO, which sorts and never
+    reads ambiguously. A printed card is read by a person at a counter, and
+    day-first is how a date is written in Alexandria — so the conversion
+    happens here, at the one place a date leaves the system on paper, rather
+    than anywhere the value is still being handled as data. Anything that is
+    not a plain ISO date is printed exactly as given.
+    """
+    parts = (iso or "").split("-")
+    if len(parts) == 3 and len(parts[0]) == 4 and all(p.isdigit() for p in parts):
+        return f"{parts[2]}-{parts[1]}-{parts[0]}"
+    return iso or ""
+
+
 def _centre(draw, y, text, font, fill):
     w = draw.textlength(text, font=font)
     draw.text(((CARD_W - w) / 2, y), text, font=font, fill=fill)
@@ -223,11 +245,11 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     _draw_tracked(d, ((CARD_W - lw) / 2, y), "MEMBER NUMBER", lab, MUTE, 2.2)
     y += 20
 
-    num_font = _font("mono", 32)
+    num_font = _font("mono", 40)
     num = f"{client_id:05d}"
     nw = _tracked_width(d, num, num_font, 5)
     _draw_tracked(d, ((CARD_W - nw) / 2, y), num, num_font, accent, 5)
-    y += 46
+    y += 54
 
     # --- QR on its own tile -------------------------------------------
     qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
@@ -249,7 +271,7 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     y += 24
 
     label = _font("mono", 12)
-    value = _font("serif_b", 25)
+    value = _font("serif_b", 30)
     mid = CARD_W / 2
 
     d.text((MARGIN, y), "SESSIONS", font=label, fill=MUTE)
@@ -260,13 +282,15 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     # moment they check in, and this PNG is a print snapshot nothing
     # regenerates on its own — reissuing is the only way to refresh it.
     sessions_text = f"{sessions_total} SESSION{'' if sessions_total == 1 else 'S'}"
-    sessions_font = _fit(d, sessions_text, mid - MARGIN - 24, start=25, minimum=13)
+    sessions_font = _fit(d, sessions_text, mid - MARGIN - 24, start=30, minimum=13)
     d.text((MARGIN, y), sessions_text, font=sessions_font, fill=INK)
-    d.text((mid + 14, y), expires_on, font=value, fill=INK)
-    y += 46
+    # Day-first on paper — see _ddmmyyyy. The value handed in is still ISO,
+    # and stays ISO everywhere else.
+    d.text((mid + 14, y), _ddmmyyyy(expires_on), font=value, fill=INK)
+    y += 52
 
     # subtle divider between the two columns
-    d.line([mid, tile[3] + 40 + 8, mid, y - 4], fill=RULE, width=1)
+    d.line([mid, tile[3] + 40 + 8, mid, y - 6], fill=RULE, width=1)
 
     d.line([MARGIN, y, CARD_W - MARGIN, y], fill=RULE, width=1)
     y += 20
