@@ -5,25 +5,32 @@ import { isoDay } from '../lib/format';
 import { fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
+import ClassPick from '../components/ClassPick';
 import Empty from '../components/Empty';
 import SessionPickList from './SessionPickList';
 
 /**
- * Edit a plan already sold: its name, its number of sessions, and its end
- * date. The class is shown but not editable — changing it would orphan the
- * plan's bookings and its card, and renewing is how a client moves class.
+ * Edit a plan already sold: its name, its class, its number of sessions, and
+ * its end date.
  *
  * Changing the count re-opens the same session picker PlanPicker uses, so
  * the plan can never be left with a count that doesn't match its bookings.
  * A session already marked present or absent is attendance history and is
  * shown locked, not offered for un-ticking.
+ *
+ * Changing the class is a correction of "this was written down against the
+ * wrong one", so it takes the plan's sessions with it: the old class's dates
+ * are dropped and the new class's are picked here, in the same save. Once a
+ * session on the plan has been attended that correction is no longer honest
+ * and the class field is shown locked instead — the server refuses it too.
  */
-export default function EditPlan({ clientId, plan, onSaved }) {
+export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   const { close } = useModal();
   const toast = useToast();
 
   const [loaded, setLoaded] = useState(false);
   const [name, setName] = useState(plan.plan);
+  const [classId, setClassId] = useState(plan.class_id);
   const [need, setNeed] = useState(plan.sessions_total);
   const [endsOn, setEndsOn] = useState(plan.expires_on);
   // Same rule as PlanPicker: reception can still type its own end date, but
@@ -35,6 +42,10 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
   const [locked, setLocked] = useState([]);
+  // The plan's own already-assigned sessions, kept aside so switching back to
+  // the class it started in restores them rather than losing them to a
+  // /sessions call that (rightly) does not offer sessions already booked.
+  const [own, setOwn] = useState([]);
 
   useEffect(() => {
     (async () => {
@@ -43,6 +54,7 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         fetchPlanSessions(plan.class_id, clientId),
       ]);
       const existingNorm = existing.map(r => ({ ...r, id: r.session_id }));
+      setOwn(existingNorm);
       setSessions([...existingNorm, ...available].sort((a, b) => a.starts_at - b.starts_at));
       setChosen(existingNorm.map(r => r.id));
       setLocked(existingNorm.filter(r => r.status !== 'booked').map(r => r.id));
@@ -58,6 +70,17 @@ export default function EditPlan({ clientId, plan, onSaved }) {
     setEndsOn(last ? isoDay(last) : plan.expires_on);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chosen, sessions, endsTouched, loaded]);
+
+  const onClassChange = async id => {
+    if (id === classId) return;
+    setClassId(id);
+    const available = await fetchPlanSessions(id, clientId);
+    const back = id === plan.class_id;
+    setSessions(back
+      ? [...own, ...available].sort((a, b) => a.starts_at - b.starts_at)
+      : available);
+    setChosen(back ? own.map(r => r.id) : []);
+  };
 
   const onNeedChange = e => {
     const n = Number(e.target.value) || 0;
@@ -92,13 +115,24 @@ export default function EditPlan({ clientId, plan, onSaved }) {
       const r = await api(`/plans/${plan.id}${paidOn ? '' : '?clear_paid_on=true'}`, {
         method: 'PUT',
         body: {
-          plan: name, sessions_total: Number(need), expires_on: endsOn,
+          plan: name, class_id: classId, sessions_total: Number(need), expires_on: endsOn,
           paid_on: paidOn || null, notes, session_ids: chosen,
         },
       });
       if (!r.ok) return toast(r.error, 'bad');
       close();
-      toast('Plan updated — reissue the card to print the new numbers');
+      // The card prints the plan's end date and session count, and a printed
+      // card is a snapshot nothing regenerates — so an edited plan leaves an
+      // out-of-date card in the client's hand. Reissue it here rather than
+      // leaving reception to remember; the endpoint revokes the previous card
+      // for this class as it goes, and a class change needs the new class's
+      // card anyway.
+      try {
+        await api(`/clients/${clientId}/card`, { method: 'POST', body: { class_id: classId } });
+        toast('Plan updated — new card issued, print it for the client');
+      } catch (e) {
+        toast(`Plan updated, but the card could not be reissued: ${e.message}`, 'bad');
+      }
       onSaved();
     } catch (e) { toast(e.message, 'bad'); }
   };
@@ -106,14 +140,38 @@ export default function EditPlan({ clientId, plan, onSaved }) {
   if (!loaded) return <Empty>Loading…</Empty>;
 
   const canSave = chosen.length === need && need > 0;
+  const movable = classes.length > 1 && !locked.length;
+  const k = classes.find(x => x.id === classId);
+  const className = k ? k.name : plan.class_name;
 
   return (
     <>
       <h3>Edit plan</h3>
       <div className="mh">
-        {plan.class_name} — the class a plan is bought for cannot be changed here.
-        Renew instead to move a client to a different class.
+        A plan is bought for one class and pays only for that class's sessions.
+        {movable
+          ? ' Moving it to another class brings its sessions with it — the old'
+            + " class's dates are dropped and its card is revoked."
+          : ' Its class is fixed once a session on it has been attended —'
+            + ' renew instead to move the client to a different class.'}
       </div>
+
+      <label>CLASS</label>
+      {movable
+        ? <ClassPick classes={classes} value={classId} onChange={onClassChange} />
+        : (
+          <div className="picklist">
+            <div className="pickrow disabled">
+              <span className="dot" style={{ background: plan.class_colour }} />
+              <span className="pk-class">{plan.class_name}</span>
+              <span className="pk-meta">
+                {locked.length
+                  ? `${locked.length} session${locked.length === 1 ? '' : 's'} already attended`
+                  : 'the only class'}
+              </span>
+            </div>
+          </div>
+        )}
 
       <div className="fieldrow">
         <div><label>PLAN NAME</label><input value={name} onChange={e => setName(e.target.value)} /></div>
@@ -145,7 +203,7 @@ export default function EditPlan({ clientId, plan, onSaved }) {
         <span className={'pill ' + (chosen.length === need ? 'ok' : 'warn')}>{chosen.length} of {need} chosen</span>
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>
-        Only {plan.class_name || 'this class'}'s sessions are offered, including the last three
+        Only {className || 'this class'}'s sessions are offered, including the last three
         weeks. Sessions already attended are locked and always count toward the total.
       </div>
       {chosen.length !== need && (

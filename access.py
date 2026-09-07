@@ -333,6 +333,11 @@ def _client_payload(conn, client, sub, class_id=None) -> dict:
         # Shown as a tag at reception. It never blocks a check-in — the
         # receptionist is the one who decides what to do about it.
         "paid_on": state.get("paid_on"),
+        # Both kinds of note reach the desk: the client's own, and the one
+        # about the plan being spent. This is the moment they are worth
+        # anything — nobody looks them up afterwards.
+        "client_notes": client["notes"],
+        "plan_notes": state.get("notes"),
         "visits": tot["present"] or 0,
         "absences": tot["absent"] or 0,
         "last_visit": tot["last_visit"],
@@ -360,23 +365,31 @@ def verify(conn, raw_token: str) -> dict:
         " WHERE cr.token=?", (raw_token.strip().upper(),)).fetchone()
     if cred is None:
         return _deny("Card not recognised", detail="valid signature, no matching record")
+
+    # Look the client up before the revoked check, not after. A replaced card
+    # is one we know the owner of, and answering it with a blank panel headed
+    # "Unknown card" told reception the person in front of them was a
+    # stranger — every reissue leaves an older card in circulation that lands
+    # here. Denials carry the profile wherever the client is known.
+    client = conn.execute("SELECT * FROM clients WHERE id=?", (cred["client_id"],)).fetchone()
+    if client is None:
+        return _deny("Card not recognised", detail="no client behind this credential")
+    known = {
+        "client_id": client["id"], "credential_id": cred["id"],
+        "name_en": client["name_en"], "photo_path": client["photo_path"],
+        "card_class": cred["class_name"], "card_colour": cred["colour"],
+    }
     if cred["revoked_at"]:
         _log(conn, cred["client_id"], cred["id"], None, "deny", "revoked")
-        return _deny("This card was replaced", detail="hand the client their new card")
-
-    client = conn.execute("SELECT * FROM clients WHERE id=?", (cred["client_id"],)).fetchone()
-    if client is None or not client["active"]:
-        return _deny("Client is not active")
+        return _deny("This card was replaced",
+                     detail="hand the client their new card", **known)
+    if not client["active"]:
+        return _deny("Client is not active", **known)
 
     # The card names a class, so the plan is that class's plan. This is what
     # stops a Ballet card drawing on a Flexibility balance.
     sub = active_plan(conn, client["id"], cred["class_id"])
-    base = {
-        "client_id": client["id"], "credential_id": cred["id"],
-        "name_en": client["name_en"], "photo_path": client["photo_path"],
-        "card_class": cred["class_name"], "card_colour": cred["colour"],
-        **_client_payload(conn, client, sub, cred["class_id"]),
-    }
+    base = {**known, **_client_payload(conn, client, sub, cred["class_id"])}
     if sub is None and cred["class_id"]:
         _log(conn, client["id"], cred["id"], None, "deny", "no plan for that class")
         return _deny(f"No {cred['class_name']} plan",
@@ -767,9 +780,10 @@ def cancel_session(conn, session_id: int) -> dict:
 def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
              expires_on: str = None, session_ids: list = None,
              paid_on: str = None, clear_paid_on: bool = False,
-             notes: str = None) -> dict:
+             notes: str = None, class_id: int = None) -> dict:
     """
-    Change a plan's name, size, sessions or end date after it has been sold.
+    Change a plan's name, size, sessions, class or end date after it has been
+    sold.
 
     Frozen plans are refused outright: freezing already owns this plan's
     bookings and its expiry (see freeze_plan()'s comment on why it skips
@@ -792,6 +806,17 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     clear_paid_on marks the plan unpaid again. It exists because the route
     drops None fields before calling this, so paid_on=None cannot mean
     "erase it" — the same reason edit_session() carries clear_instructor.
+
+    Moving a plan to another class is a correction of "this was written down
+    against the wrong class", not a way to reuse a plan the client has
+    already spent — so it is refused once any of its sessions has been
+    attended, and refused if the client already has a live plan in the class
+    it is moving to (renew that one instead of ending up with two). It
+    carries its own sessions with it: the new class's sessions have to be
+    picked in the same call, exactly as changing the count does, and the old
+    class's dates are dropped. The card for the class it left proves a plan
+    that is no longer there, so it is revoked unless another live plan holds
+    that class up — issuing the new class's card is the caller's next step.
     """
     sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
     if sub is None:
@@ -803,6 +828,22 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     if sessions_total is not None and session_ids is None:
         return {"ok": False, "error": "changing the number of sessions means reassigning them"}
 
+    moving = class_id is not None and class_id != sub["class_id"]
+    if moving:
+        klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        if klass is None:
+            return {"ok": False, "error": "no such class"}
+        if session_ids is None:
+            return {"ok": False, "error": "changing the class means reassigning the sessions"}
+        held = conn.execute(
+            "SELECT COUNT(*) n FROM subscriptions"
+            " WHERE client_id=? AND class_id=? AND active=1 AND id!=?",
+            (sub["client_id"], class_id, sub_id)).fetchone()["n"]
+        if held:
+            return {"ok": False,
+                    "error": f"this client already has a live {klass['name']} plan"
+                             " — renew that one instead"}
+
     current = conn.execute(
         "SELECT session_id, status FROM bookings WHERE subscription_id=?",
         (sub_id,)).fetchall()
@@ -810,6 +851,12 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     attended_ids = {b["session_id"] for b in current if b["status"] != "booked"}
 
     total = sessions_total if sessions_total is not None else sub["sessions_total"]
+    target_class = class_id if moving else sub["class_id"]
+
+    if moving and attended_ids:
+        return {"ok": False,
+                "error": f"{len(attended_ids)} of this plan's sessions have already been"
+                         " attended — a plan cannot change class once it has been used"}
 
     if session_ids is not None:
         if len(set(session_ids)) != len(session_ids):
@@ -826,7 +873,7 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
             marks = ",".join("?" * len(new_ids))
             wrong = conn.execute(
                 f"SELECT COUNT(*) n FROM sessions WHERE id IN ({marks}) AND class_id != ?",
-                (*new_ids, sub["class_id"])).fetchone()["n"]
+                (*new_ids, target_class)).fetchone()["n"]
             if wrong:
                 return {"ok": False,
                         "error": f"{wrong} of the chosen sessions are not this plan's class"}
@@ -851,6 +898,8 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
                 (sub["client_id"], sid, sub_id, status, db.now()))
 
     fields = {}
+    if moving:
+        fields["class_id"] = class_id
     if plan is not None:
         fields["plan"] = plan
     if sessions_total is not None:
@@ -875,8 +924,23 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     else:
         refresh_expiry(conn, sub_id)
 
+    revoked = 0
+    if moving:
+        # The old class's card proved this plan. Revoke it unless another live
+        # plan still stands behind that class — credentials are revoked, never
+        # deleted, so the log keeps pointing at the one that was used.
+        still = conn.execute(
+            "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
+            (sub["client_id"], sub["class_id"])).fetchone()
+        if not still:
+            revoked = conn.execute(
+                "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
+                "   AND revoked_at IS NULL",
+                (db.now(), sub["client_id"], sub["class_id"])).rowcount
+
     conn.commit()
-    return {"ok": True, **plan_state(conn, sub_id)}
+    return {"ok": True, "moved": moving, "cards_revoked": revoked,
+            **plan_state(conn, sub_id)}
 
 
 def expected_today(conn) -> dict:

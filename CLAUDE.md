@@ -129,7 +129,8 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
   src/modals/      Every modal, one file each, imported by the view(s) that
                    open it.
   src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
-                   Toast, Avatar, Pill, Empty.
+                   Toast, Avatar, Pill, Empty, ClassPick (the searchable
+                   class list both plan pickers choose from).
   src/lib/         format.js (timestamp -> what a receptionist reads) and
                    planSessions.js (the window a plan's slots are filled
                    from — see the three-weeks-back rule below).
@@ -616,6 +617,17 @@ it. The card's `SESSIONS` field is `sessions_total` (the total bought), not a
 remaining count — remaining goes stale the moment they check in, and the PNG
 is a print snapshot nothing regenerates on its own.
 
+**A reissued card is served as `…png?v={issued_at}`.** `card_path()` returns
+one stable filename per client per class — deliberately, so the download and
+print links can be derived rather than looked up — which means reissuing
+overwrites the same URL and the browser goes on showing the picture it
+already cached. An edited end date was right in the file and wrong on the
+screen. Both places that hand out a card URL (`get_client` and `issue_card`
+in `api/clients.py`) stamp it with the issue time, which is exactly when the
+image changes. It is the same class of bug the photo upload hit, fixed the
+other way round: a photo has no derivable name to protect, so it gets a
+fresh filename instead.
+
 **Editing a plan** (`PUT /api/plans/{pid}`, `access.edit_plan()`) changes its
 name, its session count, its sessions, and its end date after it has been
 sold — the **Edit** button next to Freeze/Renew on the client profile.
@@ -626,6 +638,27 @@ matching set of session ids — a count changed without saying which sessions
 is refused, the same contract `add_plan()` uses. A session already marked
 present or absent is attendance history and can never be dropped from a plan,
 whatever the new count is.
+
+**It can also move the plan to another class** — `class_id`, the searchable
+class list at the top of the modal. That is a correction of "this was written
+down against the wrong class", not a way to reuse a plan, so it takes the
+plan's sessions with it: the new class's dates are picked in the same save
+(`session_ids` is required, the same contract as changing the count), the old
+class's are dropped, and the card for the class it left is revoked unless
+another live plan still stands behind that class. Two refusals keep it
+honest — a plan with any attended session cannot change class at all (that
+history *is* the old class), and it cannot move onto a class where the client
+already has a live plan, since one plan per class per client is what makes
+`active_plan()` answer at all. The modal shows the class locked, with the
+reason, rather than offering a move the server would refuse.
+
+**Saving an edit reissues the card.** The card prints the end date and the
+session count of the plan it was made for, and nothing regenerates it — so
+every edit left an out-of-date card in the client's hand until someone
+remembered to press Reissue. `EditPlan` now issues one itself, the same thing
+`PlanPicker` already does on a renewal; the endpoint revokes the previous
+card for that class as it goes, and a class change needs the new class's card
+anyway.
 
 ## Seeding from the academy's spreadsheets
 
@@ -695,6 +728,19 @@ route and a manual-balance-adjustment endpoint, but it was never mounted into
 `server.py` — dead code from the pre-authentication version of the app,
 removed rather than wired in (see Known gaps). If either is wanted, build it
 fresh against the current model rather than reviving that file.
+
+**A plan can be deleted for good, and it is the one deletion that takes
+attendance with it.** `DELETE /api/plans/{pid}` — the **Delete** button beside
+Freeze/Renew — removes the plan and every booking it paid for, which drops the
+client off the upcoming sessions it had them down for. It is the exception to
+the rule above because a plan's bookings *are* its attendance: there is no
+version of removing the plan that keeps the record. So the confirm dialog
+counts what goes (upcoming sessions, attended ones) before it goes rather
+than after, the endpoint returns the same counts, and the card for that class
+is revoked unless another live plan holds the class up. Renewing or freezing
+is what almost every case actually wants; this is for a plan entered by
+mistake. It deliberately does **not** call `refresh_expiry()` — the plan whose
+expiry would be recomputed is itself gone.
 
 **Archiving a class also releases its upcoming sessions.** A class that
 stops being offered has nothing left to happen for, so `delete_class`'s soft
@@ -932,7 +978,18 @@ against a screenshotted card being passed between friends; a signature check
 cannot tell you the person holding the phone is the member.
 
 Denials carry the profile too, where the client is known — reception needs to
-know *who* was refused and why, not just that something failed.
+know *who* was refused and why, not just that something failed. `verify()`
+looks the client up **before** the revoked-card check for exactly this
+reason: every reissue leaves an older card in circulation, and answering one
+with a blank panel headed "Unknown card" told reception the person in front
+of them was a stranger rather than someone holding last month's card.
+
+**Both kinds of note are on the screen** — the client's own (about the
+person) and the one on the plan being spent (about that purchase), shown as
+two labelled blocks rather than run together. Same reasoning as everything
+else here: the note is worth something in the few seconds the client is
+standing at the desk, and worth nothing at all afterwards, because nobody
+looks one up.
 
 ## Hardware status
 

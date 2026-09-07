@@ -5,6 +5,7 @@ import { isoDay, todayISO } from '../lib/format';
 import { earliestUpcoming, fetchPlanSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
+import ClassPick from '../components/ClassPick';
 import SessionPickList from './SessionPickList';
 
 /**
@@ -55,8 +56,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
     setEndsOn(last ? isoDay(last) : '');
   }, [chosen, sessions, endsTouched]);
 
-  const onClassChange = e => {
-    const id = Number(e.target.value);
+  const onClassChange = id => {
     setClassId(id);
     load(id);
   };
@@ -122,9 +122,7 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       </div>
 
       <label>CLASS</label>
-      <select value={classId} onChange={onClassChange}>
-        {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-      </select>
+      <ClassPick classes={classes} value={classId} onChange={onClassChange} />
 
       <div className="fieldrow">
         <div><label>PLAN NAME</label><input value={name} onChange={e => setName(e.target.value)} /></div>
