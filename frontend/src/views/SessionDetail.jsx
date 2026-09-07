@@ -10,7 +10,6 @@ import { StatusPill } from '../components/Pill';
 import Avatar from '../components/Avatar';
 import Empty from '../components/Empty';
 import SessionForm from '../modals/SessionForm';
-import AddStudents from '../modals/AddStudents';
 import DeleteSessionWithAttendance from '../modals/DeleteSessionWithAttendance';
 
 export default function SessionDetail() {
@@ -41,19 +40,6 @@ export default function SessionDetail() {
   const openEdit = async () => {
     const [classes, instructors] = await Promise.all([api('/classes'), api('/instructors')]);
     open(<SessionForm session={s} classes={classes} instructors={instructors} onSaved={reload} />);
-  };
-
-  // Only clients the server would actually accept: an active plan in this
-  // session's class, not frozen, with a slot still free. Asking for that
-  // list rather than every client is what stops the picker offering someone
-  // it would then refuse.
-  const openAddStudent = async () => {
-    const eligible = await api(`/sessions/${s.id}/bookable`);
-    if (!eligible.length) {
-      return toast(`Nobody has a free slot on a ${s.class_name} plan — `
-        + 'add or renew a plan for that class first', 'bad');
-    }
-    open(<AddStudents sessionId={s.id} className={s.class_name} clients={eligible} onSaved={reload} />);
   };
 
   const unbook = (cid, name) => confirm({
@@ -175,18 +161,19 @@ export default function SessionDetail() {
       </div>
 
       <h2>Who is booked in</h2>
+      {/* Booking someone in happens on their profile, not here: a booking
+          spends a slot on one of that client's plans, so the screen that
+          makes it should be the one showing what they have left. This page
+          takes attendance for people already booked. */}
       <div className="sub" style={{ marginBottom: 12 }}>
         Present and absent both use the client's slot — the place was reserved either way.
-      </div>
-
-      <div className="row" style={{ marginBottom: 12 }}>
-        <button className="pri" onClick={openAddStudent}>Add student</button>
+        Book someone in from their own profile, where their plan and its free slots are.
       </div>
 
       <div className="box pad0 dt-host">
         <DataTable
           rows={s.roster} rowKey={r => r.id} search="Search students…"
-          empty={<><strong>Nobody booked in</strong>Add a student, or assign this session from a client's plan.</>}
+          empty={<><strong>Nobody booked in</strong>Assign this session from a client's plan, on their profile.</>}
           columns={[
             { label: '', sortable: false, style: { width: 54 }, cell: r => <Avatar client={r} /> },
             {

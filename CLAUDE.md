@@ -127,7 +127,8 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                    ClassDetail, Instructors, InstructorDetail, Cards, Sessions,
                    SessionDetail, Clients, ClientDetail.
   src/modals/      Every modal, one file each, imported by the view(s) that
-                   open it.
+                   open it. There is no AddStudents: booking is done from
+                   the client's profile, not the session — see below.
   src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
                    Toast, Avatar, Pill, Empty, ClassPick (the searchable
                    class list both plan pickers choose from).
@@ -522,10 +523,16 @@ class, when the named plan belongs to another class, when it is frozen, or
 when every one of its slots already has a date. The no-plan case used to
 fall through and insert a booking with `subscription_id` NULL — a session
 nobody paid for, in a class the client was never enrolled in.
-`GET /api/sessions/{sid}/bookable` asks the same four questions ahead of
-time so the add-student picker only ever offers people the endpoint would
-accept, and shows how many free slots each has. The rule lives in `book()`;
-the picker holds no copy of it.
+**Booking someone in happens on their profile, never on the session.** The
+session page took attendance *and* had an "Add student" button; that button,
+its `AddStudents` modal and the `GET /api/sessions/{sid}/bookable` endpoint
+that fed it are all gone. A booking spends a slot on one of that client's
+plans, so the screen that creates one should be the screen showing what they
+have left — "Add session" and "Assign them now" on the client profile. Two
+ways in also meant two places to keep the class rule straight; now the
+session page only marks people present or absent, and removes them. (The
+endpoint existed solely to pre-answer `book()`'s four questions for that
+picker, so it went with it rather than staying as an unreachable route.)
 
 **Selling is class-locked; correcting afterwards is not.** The rule above
 governs *buying* — `add_plan()`, `edit_plan()` and the plan pickers only ever
