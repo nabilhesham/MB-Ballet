@@ -1050,7 +1050,21 @@ that shrank — and it shrank by a different amount on every machine, since the
 serif is DejaVu on a developer's Linux box and Georgia on the reception
 laptop. The figure a client actually asks about came out visibly smaller than
 the date beside it. Splitting them lets the number keep its size whatever the
-font, with the word taking the strain instead.
+font, with the word taking the strain instead. The footer's two columns are
+unequal for the same reason: a count is three characters and a spelled date
+is eleven, so the rule between them sits at 36% rather than halfway, which
+leaves the date enough room to stay at its full size on a wider font instead
+of shrinking back out of step.
+
+**One typeface does the lettering, one does the member number.** Everything
+made of letters — the card's labels, the token, the footer line — is set in
+the same serif as the client's name, so the card reads as one printed piece
+rather than a form. The member number keeps its mono face and the accent
+colour: it is the one value on the card that gets *typed in* (see above), and
+a face where 0 and O cannot be confused is worth the break in the family. The
+two figures under the QR are letter-spaced the way that number is — same
+treatment, not the same font or colour — so the card's figures read as
+belonging together.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
 the filename so two cards coexist. `cards.card_path()` derives that name and is
