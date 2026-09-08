@@ -927,12 +927,32 @@ fixes the key-autorepeat false positive. Blocked on having the hardware.
 
 ## The reception kiosk
 
-**Exactly two input sources**, chosen with a segmented control in the sidebar:
+**Four input sources**, chosen with a segmented control in the sidebar:
 
 - **Scanner** — the default. Passive keystroke capture, so it keeps listening
   even while the camera is on; switching modes only changes what the screen
   shows.
 - **Camera** — `BarcodeDetector` where available, jsQR from CDN otherwise.
+- **Number** — the member number typed in, for an unplugged scanner or a card
+  the camera will not focus on.
+- **Name** — search the client list and pick one, for the client who left the
+  card at home and does not know their number, which is most of them.
+
+**The last two are ways of finding the client, not different rules.** Both end
+in `lookupClient()` -> `POST /api/access/lookup` -> `access.verify_by_client()`,
+which runs the same `_decide()` a scan does — so the same verdict screen, the
+same automatic check-in, the same 60-second Undo, the same notes, and the same
+MANUAL CHECK-IN swap when nothing of theirs is on today or they were already
+swept absent. Nothing in `reception.html` re-implements any part of that
+decision; a fifth method should be a fifth way of naming a client and no more.
+
+Name search goes through the admin's own `/api/clients?q=` rather than an
+endpoint of its own, so what reception finds at the kiosk is what they would
+find on the Clients page — a second search with its own idea of a match
+would eventually disagree with it. It waits for two characters, debounces
+180ms, ignores an answer newer keystrokes have overtaken, and shows at most
+eight rows: a two-letter search matches half the academy, and a list nobody
+reads to the end of is not a shortlist. Enter takes the first row.
 
 The browser cannot enumerate HID keyboards, so "scanner connected" is *inferred*
 rather than detected: the indicator turns green the first time a burst of
@@ -943,9 +963,7 @@ browser cannot actually do.
 The old dev panel (client dropdown, paste box) has been removed. Test without
 hardware using Camera mode and a card PNG on a phone screen.
 
-(There are three input sources now, not two — Number joined Scanner and
-Camera as the fallback for an unplugged scanner and a card the camera will
-not focus on. It runs the same checks; only the card is missing.)
+
 
 ### One result at a time, cleared by hand
 
@@ -1008,6 +1026,17 @@ Flexibility" rather than silently checking them into the other class.
 Note it is the plan's class, not the session's: a slot moved to another
 class's session (see the correction rule above) is still found by the card of
 the plan that paid for it.
+
+The printed card shows dates **day-first** (`11-09-2026`), converted by
+`cards._ddmmyyyy()` at the moment of drawing. Everywhere else — the database,
+the API, every screen — the date stays ISO, which sorts and cannot be misread;
+the card is the one place a date leaves the system on paper, to be read by a
+person. Do not push the conversion any further back than the card.
+
+The member number and the two figures under the QR (session count, end date)
+are deliberately set large: reception types the number in when the scanner
+and camera are both unavailable, and the other two are what a client asks
+about while standing at the desk.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
 the filename so two cards coexist. `cards.card_path()` derives that name and is

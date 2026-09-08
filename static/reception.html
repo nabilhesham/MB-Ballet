@@ -137,11 +137,19 @@
   .asidetop{flex-shrink:0}
   .recentwrap{flex:1;min-height:0;overflow-y:auto;margin-top:4px}
   .asidefoot{flex-shrink:0;padding-top:14px;border-top:1px solid var(--line);margin-top:12px}
-  .srcpick{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:10px}
+  /* Four sources now, so two rows of two rather than a row of four: at the
+     sidebar's width four columns leaves each label narrower than the word
+     printed in it. */
+  .srcpick{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-bottom:10px}
   .srcpick button{flex-direction:column;gap:5px;padding:13px 4px;font-size:11.5px;
                   border-radius:10px;justify-content:center}
   .srcpick button .em{font-size:19px}
   .srcpick button.on{background:var(--brand-soft);border-color:var(--brand);color:var(--brand-deep)}
+  /* Name search results. Same row as the swap lists — this is the same
+     gesture (pick one from a short list), so it reads the same. */
+  #nameHits{max-height:44vh;overflow-y:auto;margin-top:9px}
+  #nameHits .swaprow{padding:9px 11px}
+  #nameHits .n{font-size:13px}
   .srcstat{font-family:var(--mono);font-size:10.5px;color:var(--dim);
            display:flex;align-items:center;gap:7px;padding:9px 2px}
   .led{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0}
@@ -231,6 +239,7 @@
     <button id="btnScanner" class="on"><span class="em">▤</span> Scanner</button>
     <button id="btnCam"><span class="em">▣</span> Camera</button>
     <button id="btnManual"><span class="em">⌨</span> Number</button>
+    <button id="btnName"><span class="em">◉</span> Name</button>
   </div>
   <div class="srcstat"><span class="led" id="led"></span><span id="ledText">listening</span></div>
 
@@ -242,6 +251,18 @@
       Look up client</button>
     <div class="sub" style="margin-top:8px;font-size:11px">
       It is printed on the member card under the name.</div>
+  </div>
+
+  <!-- By name: for a client who has forgotten the card and does not know
+       the number. It is a way of *finding* the client, not a different set
+       of rules — picking one runs the same lookup the number box does. -->
+  <div id="nameBox" style="display:none;margin-top:10px">
+    <label style="margin-top:4px">CLIENT NAME</label>
+    <input id="nameQ" type="search" placeholder="Type two letters or more"
+           autocomplete="off">
+    <div class="sub" style="margin-top:8px;font-size:11px" id="nameHint">
+      Also finds a mobile number.</div>
+    <div id="nameHits"></div>
   </div>
 
   <div class="eyebrow" style="margin:22px 0 11px">TODAY</div>
@@ -313,9 +334,16 @@ function nudge(){
 }
 
 /* ================================================================
-   INPUT SOURCE — exactly two: the hardware scanner, or the camera.
-   Scanner mode is passive, so it is always listening even while the
-   camera runs; switching only changes what the screen shows.
+   INPUT SOURCE — the hardware scanner, the camera, a member number, or
+   the client's name. Scanner mode is passive, so it is always listening
+   even while the camera runs; switching only changes what the screen shows.
+
+   Only the first two involve a card. The last two are ways of *finding*
+   the client, not different rules: all four end in the same verdict
+   screen, with the same auto check-in, the same 60-second Undo and the
+   same manual swap when nothing of theirs runs today. There is one
+   decision function behind all of it (access._decide), and nothing here
+   re-implements any part of it.
    ================================================================ */
 let mode = 'scanner';
 
@@ -324,37 +352,126 @@ function setMode(m){
   $('btnScanner').classList.toggle('on', m==='scanner');
   $('btnCam').classList.toggle('on', m==='camera');
   $('btnManual').classList.toggle('on', m==='manual');
+  $('btnName').classList.toggle('on', m==='name');
   $('manualBox').style.display = m==='manual' ? 'block' : 'none';
+  $('nameBox').style.display = m==='name' ? 'block' : 'none';
   if(m==='camera') startCam(); else stopCam();
   updateIdle();
   if(m==='manual') setTimeout(()=>$('manualId').focus(), 50);
+  if(m==='name') setTimeout(()=>$('nameQ').focus(), 50);
 }
 $('btnScanner').onclick = ()=>setMode('scanner');
 $('btnCam').onclick = ()=>setMode('camera');
 $('btnManual').onclick = ()=>setMode('manual');
+$('btnName').onclick = ()=>setMode('name');
 
-/* ---------------------------------------------------------------- by number
-   The fallback when the scanner is unplugged and the camera will not focus.
-   Runs exactly the same checks as a scan — the card is simply not involved. */
-async function lookupById(){
-  if(locked()){ nudge(); return; }   // one at a time, the number box included
-  const raw = $('manualId').value.trim();
-  const id = parseInt(raw.replace(/^0+/, ''), 10);
-  if(!id){ $('manualId').select(); return; }
+/* ------------------------------------------------------------- by client id
+   The one call both card-less methods make. The card is not involved, so
+   the checks are the class-wide ones — everything else is identical to a
+   scan, which is why the whole screen below works unchanged. */
+async function lookupClient(id){
+  if(locked()){ nudge(); return; }   // one at a time, these boxes included
   clearTimeout(clearTimer);
   try{
     const r = await fetch('/api/access/lookup', {method:'POST',
       headers:{'Content-Type':'application/json'}, body:JSON.stringify({client_id:id})});
-    const data = await r.json();
-    $('manualId').value = '';
-    show(data);
+    show(await r.json());
   }catch(e){
     show({granted:false, message:'System not responding'});
   }
 }
+
+/* ---------------------------------------------------------------- by number
+   The fallback when the scanner is unplugged and the camera will not focus. */
+function lookupById(){
+  const raw = $('manualId').value.trim();
+  const id = parseInt(raw.replace(/^0+/, ''), 10);
+  if(!id){ $('manualId').select(); return; }
+  if(locked()){ nudge(); return; }
+  $('manualId').value = '';
+  lookupClient(id);
+}
 $('manualGo').onclick = lookupById;
 $('manualId').addEventListener('keydown', e => {
   if(e.key === 'Enter'){ e.preventDefault(); e.stopPropagation(); lookupById(); }
+});
+
+/* ---------------------------------------------------------------- by name
+   For the client who left the card at home and does not know the number —
+   which is most of them. It searches the same /api/clients?q= the admin's
+   client list searches, so what reception finds here is what they would
+   find there; a second search with its own idea of a match would eventually
+   disagree with it. Picking a row runs lookupClient, so a hit lands on the
+   ordinary verdict screen: checked in if something of theirs is on today,
+   and the MANUAL CHECK-IN swap offered when it is not, or when they were
+   already swept absent. */
+let nameTimer = null, nameSeq = 0;
+
+function nameNote(text){ $('nameHint').textContent = text; }
+
+async function searchNames(){
+  const q = $('nameQ').value.trim();
+  if(q.length < 2){
+    $('nameHits').innerHTML = '';
+    nameNote('Also finds a mobile number.');
+    return;
+  }
+  /* Answers can come back out of order — a slow request for "ro" landing
+     after a fast one for "roda" would replace the better list with the
+     worse. Only the newest query is allowed to render. */
+  const seq = ++nameSeq;
+  try{
+    const r = await fetch('/api/clients?q=' + encodeURIComponent(q));
+    const list = await r.json();
+    if(seq !== nameSeq) return;
+    renderNameHits(list);
+  }catch(e){
+    if(seq === nameSeq){ $('nameHits').innerHTML = ''; nameNote('Search failed — try again.'); }
+  }
+}
+
+function renderNameHits(list){
+  if(!list.length){
+    $('nameHits').innerHTML = '';
+    nameNote('Nobody by that name.');
+    return;
+  }
+  /* Capped, because a two-letter search matches half the academy and a
+     sidebar list nobody can read to the end of is not a shortlist. Typing
+     one more letter is faster than scrolling. */
+  const shown = list.slice(0, 8);
+  nameNote(list.length > shown.length
+    ? `${shown.length} of ${list.length} — keep typing to narrow it`
+    : `${list.length} found`);
+  /* Same row shape as the swap lists: mono identifier, then the thing being
+     chosen, then a tag. The balance is what reception needs to see before
+     picking, not after. */
+  $('nameHits').innerHTML = shown.map(c => {
+    const tag = c.remaining == null ? '<span class="pill grey">no plan</span>'
+      : c.remaining <= 0 ? '<span class="pill bad">0 left</span>'
+      : `<span class="pill ${c.remaining <= 2 ? 'warn' : 'ok'}">${c.remaining} left</span>`;
+    return `<button class="swaprow" data-client="${c.id}">
+      <span class="t">${String(c.id).padStart(5, '0')}</span>
+      <span class="w">${esc(c.name_en)}</span>
+      ${tag}</button>`;
+  }).join('');
+  document.querySelectorAll('#nameHits .swaprow').forEach(btn => {
+    btn.onclick = () => lookupClient(parseInt(btn.dataset.client, 10));
+  });
+}
+
+$('nameQ').addEventListener('input', () => {
+  clearTimeout(nameTimer);
+  nameTimer = setTimeout(searchNames, 180);   // one request per pause, not per key
+});
+$('nameQ').addEventListener('keydown', e => {
+  /* Enter takes the first match — the common case is one obvious hit, and
+     reaching for the mouse for it is the slow part at a busy desk. */
+  if(e.key === 'Enter'){
+    e.preventDefault(); e.stopPropagation();
+    const first = document.querySelector('#nameHits .swaprow');
+    if(first) first.click();
+  }
 });
 
 function updateIdle(){
@@ -362,6 +479,13 @@ function updateIdle(){
     $('idleLogo').style.display='none';
     $('idleTitle').textContent='Look up by number';
     $('idleHint').textContent='Type the member number on the right, then press Enter';
+    setLed();
+    return;
+  }
+  if(mode==='name'){
+    $('idleLogo').style.display='none';
+    $('idleTitle').textContent='Look up by name';
+    $('idleHint').textContent='Start typing the name on the right, then pick from the list';
     setLed();
     return;
   }
@@ -385,6 +509,7 @@ let scannerSeen = false;
 function setLed(){
   const led=$('led'), t=$('ledText');
   if(mode==='manual'){ led.className='led live'; t.textContent='manual entry'; return; }
+  if(mode==='name'){ led.className='led live'; t.textContent='name search'; return; }
   if(mode==='camera'){ led.className='led live'; t.textContent='camera active'; return; }
   if(scannerSeen){ led.className='led live'; t.textContent='scanner connected'; }
   else{ led.className='led wait'; t.textContent='listening for scanner'; }
@@ -399,7 +524,7 @@ window.addEventListener('keydown', e=>{
      box and from a focused button too, not just from the bare page. */
   if(e.key==='Escape'){ reset(); return; }
   if(e.target.matches('input,textarea,select,button')) return;
-  if(mode === 'manual') return;      // typing a number is not a scan
+  if(mode === 'manual' || mode === 'name') return;   // typing is not a scan
   const now=performance.now(), gap=now-lastKey; lastKey=now;
 
   if(e.key==='Enter'){
@@ -765,6 +890,11 @@ function reset(){
   lastCam = ""; lastCamAt = 0;
   updateIdle();
   if(mode === 'manual') $('manualId').focus();
+  /* The search stays as it was typed: the next person in the queue is
+     usually not the one just looked up, but a receptionist who cleared the
+     screen to re-read a name should not have to type it again either.
+     Clearing it is one keypress; retyping a name is not. */
+  if(mode === 'name') $('nameQ').select();
 }
 
 /* ---------------------------------------------------------------- sidebar */
