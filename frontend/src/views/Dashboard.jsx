@@ -1,14 +1,34 @@
+import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 
 import { useApi } from '../api';
-import { fmtTime, monthName } from '../lib/format';
+import { fmtTime, monthLabel, thisMonth } from '../lib/format';
 import DataTable from '../components/DataTable';
 import { Pill, BalancePill } from '../components/Pill';
 import Empty from '../components/Empty';
 
 export default function Dashboard() {
-  const { data: d, loading, error } = useApi('/dashboard');
+  // The intake period, and only it: everything else on this page is about
+  // today. Whole months, because that is the granularity both figures mean —
+  // "joined in September" is an answer, "joined between the 8th and the 23rd"
+  // is not a question anyone asks of an academy that bills by the month.
+  const [[defaultFrom]] = useState(() => [thisMonth()]);
+  // Draft and applied are kept apart for the same reason the instructor
+  // view keeps them apart: a month input fires on every edit, so binding the
+  // request straight to it reloads the page for a half-typed year.
+  const [draft, setDraft] = useState({ from: defaultFrom, to: defaultFrom });
+  const [period, setPeriod] = useState({ from: defaultFrom, to: defaultFrom });
+  const { data: d, loading, error } =
+    useApi(`/dashboard?month_from=${period.from}&month_to=${period.to}`);
   const nav = useNavigate();
+
+  const dirty = draft.from !== period.from || draft.to !== period.to;
+  const onThisMonth = period.from === defaultFrom && period.to === defaultFrom;
+  const applyPeriod = () => setPeriod({ ...draft });
+  const resetPeriod = () => {
+    setDraft({ from: defaultFrom, to: defaultFrom });
+    setPeriod({ from: defaultFrom, to: defaultFrom });
+  };
 
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
@@ -62,12 +82,37 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="grid g2" style={{ marginTop: 15 }}>
+      {/* The period sits above the two cards it governs and nowhere else, so
+          it is obvious which figures it moves. Same two-row .filterbar the
+          instructor view uses: the inputs on one line, the buttons under
+          them, both at a matching height. */}
+      <div style={{ margin: '22px 0 15px' }}>
+        <div className="filterbar">
+          <div>
+            <label>FROM MONTH</label>
+            <input type="month" value={draft.from}
+                   onChange={e => setDraft(p => ({ ...p, from: e.target.value }))} />
+          </div>
+          <div>
+            <label>TO MONTH</label>
+            <input type="month" value={draft.to}
+                   onChange={e => setDraft(p => ({ ...p, to: e.target.value }))} />
+          </div>
+        </div>
+        <div className="filterbar" style={{ marginTop: 10 }}>
+          <button className="pri" onClick={applyPeriod} disabled={!dirty}>Apply</button>
+          <button onClick={resetPeriod} disabled={onThisMonth && !dirty}>Reset to this month</button>
+          <span className="sub">Applies to the two figures below.</span>
+        </div>
+      </div>
+
+      <div className="grid g2">
         <div className="box kpi">
-          <div className="k">NEW CLIENTS IN {monthName(s.mo_month).toUpperCase()}</div>
+          <div className="k">NEW CLIENTS · {monthLabel(s.mo_month, s.mo_month_to).toUpperCase()}</div>
           <div className="v" style={{ color: 'var(--brand)' }}>{s.mo_new_clients}</div>
           <div className="n">
-            {s.mo_new_clients_prev} the month before
+            {s.mo_new_clients_prev}{' '}
+            {s.mo_months === 1 ? 'the month before' : `the ${s.mo_months} months before`}
             {s.mo_new_plans ? ` · ${s.mo_new_plans} plan${s.mo_new_plans === 1 ? '' : 's'} bought` : ''}
           </div>
         </div>
@@ -78,7 +123,8 @@ export default function Dashboard() {
             <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
           </div>
           <div className="n">
-            {s.mo_revenue.toLocaleString()} from every plan sold this month
+            {s.mo_revenue.toLocaleString()} from every plan sold
+            {s.mo_months === 1 ? ' that month' : ' in that period'}
           </div>
         </div>
       </div>

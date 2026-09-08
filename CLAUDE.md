@@ -95,6 +95,18 @@ range is the first user. Such a range applies on a button, never on change —
 a date input fires on every edit, so binding a request straight to it
 reloads the view for a half-typed year.
 
+The dashboard's intake period is the second user, and is **whole months**
+(`<input type="month">`, `month_from`/`month_to` on `/api/dashboard`),
+because that is the granularity both figures it governs actually mean:
+"joined in September" is an answer, and "joined between the 8th and the
+23rd" is not a question anyone asks of an academy that bills by the month.
+It sits directly above the two cards it moves — new clients and what they
+paid — and nothing else on that page is about a period at all, so putting it
+anywhere else would imply it governs the rest. `new_clients_prev` compares
+against the same span immediately before (one month back for a month, three
+for a quarter), so the comparison stays like for like however wide the
+window is opened.
+
 **Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
 a controlled component that replaced app.js's old `enhanceTables()`. Click a
 column header to sort; a long table gets a capped scrolling body whose header

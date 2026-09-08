@@ -13,7 +13,13 @@ router = APIRouter()
 
 
 @router.get("/api/dashboard")
-def dashboard():
+def dashboard(month_from: str = None, month_to: str = None):
+    """
+    Everything the landing page shows. The month range applies to the two
+    intake figures alone — new clients and what they paid — because they are
+    the only ones on the page that are about a period rather than about
+    today. Left out, both default to the month we are in.
+    """
     conn = db.connect()
     try:
         access.settle_past_sessions(conn)
@@ -38,7 +44,7 @@ def dashboard():
             " WHERE e.scanned_at >= ? ORDER BY e.scanned_at DESC LIMIT 60", (midnight,)))
 
         exp = access.expected_today(conn)
-        intake = access.month_intake(conn)
+        intake = access.month_intake(conn, month_from, month_to)
         stats = {
             **{f"exp_{k}": v for k, v in exp.items()},
             **{f"mo_{k}": v for k, v in intake.items()},
