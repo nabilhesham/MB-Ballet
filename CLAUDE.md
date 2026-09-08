@@ -1027,16 +1027,30 @@ Note it is the plan's class, not the session's: a slot moved to another
 class's session (see the correction rule above) is still found by the card of
 the plan that paid for it.
 
-The printed card shows dates **day-first** (`11-09-2026`), converted by
-`cards._ddmmyyyy()` at the moment of drawing. Everywhere else — the database,
+The printed card **spells the month** (`11 Sep 2026`), converted by
+`cards._card_date()` at the moment of drawing. Everywhere else — the database,
 the API, every screen — the date stays ISO, which sorts and cannot be misread;
 the card is the one place a date leaves the system on paper, to be read by a
-person. Do not push the conversion any further back than the card.
+person. Do not push the conversion any further back than the card, and do not
+put a numbered month back on it: `11-09-2026` reads as September to half the
+world and November to the other half, and the card is exactly the artefact
+handed to someone who does not know which convention printed it. The month is
+abbreviated rather than written out because the card sets it beside the
+session count at the same size, and `11 September 2026` only fits by shrinking
+until the two columns stop matching.
 
 The member number and the two figures under the QR (session count, end date)
 are deliberately set large: reception types the number in when the scanner
 and camera are both unavailable, and the other two are what a client asks
 about while standing at the desk.
+
+**The session count is drawn as a number plus a smaller word**, not as one
+auto-fitted `"12 SESSIONS"` string. Fitted, it was the only value on the card
+that shrank — and it shrank by a different amount on every machine, since the
+serif is DejaVu on a developer's Linux box and Georgia on the reception
+laptop. The figure a client actually asks about came out visibly smaller than
+the date beside it. Splitting them lets the number keep its size whatever the
+font, with the word taking the strain instead.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
 the filename so two cards coexist. `cards.card_path()` derives that name and is

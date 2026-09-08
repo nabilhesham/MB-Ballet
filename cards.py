@@ -18,9 +18,12 @@ Design notes, so the next person does not undo them by accident:
     across a counter, not hidden in small print. The same goes for the two
     figures under the QR — the session count and the end date are what a
     client asks about while standing there.
-  - Dates are printed day-first (11-09-2026). The rest of the app speaks ISO,
-    which sorts and cannot be misread; a card is read by a person, and this
-    is the one place a date leaves the system on paper. See _ddmmyyyy.
+  - Dates are printed with the month spelled (11 Sep 2026). The rest of the
+    app speaks ISO, which sorts and cannot be misread; a card is read by a
+    person, and this is the one place a date leaves the system on paper. A
+    numbered month is the one thing a card must not print — it reads as
+    September to half the world and November to the other half. See
+    _card_date.
 """
 
 import os
@@ -147,20 +150,34 @@ def _fit_name(draw, name, width, start=64, floor=32):
     return lines, _font("serif_b", 20)
 
 
-def _ddmmyyyy(iso: str) -> str:
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _card_date(iso: str) -> str:
     """
-    2026-09-11 -> 11-09-2026.
+    2026-09-11 -> 11 Sep 2026.
 
     The database and every screen in the app speak ISO, which sorts and never
-    reads ambiguously. A printed card is read by a person at a counter, and
-    day-first is how a date is written in Alexandria — so the conversion
-    happens here, at the one place a date leaves the system on paper, rather
-    than anywhere the value is still being handled as data. Anything that is
-    not a plain ISO date is printed exactly as given.
+    reads ambiguously. A printed card is read by a person at a counter, so
+    the conversion happens here, at the one place a date leaves the system on
+    paper, and nowhere earlier.
+
+    The month is spelled, not numbered: 11-09-2026 is read as September to
+    half the world and as November to the other half, and a card is exactly
+    the artefact that gets handed to someone who does not know which
+    convention it was printed under. Abbreviated rather than written out in
+    full because the card prints it beside the session count at the same
+    size, and "11 September 2026" only fits there by shrinking to the point
+    where the two columns stop matching.
+
+    Anything that is not a plain ISO date is printed exactly as given.
     """
     parts = (iso or "").split("-")
     if len(parts) == 3 and len(parts[0]) == 4 and all(p.isdigit() for p in parts):
-        return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+        if 1 <= m <= 12:
+            return f"{d} {_MONTHS[m - 1]} {y}"
     return iso or ""
 
 
@@ -271,23 +288,44 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     y += 24
 
     label = _font("mono", 12)
-    value = _font("serif_b", 30)
     mid = CARD_W / 2
+    col_w = mid - MARGIN - 24
 
     d.text((MARGIN, y), "SESSIONS", font=label, fill=MUTE)
     d.text((mid + 14, y), "VALID UNTIL", font=label, fill=MUTE)
     y += 22
 
+    # Both values are set at one size, and the count is drawn as a number
+    # with a smaller word after it rather than as one auto-fitted string.
+    #
+    # It used to be "12 SESSIONS" fitted to the column, which made it the
+    # only value on the card that shrank — and it shrank by a different
+    # amount on every machine, because the serif is DejaVu here and Georgia
+    # on the reception laptop. The figure a client actually asks about came
+    # out visibly smaller than the date beside it and the row read as broken.
+    # Splitting the two means the number keeps its size whatever the font,
+    # and the word takes the strain instead.
+    VAL = 34
+    big = _font("serif_b", VAL)
+    word_size = 17
+    word = _font("serif_b", word_size)
+
     # The total bought, not what's left: a remaining count goes stale the
     # moment they check in, and this PNG is a print snapshot nothing
     # regenerates on its own — reissuing is the only way to refresh it.
-    sessions_text = f"{sessions_total} SESSION{'' if sessions_total == 1 else 'S'}"
-    sessions_font = _fit(d, sessions_text, mid - MARGIN - 24, start=30, minimum=13)
-    d.text((MARGIN, y), sessions_text, font=sessions_font, fill=INK)
-    # Day-first on paper — see _ddmmyyyy. The value handed in is still ISO,
-    # and stays ISO everywhere else.
-    d.text((mid + 14, y), _ddmmyyyy(expires_on), font=value, fill=INK)
-    y += 52
+    num = str(sessions_total)
+    d.text((MARGIN, y), num, font=big, fill=INK)
+    # Roughly baseline-aligned with the number: the two fonts differ in size,
+    # so the smaller one starts lower by the difference between them.
+    d.text((MARGIN + d.textlength(num, font=big) + 9, y + VAL - word_size),
+           "SESSION" if sessions_total == 1 else "SESSIONS", font=word, fill=MUTE)
+
+    # Spelled month — see _card_date. The value handed in is still ISO, and
+    # stays ISO everywhere else. Fitted only as a floor, for a font wider
+    # than the ones measured against.
+    when = _card_date(expires_on)
+    d.text((mid + 14, y), when, font=_fit(d, when, col_w, start=VAL, minimum=20), fill=INK)
+    y += 58
 
     # subtle divider between the two columns
     d.line([mid, tile[3] + 40 + 8, mid, y - 6], fill=RULE, width=1)
