@@ -972,6 +972,19 @@ def prev_month(month: str) -> str:
     return (first - timedelta(days=1)).strftime("%Y-%m")
 
 
+def shift_month(month: str, back: int) -> str:
+    """The "YYYY-MM" `back` months earlier. Used to build the window a
+    period is compared against, which is why it only ever goes backwards."""
+    y, m = int(month[:4]), int(month[5:7])
+    total = y * 12 + (m - 1) - back
+    return f"{total // 12:04d}-{total % 12 + 1:02d}"
+
+
+def months_between(a: str, b: str) -> int:
+    """How many calendar months the inclusive range a..b spans."""
+    return ((int(b[:4]) * 12 + int(b[5:7])) - (int(a[:4]) * 12 + int(a[5:7]))) + 1
+
+
 def month_bounds(when: date = None) -> tuple:
     """The first and last day of a date's calendar month, both ISO. Today's
     month unless told otherwise -- the instructor view's default period."""
@@ -1068,9 +1081,10 @@ def adjust_taught_hours(conn, instructor_id: int, day: str,
     return taught_hours(conn, instructor_id, day, day)
 
 
-def month_intake(conn, month: str = None) -> dict:
+def month_intake(conn, month: str = None, month_to: str = None) -> dict:
     """
-    Who joined this month and what they paid.
+    Who joined in a stretch of months and what they paid. Defaults to the
+    month we are in, which is what the dashboard shows until asked otherwise.
 
     Two numbers reception actually asks for at the end of a month, and they
     are not the same question:
@@ -1078,10 +1092,21 @@ def month_intake(conn, month: str = None) -> dict:
       *New clients* are counted on `joined_on` — the date of their first
       payment, which is when they became a client.
 
-      *Their revenue* is the plans those same people bought this month. A
-      returning client renewing is real money too, so the month's whole
-      intake is reported alongside it rather than instead of it; the pair is
-      what tells you whether growth came from new faces or from the regulars.
+      *Their revenue* is the plans those same people bought in the period. A
+      returning client renewing is real money too, so the whole intake is
+      reported alongside it rather than instead of it; the pair is what tells
+      you whether growth came from new faces or from the regulars.
+
+    The period is whole calendar months, never part of one, because that is
+    the granularity both figures mean: "joined in September" is an answer, and
+    "joined between the 8th and the 23rd" is not a question anybody asks about
+    an academy that bills by the month. Months compare lexicographically as
+    "YYYY-MM" strings, so a BETWEEN on the first seven characters is the whole
+    of the range logic.
+
+    `new_clients_prev` is the same span immediately before — one month back
+    for a single month, three for a quarter — so the comparison is like for
+    like however wide the window is opened.
 
     Plans whose price nobody wrote down are counted separately, never as
     zero. The roster sheets record "package", "free" and "yes" as often as an
@@ -1089,24 +1114,31 @@ def month_intake(conn, month: str = None) -> dict:
     plans carry no figure at all is a lie the shape of a fact.
     """
     month = month or month_of()
-    like = month + "-%"
+    month_to = month_to or month
+    if month_to < month:
+        month, month_to = month_to, month
+    span = months_between(month, month_to)
+    prev_from, prev_to = shift_month(month, span), shift_month(month_to, span)
 
-    new_clients = conn.execute(
-        "SELECT COUNT(*) n FROM clients WHERE active=1 AND joined_on LIKE ?",
-        (like,)).fetchone()["n"]
-    before = conn.execute(
-        "SELECT COUNT(*) n FROM clients WHERE active=1 AND joined_on LIKE ?",
-        (prev_month(month) + "-%",)).fetchone()["n"]
+    def joined_in(a: str, b: str) -> int:
+        return conn.execute(
+            "SELECT COUNT(*) n FROM clients"
+            " WHERE active=1 AND substr(joined_on,1,7) BETWEEN ? AND ?",
+            (a, b)).fetchone()["n"]
+
+    new_clients = joined_in(month, month_to)
+    before = joined_in(prev_from, prev_to)
 
     def takings(only_new: bool) -> tuple:
-        joined = " AND c.joined_on LIKE ?" if only_new else ""
-        args = (like, like) if only_new else (like,)
+        joined = " AND substr(c.joined_on,1,7) BETWEEN ? AND ?" if only_new else ""
+        args = (month, month_to) * (2 if only_new else 1)
         r = conn.execute(
             "SELECT COALESCE(SUM(s.price),0) paid,"
             "       SUM(CASE WHEN s.price IS NULL THEN 1 ELSE 0 END) unpriced,"
             "       COUNT(*) plans"
             "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
-            " WHERE c.active=1 AND s.starts_on LIKE ?" + joined, args).fetchone()
+            " WHERE c.active=1 AND substr(s.starts_on,1,7) BETWEEN ? AND ?" + joined,
+            args).fetchone()
         return r["paid"] or 0, r["unpriced"] or 0, r["plans"] or 0
 
     new_paid, new_unpriced, new_plans = takings(True)
@@ -1114,6 +1146,8 @@ def month_intake(conn, month: str = None) -> dict:
 
     return {
         "month": month,
+        "month_to": month_to,
+        "months": span,
         "new_clients": new_clients,
         "new_clients_prev": before,
         "new_revenue": round(new_paid, 2),

@@ -50,6 +50,24 @@ export const hrs = h => (h % 1 === 0 ? h : h.toFixed(1)) + (h === 1 ? ' hour' : 
 export const monthName = m =>
   new Date(+m.slice(0, 4), +m.slice(5, 7) - 1, 1).toLocaleDateString([], { month: 'long' });
 
+/* "September 2026", or "Sep 2026 – Nov 2026" for a range. The year is
+   spelled out even on a single month: the dashboard's intake period can now
+   be pointed at any month, so a bare month name would leave the figure
+   under it ambiguous the moment someone looks back at last year. */
+export const monthLabel = (from, to) => {
+  const one = (m, opts) =>
+    new Date(+m.slice(0, 4), +m.slice(5, 7) - 1, 1).toLocaleDateString([], opts);
+  if (!to || to === from) return one(from, { month: 'long', year: 'numeric' });
+  const o = { month: 'short', year: 'numeric' };
+  return `${one(from, o)} – ${one(to, o)}`;
+};
+
+/* The "YYYY-MM" of today, which is what an <input type="month"> holds. */
+export const thisMonth = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
 export const fmtISO = d =>
   d
     ? new Date(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10))
