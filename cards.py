@@ -43,7 +43,7 @@ MUTE = "#8B8090"
 RULE = "#E7DEEA"
 ACCENT = "#87438E"          # the purple of the logo
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo.png")
-LOGO_W, LOGO_H = 158, 160     # as drawn on the card; ~13 mm printed at 300 dpi
+LOGO_W, LOGO_H = 175, 178     # as drawn on the card; ~15 mm printed at 300 dpi
 
 # ---------------------------------------------------------------- fonts
 _SERIF = [
