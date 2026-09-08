@@ -122,9 +122,14 @@ export default function Dashboard() {
             {s.mo_new_revenue.toLocaleString()}{' '}
             <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
           </div>
+          {/* The two numbers in this card are scoped differently on purpose:
+              the big one follows the new clients wherever their plans fall,
+              this one is the period's own takings from everybody. Saying
+              "new or returning" is what stops them reading as the same
+              question answered twice. */}
           <div className="n">
             {s.mo_revenue.toLocaleString()} from every plan sold
-            {s.mo_months === 1 ? ' that month' : ' in that period'}
+            {s.mo_months === 1 ? ' that month' : ' in that period'}, new or returning
           </div>
         </div>
       </div>
