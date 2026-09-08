@@ -318,11 +318,18 @@ def _client_payload(conn, client, sub, class_id=None) -> dict:
         " WHERE b.client_id = ? AND b.status = 'booked' AND s.starts_at > ?"
         f"{class_clause} ORDER BY s.starts_at LIMIT 1", nxt_params).fetchone()
 
+    # last_visit is the day they last came, so it reads from the session's own
+    # date rather than from checked_in_at — the same distinction the
+    # already-in guard in _decide() turns on. Marking someone present days
+    # afterwards stamps checked_in_at with the moment of the marking, which
+    # had this line reporting a visit on a day the academy never saw them, one
+    # panel away from the recent-attendance chips saying otherwise.
     tot = conn.execute(
-        "SELECT SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) present,"
-        "       SUM(CASE WHEN status='absent' THEN 1 ELSE 0 END) absent,"
-        "       MAX(CASE WHEN status='present' THEN checked_in_at END) last_visit"
-        "  FROM bookings WHERE client_id=?", (cid,)).fetchone()
+        "SELECT SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) present,"
+        "       SUM(CASE WHEN b.status='absent' THEN 1 ELSE 0 END) absent,"
+        "       MAX(CASE WHEN b.status='present' THEN s.starts_at END) last_visit"
+        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
+        " WHERE b.client_id=?", (cid,)).fetchone()
 
     return {
         "phone": client["phone"], "age": client["age"], "school": client["school"],
@@ -411,17 +418,32 @@ def _decide(conn, client, cred, base, t):
     cred_id = cred["id"] if cred else None
 
     # Already in today? Say so and stop — a second scan must never cost a slot.
+    #
+    # "Today" is the *session's* day, not the moment the attendance was
+    # recorded. Those are not the same thing: set_status() stamps
+    # checked_in_at with the instant someone presses Present, so marking a
+    # client present this evening for yesterday's class writes today's
+    # timestamp onto yesterday's booking. Filtering on that timestamp turned
+    # a client with nothing on today away with "already checked in today for
+    # Adult Ballet Monday" — naming a class that ran the day before, and
+    # withholding the manual check-in this refusal is not supposed to reach.
     done = conn.execute(
-        "SELECT b.checked_in_at, c.name AS class_name FROM bookings b"
+        "SELECT b.checked_in_at, s.starts_at, c.name AS class_name FROM bookings b"
         "  JOIN sessions s ON s.id = b.session_id"
         "  JOIN classes c ON c.id = s.class_id"
         " WHERE b.client_id = ? AND b.status = 'present'"
-        "   AND b.checked_in_at BETWEEN ? AND ?"
-        " ORDER BY b.checked_in_at DESC LIMIT 1", (cid, start, end)).fetchone()
+        "   AND s.starts_at BETWEEN ? AND ?"
+        " ORDER BY s.starts_at DESC LIMIT 1", (cid, start, end)).fetchone()
     if done:
-        when = time.strftime("%H:%M", time.localtime(done["checked_in_at"]))
+        # The time is worth printing only when it is a time from today. A
+        # booking marked present in advance carries an earlier day's stamp,
+        # and "checked in today at 19:24" would then name an hour nobody was
+        # here for; older rows may carry no stamp at all.
+        at = done["checked_in_at"]
+        when = (f" at {time.strftime('%H:%M', time.localtime(at))}"
+                if at and start <= at <= end else "")
         _log(conn, cid, cred_id, None, "deny", "already checked in today")
-        return _deny(f"Already checked in today at {when} for {done['class_name']}",
+        return _deny(f"Already checked in today{when} for {done['class_name']}",
                      detail="nothing was deducted", severity="warn", **base)
 
     # The card's own plan: freezing the ballet plan must not turn away a

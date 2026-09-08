@@ -878,7 +878,21 @@ switch to base64, UUIDs, or JSON payloads.
 **One check-in per day.** A client who scans again on the same calendar day is
 refused with "Already checked in today at HH:MM" and **nothing is deducted**.
 The earlier rolling ten-minute window was wrong: someone returning after lunch
-would have been charged twice. `access._todays_checkin()` owns this.
+would have been charged twice. The guard is at the top of `access._decide()`.
+
+**"Today" there means the session's day, never `checked_in_at`.** The two are
+not the same: `set_status()` stamps `checked_in_at` with the instant someone
+presses **Present**, so marking a client present this evening for yesterday's
+class writes today's timestamp onto yesterday's booking. The guard used to
+filter on that timestamp, and a client with nothing on today was turned away
+with "already checked in today for Adult Ballet Monday" — naming a class that
+ran the day before, and withholding the manual check-in that "no session
+booked today" is supposed to offer. It now joins the session and asks whether
+*that* falls in today, and prints the time only when the stamp is itself from
+today (a booking marked present in advance carries an earlier day's).
+`_client_payload()`'s `last_visit` reads the session's date for the same
+reason — it sat one panel away from the recent-attendance chips, which have
+always used the session's own date, and disagreed with them.
 
 **A refusal has two temperatures.** `_deny()` carries a `severity`: `"stop"`
 is the default and reads red, `"warn"` reads amber and is what the
