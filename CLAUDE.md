@@ -107,6 +107,23 @@ against the same span immediately before (one month back for a month, three
 for a quarter), so the comparison stays like for like however wide the
 window is opened.
 
+**The two intake figures are scoped differently, and must stay that way.**
+"Earned from them" is filtered by *who* — every plan belonging to a client
+who joined in the period, whenever they bought it — while `revenue` is
+filtered by *when*, every plan sold inside the window whoever bought it. The
+first used to carry both filters at once, and a client who joined on 14
+August whose plan started on 2 September then fell through both months: out
+of range in August, not a new client in September. August read "4 new
+clients, 0 EGP" while three of those four had paid 4,100 between them, and
+because two ANDed date windows do not add up across sub-periods, August plus
+September came to more than either month showed — which is how it was
+noticed. Scoping it to the people is what keeps the two cards describing the
+same clients; the price is that a past month's figure grows as its intake
+renews later, which is what "earned from *them*" means. Do not put the
+second filter back to make it add up — `revenue` is the number that is
+period-bound, and the card says "new or returning" under it for exactly that
+contrast.
+
 **Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
 a controlled component that replaced app.js's old `enhanceTables()`. Click a
 column header to sort; a long table gets a capped scrolling body whose header

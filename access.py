@@ -1092,10 +1092,27 @@ def month_intake(conn, month: str = None, month_to: str = None) -> dict:
       *New clients* are counted on `joined_on` — the date of their first
       payment, which is when they became a client.
 
-      *Their revenue* is the plans those same people bought in the period. A
-      returning client renewing is real money too, so the whole intake is
-      reported alongside it rather than instead of it; the pair is what tells
-      you whether growth came from new faces or from the regulars.
+      *Their revenue* is every plan those same people have bought. A
+      returning client renewing is real money too, so the period's whole
+      intake is reported alongside it rather than instead of it; the pair is
+      what tells you whether growth came from new faces or from the regulars.
+
+    The two are scoped differently on purpose, and that is the subtle part.
+    The new-client figure is filtered by *who* — the clients who joined in the
+    period — and by nothing else. It used to be filtered by when their plans
+    started as well, and a client who joined on 14 August whose plan started
+    on 2 September then fell through both months: out of range in August, not
+    a new client in September. August read "4 new clients, 0 EGP" while three
+    of those four had paid 4,100 between them. Two dates ANDed together also
+    do not add up across sub-periods, so August plus September came to more
+    than either month suggested, which is how it was noticed.
+
+    So this figure follows the people, and the money follows them out of the
+    period: a month's number grows as its intake renews later on. That is
+    what "earned from them" means, and it is the reading that keeps the two
+    cards describing the same clients. The period-bound number is the other
+    one — `revenue`, every plan *sold* in the window, whoever bought it —
+    which stays strictly inside it and does add up across months.
 
     The period is whole calendar months, never part of one, because that is
     the granularity both figures mean: "joined in September" is an answer, and
@@ -1129,20 +1146,23 @@ def month_intake(conn, month: str = None, month_to: str = None) -> dict:
     new_clients = joined_in(month, month_to)
     before = joined_in(prev_from, prev_to)
 
-    def takings(only_new: bool) -> tuple:
-        joined = " AND substr(c.joined_on,1,7) BETWEEN ? AND ?" if only_new else ""
-        args = (month, month_to) * (2 if only_new else 1)
+    def takings(where: str) -> tuple:
         r = conn.execute(
             "SELECT COALESCE(SUM(s.price),0) paid,"
             "       SUM(CASE WHEN s.price IS NULL THEN 1 ELSE 0 END) unpriced,"
             "       COUNT(*) plans"
             "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
-            " WHERE c.active=1 AND substr(s.starts_on,1,7) BETWEEN ? AND ?" + joined,
-            args).fetchone()
+            f" WHERE c.active=1 AND substr({where},1,7) BETWEEN ? AND ?",
+            (month, month_to)).fetchone()
         return r["paid"] or 0, r["unpriced"] or 0, r["plans"] or 0
 
-    new_paid, new_unpriced, new_plans = takings(True)
-    all_paid, all_unpriced, all_plans = takings(False)
+    # Every plan belonging to a client who joined in the period, whenever they
+    # bought it — see the note above on why this is not also filtered by when
+    # the plan started.
+    new_paid, new_unpriced, new_plans = takings("c.joined_on")
+    # Every plan sold in the period, whoever bought it. This one is the
+    # period's own takings and stays inside the window.
+    all_paid, all_unpriced, all_plans = takings("s.starts_on")
 
     return {
         "month": month,
