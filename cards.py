@@ -10,9 +10,10 @@ Design notes, so the next person does not undo them by accident:
     out-ranks them.
   - Serif throughout for the names, mono only for the token and labels. An art
     academy card should not look like a gym receipt.
-  - Fonts are resolved from a candidate list. Cards are generated wherever the
-    app runs, which may be Windows with no DejaVu installed, so each role falls
-    back through Linux, Windows and macOS options before giving up.
+  - Fonts ship with the app, in static/fonts/. Cards are generated wherever
+    the app runs, and a card set in a different typeface per machine is three
+    different cards for one academy — so the fonts travel with it rather than
+    being looked for on the machine. See the note above _SERIF.
   - The member number is printed large and clearly. Reception types it in when
     the scanner and camera are both unavailable, so it has to be readable
     across a counter, not hidden in small print. The same goes for the two
@@ -27,6 +28,7 @@ Design notes, so the next person does not undo them by accident:
 """
 
 import os
+import sys
 
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
@@ -42,34 +44,50 @@ INK = "#1B1220"
 MUTE = "#8B8090"
 RULE = "#E7DEEA"
 ACCENT = "#87438E"          # the purple of the logo
-LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo.png")
+
+# Where the card's own assets live. A packaged build unpacks them into a
+# temporary folder, the same place server.py reads its static files from —
+# see the paths note at the top of server.py for why that folder and the
+# working directory are deliberately not the same.
+_BASE = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+STATIC = os.path.join(_BASE, "static")
+
+LOGO = os.path.join(STATIC, "logo.png")
 LOGO_W, LOGO_H = 175, 178     # as drawn on the card; ~15 mm printed at 300 dpi
 
 # ---------------------------------------------------------------- fonts
+#
+# The card ships its own fonts, in static/fonts/, and reaches for a machine's
+# own only if those are missing.
+#
+# It did not used to. Each role fell back through a list of Linux, Windows
+# and macOS paths, so the card was set in DejaVu on a developer's Linux box,
+# Georgia on Windows and Georgia or Menlo on a Mac — three different cards
+# for the same client, and every typographic decision (what fits a column,
+# what has to shrink, how the two footer figures line up) silently retuned by
+# whichever machine happened to print it. A card is a printed artefact of one
+# academy; it should look the same wherever it comes out.
+#
+# DejaVu, because it is what the design was drawn against and its licence
+# (static/fonts/LICENSE.txt) allows redistribution. The system paths below it
+# are a safety net for a checkout with the folder missing, not a choice.
+_BUNDLED = os.path.join(STATIC, "fonts")
 _SERIF = [
+    os.path.join(_BUNDLED, "DejaVuSerif.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    "/usr/share/fonts/truetype/crosextra/Caladea-Regular.ttf",
     "C:/Windows/Fonts/georgia.ttf",
-    "C:/Windows/Fonts/times.ttf",
     "/System/Library/Fonts/Supplemental/Georgia.ttf",
 ]
 _SERIF_B = [
+    os.path.join(_BUNDLED, "DejaVuSerif-Bold.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
-    "/usr/share/fonts/truetype/crosextra/Caladea-Bold.ttf",
     "C:/Windows/Fonts/georgiab.ttf",
-    "C:/Windows/Fonts/timesbd.ttf",
     "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
 ]
-_SANS = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "C:/Windows/Fonts/segoeui.ttf",
-    "C:/Windows/Fonts/arial.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-]
 _MONO = [
+    os.path.join(_BUNDLED, "DejaVuSansMono.ttf"),
     "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
     "C:/Windows/Fonts/consola.ttf",
-    "C:/Windows/Fonts/cour.ttf",
     "/System/Library/Fonts/Menlo.ttc",
 ]
 _cache = {}
@@ -79,8 +97,7 @@ def _font(role, size):
     key = (role, size)
     if key in _cache:
         return _cache[key]
-    for path in {"serif": _SERIF, "serif_b": _SERIF_B,
-                 "sans": _SANS, "mono": _MONO}[role]:
+    for path in {"serif": _SERIF, "serif_b": _SERIF_B, "mono": _MONO}[role]:
         if os.path.exists(path):
             try:
                 _cache[key] = ImageFont.truetype(path, size)

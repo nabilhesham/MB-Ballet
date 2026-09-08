@@ -12,7 +12,9 @@ out produces an .exe that opens a console and closes instantly.
 # static/, so this needs no entry of its own — and must not get one. Adding
 # a separate ("frontend", "frontend") entry would bundle node_modules into
 # the exe; the whole point of committing static/app/ is that this build
-# never touches frontend/ at all.
+# never touches frontend/ at all. static/fonts/ rides along the same way,
+# and must: the card sets its own typefaces from there rather than from
+# whatever the machine happens to have installed.
 datas = [("static", "static")]
 
 hiddenimports = [
