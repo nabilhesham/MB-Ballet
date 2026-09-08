@@ -168,6 +168,10 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
 static/app/       Committed build output of frontend/ — what server.py
                   actually serves at `/`. Regenerate with `npm run build`
                   after any `frontend/src/` change; see Stack above.
+static/fonts/     The card's typefaces (DejaVu Serif/Serif-Bold/SansMono)
+                  plus their licence. Committed on purpose — cards.py sets
+                  the card from these rather than from whatever the machine
+                  has installed, so one card looks the same everywhere.
 static/style.css  Design tokens and components. Shared by the React admin,
                   reception.html and scanner-test.html — all three load it
                   by the same `/static/style.css` URL, so it is never bundled
@@ -1055,6 +1059,17 @@ unequal for the same reason: a count is three characters and a spelled date
 is eleven, so the rule between them sits at 36% rather than halfway, which
 leaves the date enough room to stay at its full size on a wider font instead
 of shrinking back out of step.
+
+**The card carries its own fonts** (`static/fonts/`, committed, bundled into
+the packaged builds by `academy.spec`'s existing `datas` entry). Each role
+used to fall back through a list of Linux, Windows and macOS paths, so the
+same client's card came out in DejaVu on a developer's Linux box, Georgia on
+Windows and Georgia or Menlo on a Mac — three different cards for one
+academy, with every typographic decision here (what fits a column, what has
+to shrink, how the two footer figures line up) silently retuned by whichever
+machine printed it. The system paths are still listed underneath as a safety
+net for a checkout missing the folder, not as a choice. DejaVu because the
+design was drawn against it and its licence allows redistribution.
 
 **One typeface does the lettering, one does the member number.** Everything
 made of letters — the card's labels, the token, the footer line — is set in
