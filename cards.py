@@ -43,6 +43,7 @@ MUTE = "#8B8090"
 RULE = "#E7DEEA"
 ACCENT = "#87438E"          # the purple of the logo
 LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "logo.png")
+LOGO_W, LOGO_H = 158, 160     # as drawn on the card; ~13 mm printed at 300 dpi
 
 # ---------------------------------------------------------------- fonts
 _SERIF = [
@@ -227,9 +228,12 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     # --- the academy logo, in place of a typeset masthead ---------------
     if os.path.exists(LOGO):
         logo = Image.open(LOGO).convert("RGBA")
-        target_w = int(ROW_W * 0.25)
-        ratio = target_w / logo.width
-        logo = logo.resize((target_w, int(logo.height * ratio)), Image.LANCZOS)
+        # A chosen size in pixels rather than a fraction of the card, because
+        # this is a size somebody looked at and settled on. It is within a
+        # percent of the source art's own proportions, so nothing is visibly
+        # stretched; a logo file of a very different shape would be, and
+        # would want these two numbers revisited rather than the resize.
+        logo = logo.resize((LOGO_W, LOGO_H), Image.LANCZOS)
         # Composite rather than paste so the transparent background picks up
         # the card's paper colour instead of a white block.
         card.paste(logo, ((CARD_W - logo.width) // 2, y), logo)
