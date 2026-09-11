@@ -994,6 +994,19 @@ def prev_month(month: str) -> str:
     return (first - timedelta(days=1)).strftime("%Y-%m")
 
 
+def next_month(month: str) -> str:
+    """
+    The "YYYY-MM" after this one.
+
+    Used as the open end of a month range: an ISO date sorts lexicographically
+    against a bare "YYYY-MM", so `joined_on < next_month(m)` is exactly
+    "in or before month m" without extracting the month from the column
+    first. See month_intake().
+    """
+    y, m = int(month[:4]), int(month[5:7])
+    return f"{y + 1:04d}-01" if m == 12 else f"{y:04d}-{m + 1:02d}"
+
+
 def shift_month(month: str, back: int) -> str:
     """The "YYYY-MM" `back` months earlier. Used to build the window a
     period is compared against, which is why it only ever goes backwards."""
@@ -1159,11 +1172,17 @@ def month_intake(conn, month: str = None, month_to: str = None) -> dict:
     span = months_between(month, month_to)
     prev_from, prev_to = shift_month(month, span), shift_month(month_to, span)
 
+    # A month range as a half-open range over the whole date, rather than
+    # substr(col,1,7) BETWEEN a AND b. The two are equivalent — an ISO date
+    # sorts lexicographically against a bare "YYYY-MM", so "2026-08-31" is
+    # both >= "2026-08" and < "2026-09" while "2026-07-31" is neither — and
+    # the range form is the one an index can use. substr() on the column
+    # defeated ix_cli_joined and ix_sub_starts entirely.
     def joined_in(a: str, b: str) -> int:
         return conn.execute(
             "SELECT COUNT(*) n FROM clients"
-            " WHERE active=1 AND substr(joined_on,1,7) BETWEEN ? AND ?",
-            (a, b)).fetchone()["n"]
+            " WHERE active=1 AND joined_on >= ? AND joined_on < ?",
+            (a, next_month(b))).fetchone()["n"]
 
     new_clients = joined_in(month, month_to)
     before = joined_in(prev_from, prev_to)
@@ -1174,8 +1193,8 @@ def month_intake(conn, month: str = None, month_to: str = None) -> dict:
             "       SUM(CASE WHEN s.price IS NULL THEN 1 ELSE 0 END) unpriced,"
             "       COUNT(*) plans"
             "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
-            f" WHERE c.active=1 AND substr({where},1,7) BETWEEN ? AND ?",
-            (month, month_to)).fetchone()
+            f" WHERE c.active=1 AND {where} >= ? AND {where} < ?",
+            (month, next_month(month_to))).fetchone()
         return r["paid"] or 0, r["unpriced"] or 0, r["plans"] or 0
 
     # Every plan belonging to a client who joined in the period, whenever they
