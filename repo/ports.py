@@ -158,6 +158,57 @@ class ClientsPort(ABC):
         """Every session one plan has paid for, in order."""
 
 
+class AccessPort(ABC):
+
+    @abstractmethod
+    def credential_by_token(self, token: str):
+        """The credential with its class named, or None."""
+
+    @abstractmethod
+    def client_day_bookings(self, client_id: int, start: int, end: int) -> list:
+        """
+        Every booking of this client whose session starts in [start, end),
+        with the session, its class, its instructor and **the class of the
+        plan that paid for it** all resolved.
+
+        Deliberately one flat fetch rather than a query per question. What
+        `_decide()` needs from it — is one already present, which is nearest
+        to now, does the card's class match — is decided in Python, because
+        the window is one client and one day and is never more than a handful
+        of rows. Written as a query it is a four-table join with a
+        conditional OR and an `ORDER BY ABS(starts_at - ?)`, which has no
+        readable equivalent on a document store.
+
+        `plan_class_id` is the point: a card proves the *plan's* class, not
+        the session's, which is what lets a slot moved to another class still
+        be found by the card that paid for it.
+        """
+
+    @abstractmethod
+    def recent_attendance(self, client_id: int, limit: int) -> list:
+        """Their last few settled sessions, newest first."""
+
+    @abstractmethod
+    def next_booked_session(self, client_id: int, after: int, class_id: int = None):
+        """
+        The next session they are booked into, or None. Scoped to a class
+        when the card names one — a Ballet card answering with a Flexibility
+        date is true but not the question asked.
+        """
+
+    @abstractmethod
+    def client_totals(self, client_id: int) -> dict:
+        """`{"present", "absent", "last_visit"}` across their whole history."""
+
+    @abstractmethod
+    def session_roster(self, session_id: int) -> list:
+        """Who is booked into a session, with their attendance status."""
+
+    @abstractmethod
+    def day_attendance_totals(self, start: int, end: int) -> dict:
+        """`{"expected", "arrived", "absent"}` across a day's sessions."""
+
+
 class PlansPort(ABC):
 
     @abstractmethod

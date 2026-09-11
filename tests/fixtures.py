@@ -55,6 +55,20 @@ def _ins(repo, table: str, **cols) -> int:
     return repo.insert(table, cols)
 
 
+def later_today(hours: float = 2) -> int:
+    """
+    A moment `hours` from now, but never past the end of today.
+
+    Every test that needs "a session running later today" must go through
+    this. `db.now() + 2*3600` looks equivalent and is not: run the suite at
+    22:05 and it lands tomorrow, the session falls outside day_bounds(), and
+    a scan that should match finds nothing. That is a test failing by the
+    hour of day, which is the worst kind to debug.
+    """
+    end_of_day = _ts(date.today(), 23, 50)
+    return min(db.now() + int(hours * 3600), end_of_day)
+
+
 def add_session(repo, class_id, instructor_id, starts_at, hours=1.5, status=None):
     """
     Create a session with its `ends_at` set.
@@ -175,9 +189,7 @@ def build_academy(repo) -> SimpleNamespace:
         # One ballet session later today, for the arriving-early path. Placed a
         # few hours out but kept inside today, since "one check-in per day" is
         # scoped to the session's own calendar day.
-        end_of_day = _ts(today, 23, 50)
-        a.today_ballet = add_session(repo, a.ballet, a.ana,
-                                     min(db.now() + 3 * 3600, end_of_day), 1.5,
+        a.today_ballet = add_session(repo, a.ballet, a.ana, later_today(3), 1.5,
                                      status="scheduled")
 
         # -------------------------------------------------- clients

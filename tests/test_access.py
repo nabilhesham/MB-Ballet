@@ -10,7 +10,7 @@ from datetime import date, timedelta
 
 import access
 import db
-from fixtures import add_session
+from fixtures import add_session, later_today
 
 
 def test_a_client_holds_one_card_per_class(academy):
@@ -145,3 +145,73 @@ def test_an_unpriced_plan_is_counted_not_treated_as_zero(academy):
     m = access.month_intake(academy.repo, date.today().strftime("%Y-%m"))
     assert m["unpriced"] >= 1, m
     assert m["unpriced"] <= m["plans"]
+
+
+# ------------------------------------------------ the card matches the plan
+
+def test_a_card_finds_a_slot_moved_to_another_classs_session(academy):
+    """
+    The scan matches the booking's *plan's* class, not the session's.
+
+    This is what records "she missed Ballet on Tuesday and came to
+    Flexibility on Wednesday instead" without selling a second plan: the slot
+    keeps the plan that paid for it, so the Ballet card still opens the door
+    for it. Matching on the session's own class would turn her away.
+    """
+    repo = academy.repo
+    # A flexibility session today, which the ballet plan will be moved onto.
+    target = add_session(repo, academy.flex, academy.bea,
+                         later_today(2), 1.0, status="scheduled")
+    moved = access.move_booking(repo, academy.dual, academy.today_ballet, target,
+                                allow_other_class=True)
+    assert moved["ok"], moved
+
+    r = access.verify(repo, academy.dual_ballet_card)
+
+    assert r["granted"] is True, r["message"]
+    assert r["session"]["id"] == target
+    assert r["session"]["class_name"] == "Evening Flexibility"
+
+
+def test_the_other_classs_card_still_cannot_spend_that_slot(academy):
+    """One card per class keeps meaning something after a cross-class move."""
+    repo = academy.repo
+    target = add_session(repo, academy.flex, academy.bea,
+                         later_today(2), 1.0, status="scheduled")
+    access.move_booking(repo, academy.dual, academy.today_ballet, target,
+                        allow_other_class=True)
+
+    r = access.verify(repo, academy.dual_flex_card)
+
+    assert r["granted"] is False, "the flex card must not spend a ballet-funded slot"
+
+
+def test_a_booking_with_no_plan_falls_back_to_the_sessions_class(academy):
+    """Older rows carry no subscription_id and keep the original rule."""
+    repo = academy.repo
+    repo.update_where("bookings",
+                      {"client_id": academy.dual, "session_id": academy.today_ballet},
+                      {"subscription_id": None})
+    r = access.verify(repo, academy.dual_ballet_card)
+    assert r["granted"] is True, r["message"]
+
+
+def test_a_cancelled_session_is_not_a_match(academy):
+    repo = academy.repo
+    repo.update("sessions", academy.today_ballet, {"status": "cancelled"})
+    r = access.verify(repo, academy.dual_ballet_card)
+    assert r["granted"] is False
+    assert r.get("code") == "no_session_today", r
+
+
+def test_the_nearest_session_of_the_day_is_the_one_matched(academy):
+    """What ORDER BY ABS(starts_at - now) was for."""
+    repo = academy.repo
+    far = add_session(repo, academy.ballet, academy.ana,
+                      later_today(8), 1.0, status="scheduled")
+    access.book(repo, academy.dual, far, academy.dual_ballet_plan)
+
+    r = access.verify(repo, academy.dual_ballet_card)
+
+    assert r["granted"] is True
+    assert r["session"]["id"] == academy.today_ballet, "the nearer of the two"

@@ -13,7 +13,7 @@ import pytest
 
 import access
 import db
-from fixtures import _ins, add_session
+from fixtures import _ins, add_session, later_today
 
 
 def clients(repo):
@@ -138,7 +138,7 @@ def a_session_today_they_are_not_booked_into(a):
     What a swap is actually for: the client turns up for something running
     today that they hold no slot in. today_ballet is already theirs.
     """
-    return add_session(a.repo, a.flex, a.bea, db.now() + 2 * 3600, 1.0,
+    return add_session(a.repo, a.flex, a.bea, later_today(2), 1.0,
                        status="scheduled")
 
 

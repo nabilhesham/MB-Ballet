@@ -319,43 +319,15 @@ def _client_payload(repo, client, sub, class_id=None) -> dict:
     cid = client["id"]
     state = plan_state(repo, sub["id"]) if sub else {}
 
-    recent = [dict(r) for r in repo.raw(
-        "SELECT b.status, b.checked_in_at, s.id AS session_id, s.starts_at,"
-        "       c.name AS class_name, c.colour"
-        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        "  JOIN classes c ON c.id = s.class_id"
-        " WHERE b.client_id = ? AND b.status != 'booked'"
-        " ORDER BY s.starts_at DESC LIMIT 4", (cid,)).fetchall()]
+    recent = repo.recent_attendance(cid, 4)
 
     # "Next class" means the next one on the card being held. A client who
     # takes Ballet and Flexibility was being shown whichever came first
     # across both, so the Ballet card could answer with a Flexibility date —
     # true, but not what was asked. Scoped to the card's class; a
     # member-number lookup names no class and still spans everything.
-    nxt_params = [cid, db.now()]
-    class_clause = ""
-    if class_id:
-        class_clause = " AND s.class_id = ?"
-        nxt_params.append(class_id)
-    nxt = repo.raw(
-        "SELECT s.starts_at, c.name AS class_name FROM bookings b"
-        "  JOIN sessions s ON s.id = b.session_id"
-        "  JOIN classes c ON c.id = s.class_id"
-        " WHERE b.client_id = ? AND b.status = 'booked' AND s.starts_at > ?"
-        f"{class_clause} ORDER BY s.starts_at LIMIT 1", nxt_params).fetchone()
-
-    # last_visit is the day they last came, so it reads from the session's own
-    # date rather than from checked_in_at — the same distinction the
-    # already-in guard in _decide() turns on. Marking someone present days
-    # afterwards stamps checked_in_at with the moment of the marking, which
-    # had this line reporting a visit on a day the academy never saw them, one
-    # panel away from the recent-attendance chips saying otherwise.
-    tot = repo.raw(
-        "SELECT SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) present,"
-        "       SUM(CASE WHEN b.status='absent' THEN 1 ELSE 0 END) absent,"
-        "       MAX(CASE WHEN b.status='present' THEN s.starts_at END) last_visit"
-        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        " WHERE b.client_id=?", (cid,)).fetchone()
+    nxt = repo.next_booked_session(cid, db.now(), class_id)
+    tot = repo.client_totals(cid)
 
     return {
         "phone": client["phone"], "age": client["age"], "school": client["school"],
@@ -371,11 +343,11 @@ def _client_payload(repo, client, sub, class_id=None) -> dict:
         # anything — nobody looks them up afterwards.
         "client_notes": client["notes"],
         "plan_notes": state.get("notes"),
-        "visits": tot["present"] or 0,
-        "absences": tot["absent"] or 0,
+        "visits": tot["present"],
+        "absences": tot["absent"],
         "last_visit": tot["last_visit"],
         "recent": recent,
-        "next_session": dict(nxt) if nxt else None,
+        "next_session": nxt,
         "low_balance": state.get("remaining") is not None and 0 < state["remaining"] <= 2,
         "frozen": state.get("frozen", False),
         "frozen_until": state.get("frozen_until"),
@@ -392,10 +364,7 @@ def verify(repo, raw_token: str) -> dict:
         _log(repo, None, None, None, "deny", f"invalid token: {e}")
         return _deny("This code was not issued by us", detail=str(e))
 
-    cred = repo.raw(
-        "SELECT cr.*, c.name AS class_name, c.colour FROM credentials cr"
-        "  LEFT JOIN classes c ON c.id = cr.class_id"
-        " WHERE cr.token=?", (raw_token.strip().upper(),)).fetchone()
+    cred = repo.credential_by_token(raw_token.strip().upper())
     if cred is None:
         return _deny("Card not recognised", detail="valid signature, no matching record")
 
@@ -404,7 +373,7 @@ def verify(repo, raw_token: str) -> dict:
     # "Unknown card" told reception the person in front of them was a
     # stranger — every reissue leaves an older card in circulation that lands
     # here. Denials carry the profile wherever the client is known.
-    client = repo.raw("SELECT * FROM clients WHERE id=?", (cred["client_id"],)).fetchone()
+    client = repo.get("clients", cred["client_id"])
     if client is None:
         return _deny("Card not recognised", detail="no client behind this credential")
     known = {
@@ -453,13 +422,18 @@ def _decide(repo, client, cred, base, t):
     # a client with nothing on today away with "already checked in today for
     # Adult Ballet Monday" — naming a class that ran the day before, and
     # withholding the manual check-in this refusal is not supposed to reach.
-    done = repo.raw(
-        "SELECT b.checked_in_at, s.starts_at, c.name AS class_name FROM bookings b"
-        "  JOIN sessions s ON s.id = b.session_id"
-        "  JOIN classes c ON c.id = s.class_id"
-        " WHERE b.client_id = ? AND b.status = 'present'"
-        "   AND s.starts_at BETWEEN ? AND ?"
-        " ORDER BY s.starts_at DESC LIMIT 1", (cid, start, end)).fetchone()
+    # One flat fetch of everything of theirs that runs today; the three
+    # questions below are decided in Python. The window is one client and one
+    # day, so this is a handful of rows -- and as a query it would be a
+    # four-table join with a conditional OR and ORDER BY ABS(...), which has
+    # no readable equivalent on a document store.
+    today_rows = repo.client_day_bookings(cid, start, end)
+
+    # "Today" means the session's own day, never checked_in_at: marking
+    # someone present this evening for yesterday's class stamps today's time
+    # onto yesterday's booking.
+    present = [r for r in today_rows if r["status"] == "present"]
+    done = max(present, key=lambda r: (r["starts_at"], r["session_id"])) if present else None
     if done:
         # The time is worth printing only when it is a time from today. A
         # booking marked present in advance carries an earlier day's stamp,
@@ -482,8 +456,7 @@ def _decide(repo, client, cred, base, t):
         return _deny(f"This plan is frozen{when}",
                      detail="unfreeze it from their profile to let them in", **base)
 
-    params = [cid, start, end]
-    class_clause = ""
+    candidates = [r for r in today_rows if r["session_status"] != "cancelled"]
     if cred and cred["class_id"]:
         # The card names a *plan*, not a date. So match the booking this
         # class's plan paid for, whatever session it now sits on: a booking
@@ -492,21 +465,15 @@ def _decide(repo, client, cred, base, t):
         # own class instead would turn away a client whose Ballet slot was
         # moved onto a Flexibility date — the exact case that move exists for.
         # Bookings with no plan behind them (older rows) keep the old rule.
-        class_clause = (" AND (sub.class_id = ?"
-                        "      OR (b.subscription_id IS NULL AND s.class_id = ?))")
-        params += [cred["class_id"], cred["class_id"]]
+        want = cred["class_id"]
+        candidates = [r for r in candidates
+                      if r["plan_class_id"] == want
+                      or (r["subscription_id"] is None
+                          and r["session_class_id"] == want)]
 
-    row = repo.raw(
-        "SELECT b.id AS booking_id, b.status, s.id AS session_id, s.starts_at,"
-        "       s.duration_hours, c.name AS class_name, c.colour,"
-        "       i.name AS instructor_name"
-        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        "  JOIN classes c ON c.id = s.class_id"
-        "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
-        "  LEFT JOIN instructors i ON i.id = s.instructor_id"
-        " WHERE b.client_id = ? AND s.starts_at BETWEEN ? AND ?"
-        f"   AND s.status != 'cancelled'{class_clause}"
-        " ORDER BY ABS(s.starts_at - ?) LIMIT 1", (*params, t)).fetchone()
+    # Nearest to now, which is what ORDER BY ABS(starts_at - t) was for.
+    row = min(candidates, key=lambda r: (abs(r["starts_at"] - t), r["session_id"])) \
+        if candidates else None
 
     if row is None:
         cls = f" for {base.get('card_class')}" if base.get("card_class") else ""
@@ -814,11 +781,7 @@ def move_booking(repo, client_id: int, from_session: int, to_session: int,
 
 
 def session_roster(repo, session_id: int) -> list:
-    return [dict(r) for r in repo.raw(
-        "SELECT b.id AS booking_id, b.status, b.checked_in_at,"
-        "       cl.id, cl.name_en, cl.phone, cl.photo_path"
-        "  FROM bookings b JOIN clients cl ON cl.id = b.client_id"
-        " WHERE b.session_id = ? ORDER BY cl.name_en", (session_id,)).fetchall()]
+    return repo.session_roster(session_id)
 
 
 def cancel_session(repo, session_id: int) -> dict:
@@ -1385,14 +1348,8 @@ def delete_class(repo, class_id: int, hard: bool = False) -> dict:
 def expected_today(repo) -> dict:
     settle_past_sessions(repo)
     start, end = day_bounds()
-    r = repo.raw(
-        "SELECT COUNT(*) expected,"
-        "       SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) arrived,"
-        "       SUM(CASE WHEN b.status='absent'  THEN 1 ELSE 0 END) absent"
-        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        " WHERE s.starts_at BETWEEN ? AND ? AND s.status != 'cancelled'",
-        (start, end)).fetchone()
-    expected, arrived, absent = r["expected"] or 0, r["arrived"] or 0, r["absent"] or 0
+    r = repo.day_attendance_totals(start, end)
+    expected, arrived, absent = r["expected"], r["arrived"], r["absent"]
     return {"expected": expected, "arrived": arrived, "absent": absent,
             "still_due": max(0, expected - arrived - absent)}
 
