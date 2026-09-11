@@ -1,0 +1,145 @@
+"""
+Freezing: what it releases, what it refuses, and what it puts back.
+
+Ported from the old test_freeze.py. One change of method: to test that
+unfreezing extends the expiry, the original rewrote `subscriptions.frozen_on`
+by hand to fabricate a ten-day-old freeze. `freeze_plan()` already takes a
+`from_date`, so these tests age the freeze through the API instead of
+reaching behind it.
+"""
+
+from datetime import date, timedelta
+
+import access
+import db
+
+
+def test_freezing_releases_future_bookings(academy):
+    conn = academy.conn
+    plan = academy.dual_ballet_plan
+    before = access.plan_state(conn, plan)
+    booked = conn.execute(
+        "SELECT COUNT(*) n FROM bookings WHERE subscription_id=? AND status='booked'",
+        (plan,)).fetchone()["n"]
+
+    r = access.freeze_plan(conn, plan, reason="travelling")
+    after = access.plan_state(conn, plan)
+
+    assert r["ok"], r
+    assert r["released"] == booked, f"{booked} booked -> {r['released']} released"
+    assert after["unassigned"] == before["unassigned"] + r["released"]
+    assert after["remaining"] == before["remaining"], "a freeze owes the same sessions"
+    assert after["frozen"] is True
+    assert after["frozen_until"] is None, "open-ended unless given an end date"
+
+
+def test_a_frozen_plan_cannot_be_scanned(academy):
+    conn = academy.conn
+    access.freeze_plan(conn, academy.dual_ballet_plan)
+    v = access.verify(conn, academy.dual_ballet_card)
+    assert not v["granted"], v
+    assert v.get("frozen") is True
+
+
+def test_the_sweep_leaves_a_frozen_clients_session_alone(academy):
+    """A paused client must never lose a session to the absent sweep."""
+    conn = academy.conn
+    plan = academy.dual_ballet_plan
+    access.freeze_plan(conn, plan)
+
+    past = conn.execute(
+        "INSERT INTO sessions (class_id,instructor_id,starts_at,duration_hours,status)"
+        " VALUES (?,?,?,1.5,'scheduled')",
+        (academy.ballet, academy.ana, db.now() - 4 * 3600)).lastrowid
+    conn.execute(
+        "INSERT INTO bookings (client_id,session_id,subscription_id,status,created_at)"
+        " VALUES (?,?,?,'booked',?)", (academy.dual, past, plan, db.now()))
+    conn.commit()
+
+    access.settle_past_sessions(conn)
+
+    status = conn.execute(
+        "SELECT status FROM bookings WHERE session_id=? AND client_id=?",
+        (past, academy.dual)).fetchone()["status"]
+    assert status == "booked"
+
+
+def test_unfreezing_extends_the_expiry_by_the_frozen_days(academy):
+    conn = academy.conn
+    plan = academy.dual_ballet_plan
+    before = access.plan_state(conn, plan)["expires_on"]
+
+    access.freeze_plan(conn, plan,
+                       from_date=(date.today() - timedelta(days=10)).isoformat())
+    u = access.unfreeze_plan(conn, plan)
+    after = access.plan_state(conn, plan)
+
+    assert u["ok"], u
+    assert u["days"] == 10, u
+    assert after["expires_on"] == (
+        date.fromisoformat(before) + timedelta(days=10)).isoformat()
+    assert after["frozen"] is False
+    assert after["frozen_days"] == 10
+
+
+def test_a_dated_freeze_lifts_itself_once_the_date_passes(academy):
+    conn = academy.conn
+    plan = academy.dual_ballet_plan
+    access.freeze_plan(conn, plan,
+                       from_date=(date.today() - timedelta(days=8)).isoformat(),
+                       until=(date.today() - timedelta(days=1)).isoformat())
+    assert access.plan_state(conn, plan)["frozen"] is True
+
+    lifted = access.lift_expired_freezes(conn)
+
+    assert lifted == 1
+    assert access.plan_state(conn, plan)["frozen"] is False
+
+
+def test_a_plan_cannot_be_frozen_twice(academy):
+    conn = academy.conn
+    access.freeze_plan(conn, academy.dual_ballet_plan)
+    again = access.freeze_plan(conn, academy.dual_ballet_plan)
+    assert not again["ok"]
+    assert "already frozen" in again["error"]
+
+
+def test_an_unfrozen_plan_cannot_be_unfrozen(academy):
+    r = access.unfreeze_plan(academy.conn, academy.dual_ballet_plan)
+    assert not r["ok"]
+    assert "not frozen" in r["error"]
+
+
+def test_a_freeze_ending_before_it_starts_is_refused(academy):
+    r = access.freeze_plan(academy.conn, academy.dual_ballet_plan,
+                           until=(date.today() - timedelta(days=3)).isoformat())
+    assert not r["ok"]
+    assert "after it starts" in r["error"]
+
+
+def test_only_plans_of_twelve_or_more_can_be_frozen(academy):
+    """Short packs are meant to be used inside their window."""
+    conn = academy.conn
+    r = access.freeze_plan(conn, academy.dual_flex_plan)      # 8 sessions
+    assert not r["ok"]
+    assert str(access.FREEZE_MIN_SESSIONS) in r["error"], r
+
+
+def test_freezing_one_class_leaves_the_other_alone(academy):
+    conn = academy.conn
+    access.freeze_plan(conn, academy.dual_ballet_plan)
+    assert access.plan_state(conn, academy.dual_flex_plan)["frozen"] is False
+
+
+def test_freeze_history_is_kept(academy):
+    conn = academy.conn
+    plan = academy.dual_ballet_plan
+    access.freeze_plan(conn, plan, reason="first")
+    access.unfreeze_plan(conn, plan)
+    access.freeze_plan(conn, plan, reason="second")
+
+    rows = conn.execute("SELECT * FROM freezes WHERE subscription_id=? ORDER BY id",
+                        (plan,)).fetchall()
+    assert len(rows) == 2
+    finished = [r for r in rows if r["ended_on"]]
+    assert finished and all(r["days_added"] is not None for r in finished)
