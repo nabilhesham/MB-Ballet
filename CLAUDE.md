@@ -167,7 +167,11 @@ Run `./cleanup.sh` if the folder has accumulated files from earlier versions
 deletes and never touches data.
 
 ```
-db.py             Schema + connection helpers. All tables live here.
+config.py         Where the files live and which database to talk to. Every
+                  value is a function, never a module constant -- see the
+                  Configuration section below. Must be imported and
+                  load_env()'d before `import db`.
+db.py             Schema + connection helpers + db.tx(). All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
 cards.py          Member card PNG generation.
@@ -271,6 +275,10 @@ gh workflow run build-macos.yml   # or the Actions tab -> Run workflow:
                              #   for when there's no Mac to build on locally.
                              #   Fetch the result with `gh run download` or
                              #   from the run's page -> Artifacts.
+
+pip install -r requirements-dev.txt   # pytest + httpx, developer-only
+pytest                      # the suite. Throwaway database per test; the
+                             #   real academy.db is never touched.
 
 cd frontend && npm install  # once, to work on the React admin at all
 npm run dev                 # Vite dev server, proxies /api etc. to a real
@@ -459,7 +467,16 @@ system and everything else follows from it:
 - **sessions** are dated occurrences. Each carries its own `instructor_id`,
   because who teaches a given date changes often enough that a per-session
   field, not a class-level constant, is what has to be the source of truth.
-  No capacity field.
+  No capacity field. `ends_at` is **stored, not derived** —
+  `starts_at + duration_hours*3600` wrapped the column in an expression, so
+  neither `slot_conflict()` nor the absent sweep could use an index, and
+  both run on nearly every request. `access.ends_at_of()` is its only
+  writer; `create_session`, `edit_session`, `repeat_sessions` and `seed.py`
+  are the four paths that must set it, and `db.migrate()` fills any row
+  where it is NULL (targeted at the wrong rows rather than run once behind a
+  marker, so it repairs a future mistake as well as migrating an old
+  database). A NULL there is invisible to both callers — a wrong answer with
+  nothing on screen to suggest it.
 - **classes.instructor_id** is a *default*, not a substitute for the field
   above: what a new session for that class falls back to when none is named,
   and what every one of that class's upcoming (`status='scheduled'`,
@@ -1195,10 +1212,114 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 - [ ] Auto-start on boot, and disable laptop sleep / lid-close suspend.
 - [ ] Key rotation: single secret. Changing it kills every printed card at once.
       Needs an accepted-keys list with an overlap window.
-- [ ] The test scripts (`test_model.py`, `test_freeze.py`, `test_plan_class.py`)
-      run against the live `academy.db` and mutate it. Re-seed before and
-      between runs. They resolve their subjects from whatever was seeded rather
-      than naming clients or classes, so they survive a new term's workbooks.
+
+## Transactions
+
+**`isolation_level=None`, and every write names its own boundary with
+`db.tx(conn)`.** sqlite3 used to manage transactions itself — one opened at
+the first write and closed at whatever `commit()` came next — so a boundary
+was wherever a commit happened to sit rather than where anyone had decided
+it should be. There were 46 `conn.commit()` calls and no `rollback()`
+anywhere: a failed multi-statement write was undone only because closing a
+connection discards an open transaction. That worked, but by accident.
+
+```python
+with db.tx(conn):
+    conn.execute(...)
+    conn.execute(...)
+```
+
+**It is re-entrant**, because the calls genuinely nest —
+`swap_and_check_in()` calls `move_booking()` and `check_in()`, and
+`settle_past_sessions()` calls `lift_expired_freezes()`, which calls
+`unfreeze_plan()` once per due row. The outermost block owns the
+transaction; inner ones are no-ops. Nesting is detected through sqlite3's
+own `in_transaction`, since a `Connection` cannot carry attributes.
+
+**There are no savepoints, deliberately.** An inner block that raises rolls
+the whole outermost transaction back. Nothing here half-succeeds on purpose.
+
+**`BEGIN IMMEDIATE`, not `BEGIN`.** It takes the write lock at the top of
+the block rather than at the first write, which is what serialises a
+read-then-write: `book()` counts a plan's bookings before inserting one, and
+`create_session`, `edit_session` and un-cancelling all check the slot is
+free before writing into it.
+
+A single statement outside a block autocommits, which is what a lone read or
+a one-row update wants anyway. **But a bulk insert outside one is a separate
+fsync per row** — that is why `seed.py`'s phases and the test fixture are
+each wrapped.
+
+`access.refresh_expiry()` still does not commit. That used to be an
+invariant held by a comment; it is now structural, since it is always called
+inside a caller's block.
+
+## Configuration
+
+`config.py` owns both "where do the files live" and "which database".
+**Nothing in it is a module constant** — every value is a function, read
+when asked for. `db.py` used to bind `DB_PATH` at import time and
+`server.py` read `.env` in its FastAPI *startup event*, which runs long
+after `import db`; harmless while the value was a literal, and fatal once an
+environment variable decides which implementation gets constructed.
+
+`import config; config.load_env()` is the **first statement** of `server.py`
+and `run_app.py`, above `import db`. It also does the `chdir`.
+
+| | default | |
+|---|---|---|
+| `MB_DB_BACKEND` | `sqlite` | `sqlite` or `mongo` |
+| `MB_SQLITE_PATH` | `academy.db` | relative to the app folder |
+| `MB_MONGO_URI` | — | required when the backend is mongo |
+| `MB_MONGO_DB` | `mb_ballet` | |
+
+All `MB_`-prefixed, because `load_env()` sets any `KEY=VALUE` it finds and
+must not collide with something already on the machine. Real environment
+variables beat the file. See `.env.example`.
+
+**`mongo` with no URI raises at startup — it never falls back to SQLite.** A
+silent fallback means reception writing a day of attendance into a local
+file nobody looks at again.
+
+Two bugs this replaced, both of which would have bitten the moment a second
+key lived in `.env`: the file was only read when `ENTRY_SECRET` was unset
+(so on a machine where the secret is exported in the shell — which is what
+this document tells you to do — every other setting was ignored), and
+provisioning a generated secret opened it with mode `"w"`, truncating it.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+`tests/` replaced three root-level scripts that ran against the live
+`academy.db` **and wrote to it**. They also looked their subjects up in it —
+"a client holding two cards", "a plan of 12+ sessions not already frozen" —
+which made them unrunnable without the academy's own workbooks and meant a
+test could pass or fail depending on which term had last been seeded.
+
+`tests/fixtures.py::build_academy()` constructs those shapes on purpose
+instead, into a throwaway database per test. It writes with plain SQL rather
+than through `access.py`: a fixture built out of the functions under test
+cannot fail independently of them.
+
+The `conn` fixture points **config** at the temp file rather than passing a
+path around. That is what makes the `api/` layer testable at all — route
+handlers call a bare `db.connect()`, so before `config.py` any test touching
+one reached for the real business record.
+
+Two things the fixture guards, because both have already bitten:
+- neither recurring session series may land on today, or a scan matches
+  whichever session is nearer the clock and the suite passes or fails by the
+  hour it runs at;
+- `sessions.ends_at` must never disagree with the columns it is derived
+  from.
+
+`@pytest.mark.sqlite_only` marks the tests that introspect `PRAGMA
+table_info` and `sqlite_master`. They describe the backend rather than the
+app and do not port to a document store.
 
 ## Conventions
 
