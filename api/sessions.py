@@ -273,27 +273,14 @@ def set_session_status(sid: int, status: str):
 
 @router.delete("/api/sessions/{sid}")
 def delete_session(sid: int, force: bool = False):
+    """Delete one session. Deleting one is deleting a list of one."""
     conn = db.connect()
     try:
-        used = conn.execute(
-            "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
-            (sid,)).fetchone()["n"]
-        if used and not force:
-            raise HTTPException(400, f"{used} attendance record(s) — cancel it instead")
-        n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
-                         (sid,)).fetchone()["n"]
-        # Deleting bookings this way bypasses access.unbook(), so the plans
-        # they funded need the same expiry refresh by hand.
-        subs = {r["subscription_id"] for r in conn.execute(
-            "SELECT DISTINCT subscription_id FROM bookings"
-            " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
-        conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
-        conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
-        conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
-        for sub_id in subs:
-            access.refresh_expiry(conn, sub_id)
-        conn.commit()
-        return {"ok": True, "released": n}
+        r = access.delete_sessions(conn, [sid], force=force)
+        if r["blocked"]:
+            held = r["blocked"][0]["attendance"]
+            raise HTTPException(400, f"{held} attendance record(s) — cancel it instead")
+        return {"ok": True, "released": r["released"]}
     finally:
         conn.close()
 
@@ -312,35 +299,7 @@ def bulk_delete_sessions(body: BulkDeleteIn):
     """
     conn = db.connect()
     try:
-        deleted, released, blocked = 0, 0, []
-        for sid in body.ids:
-            s = one(conn.execute(
-                "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
-                "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)))
-            if not s:
-                continue
-            held = conn.execute(
-                "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
-                (sid,)).fetchone()["n"]
-            if held and not body.force:
-                blocked.append({**s, "attendance": held})
-                continue
-            n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
-                             (sid,)).fetchone()["n"]
-            # Same bypass of access.unbook() as delete_session, so the plans
-            # these bookings funded need their expiry refreshed by hand.
-            subs = {r["subscription_id"] for r in conn.execute(
-                "SELECT DISTINCT subscription_id FROM bookings"
-                " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
-            conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
-            conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
-            conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
-            for sub_id in subs:
-                access.refresh_expiry(conn, sub_id)
-            deleted += 1
-            released += n
-        conn.commit()
-        return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
+        return access.delete_sessions(conn, body.ids, force=body.force)
     finally:
         conn.close()
 

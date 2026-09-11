@@ -1249,6 +1249,59 @@ def delete_client(conn, client_id: int, hard: bool = False) -> dict:
     return {"ok": True, "action": "archive"}
 
 
+def delete_sessions(conn, session_ids, force: bool = False) -> dict:
+    """
+    Remove sessions, keeping back any that carry attendance.
+
+    One function for both the single and the bulk case: deleting one session
+    is deleting a list of one, and the two used to be near-identical copies
+    in api/sessions.py that had to be kept in step by hand.
+
+    A session someone was marked present or absent at is history. Rather than
+    failing the whole batch over it, the ones kept back are named in
+    `blocked` — clearing a term with one taught week in the middle of it
+    should remove the other eleven and say why the twelfth stayed. `force`
+    overrides, which is the caller saying they meant it.
+
+    Deleting the bookings directly bypasses unbook(), so every plan that
+    funded one needs refresh_expiry() by hand — otherwise a plan goes on
+    claiming it runs through a date that no longer exists. This is one of the
+    paths the docstring on refresh_expiry() is warning about.
+
+    access_events.session_id is nulled rather than cascaded: the row is the
+    record that someone scanned, which stays true after the session is gone.
+    """
+    deleted, released, blocked = 0, 0, []
+    for sid in session_ids:
+        row = conn.execute(
+            "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
+            "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)).fetchone()
+        if not row:
+            continue
+        held = conn.execute(
+            "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
+            (sid,)).fetchone()["n"]
+        if held and not force:
+            blocked.append({**dict(row), "attendance": held})
+            continue
+
+        n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
+                         (sid,)).fetchone()["n"]
+        subs = {r["subscription_id"] for r in conn.execute(
+            "SELECT DISTINCT subscription_id FROM bookings"
+            " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
+        conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
+        conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
+        conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+        for sub_id in subs:
+            refresh_expiry(conn, sub_id)
+        deleted += 1
+        released += n
+
+    conn.commit()
+    return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
+
+
 def expected_today(conn) -> dict:
     settle_past_sessions(conn)
     start, end = day_bounds()

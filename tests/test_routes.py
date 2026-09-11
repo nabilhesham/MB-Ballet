@@ -435,3 +435,107 @@ def test_hard_deleting_a_client_with_no_history_removes_everything(client):
     assert r.json()["action"] == "delete"
     assert a.conn.execute("SELECT COUNT(*) n FROM clients WHERE id=?",
                           (a.planless,)).fetchone()["n"] == 0
+
+
+# ------------------------------------------------------- deleting sessions
+
+def test_deleting_a_session_releases_its_bookings(client):
+    a = client.academy
+    r = client.delete(f"/api/sessions/{a.today_ballet}")
+    assert r.status_code == 200, r.text
+    assert r.json()["released"] >= 1
+    assert a.conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
+                          (a.today_ballet,)).fetchone()["n"] == 0
+
+
+def test_deleting_a_session_pulls_the_plans_expiry_back(client):
+    """
+    Deleting bookings this way bypasses unbook(), so the plans they funded
+    need their expiry refreshed by hand — otherwise a plan goes on claiming
+    it runs through a date that no longer exists.
+    """
+    a = client.academy
+    plan = a.dual_ballet_plan
+    latest = a.conn.execute(
+        "SELECT b.session_id, MAX(s.starts_at) t FROM bookings b"
+        "  JOIN sessions s ON s.id=b.session_id WHERE b.subscription_id=?",
+        (plan,)).fetchone()
+    before = access.plan_state(a.conn, plan)["expires_on"]
+
+    client.delete(f"/api/sessions/{latest['session_id']}", params={"force": "true"})
+
+    after = access.plan_state(a.conn, plan)["expires_on"]
+    assert after < before, f"{before} -> {after}"
+
+
+def test_a_session_carrying_attendance_is_kept_back(client):
+    a = client.academy
+    attended = a.conn.execute(
+        "SELECT session_id FROM bookings WHERE status='present' LIMIT 1").fetchone()
+    r = client.delete(f"/api/sessions/{attended['session_id']}")
+    assert r.status_code == 400
+    assert "attendance record" in r.json()["detail"]
+    assert a.conn.execute("SELECT COUNT(*) n FROM sessions WHERE id=?",
+                          (attended["session_id"],)).fetchone()["n"] == 1
+
+
+def test_force_deletes_a_session_carrying_attendance(client):
+    a = client.academy
+    attended = a.conn.execute(
+        "SELECT session_id FROM bookings WHERE status='present' LIMIT 1").fetchone()
+    r = client.delete(f"/api/sessions/{attended['session_id']}", params={"force": "true"})
+    assert r.status_code == 200, r.text
+    assert a.conn.execute("SELECT COUNT(*) n FROM sessions WHERE id=?",
+                          (attended["session_id"],)).fetchone()["n"] == 0
+
+
+def test_a_bulk_delete_names_what_it_kept_back_rather_than_failing(client):
+    """
+    Clearing a term with one taught week in the middle should remove the
+    other eleven and say why the twelfth stayed.
+    """
+    a = client.academy
+    attended = a.conn.execute(
+        "SELECT session_id FROM bookings WHERE status='present' LIMIT 1").fetchone()["session_id"]
+    # Sessions nobody was marked present or absent at — the ones that should
+    # go. Selected rather than assumed: most of the fixture's past sessions
+    # carry attendance, which is the whole point of the one that is kept.
+    untouched = [r["id"] for r in a.conn.execute(
+        "SELECT s.id FROM sessions s WHERE s.class_id=? AND NOT EXISTS ("
+        "  SELECT 1 FROM bookings b WHERE b.session_id=s.id AND b.status!='booked')"
+        " LIMIT 3", (a.ballet,))]
+    assert len(untouched) == 3 and attended not in untouched
+
+    r = client.post("/api/sessions/bulk-delete",
+                    json={"ids": untouched + [attended]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["deleted"] == 3
+    assert [b["id"] for b in body["blocked"]] == [attended]
+    assert body["blocked"][0]["attendance"] >= 1
+    assert body["blocked"][0]["class_name"] == "Ballet Level 8"
+
+
+def test_a_scan_survives_its_session_being_deleted(client):
+    """
+    access_events.session_id is nulled rather than cascaded: the row records
+    that someone scanned, which stays true after the session is gone.
+    """
+    a = client.academy
+    verified = client.post("/api/access/verify",
+                           json={"token": a.dual_ballet_card}).json()
+    client.post("/api/access/checkin", json={"event_id": verified["event_id"]})
+
+    client.delete(f"/api/sessions/{a.today_ballet}", params={"force": "true"})
+
+    row = a.conn.execute("SELECT client_id, session_id FROM access_events WHERE id=?",
+                         (verified["event_id"],)).fetchone()
+    assert row is not None, "the event survives"
+    assert row["session_id"] is None
+    assert row["client_id"] == a.dual
+
+
+def test_deleting_an_unknown_session_is_a_no_op(client):
+    r = client.post("/api/sessions/bulk-delete", json={"ids": [9999]})
+    assert r.status_code == 200
+    assert r.json()["deleted"] == 0
