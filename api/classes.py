@@ -118,65 +118,15 @@ def get_class(clid: int):
 
 @router.delete("/api/classes/{clid}")
 def delete_class(clid: int, hard: bool = False):
+    """Archive, or remove entirely. The rules live in access.delete_class()."""
     conn = db.connect()
     try:
-        c = one(conn.execute("SELECT * FROM classes WHERE id=?", (clid,)))
-        if not c:
-            raise HTTPException(404, "no such class")
-        held = conn.execute(
-            "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-            " WHERE s.class_id=? AND b.status!='booked'", (clid,)).fetchone()["n"]
-        if hard and held:
-            raise HTTPException(400, f"{c['name']} has {held} attendance records — archive instead")
-        if hard:
-            # Bypasses access.unbook(), so the plans these bookings funded
-            # need their expiry refreshed by hand once the bookings are gone.
-            subs = {r["subscription_id"] for r in conn.execute(
-                "SELECT DISTINCT subscription_id FROM bookings"
-                " WHERE session_id IN (SELECT id FROM sessions WHERE class_id=?)"
-                "   AND subscription_id IS NOT NULL", (clid,)).fetchall()}
-            conn.execute("DELETE FROM bookings WHERE session_id IN"
-                         " (SELECT id FROM sessions WHERE class_id=?)", (clid,))
-            conn.execute("DELETE FROM sessions WHERE class_id=?", (clid,))
-            conn.execute("DELETE FROM classes WHERE id=?", (clid,))
-            for sub_id in subs:
-                access.refresh_expiry(conn, sub_id)
-            action = "delete"
-        else:
-            # Archiving a class stops it from being offered again, so its
-            # upcoming sessions have nothing left to happen for — release
-            # them the same way the hard-delete branch above does (just
-            # scoped to sessions that haven't happened yet), so the clients
-            # booked into them get the slot back as unassigned on their plan
-            # instead of it silently dangling on a class nobody can see.
-            # Past sessions and their attendance are never touched.
-            upcoming_ids = [r["id"] for r in conn.execute(
-                "SELECT id FROM sessions WHERE class_id=? AND status='scheduled'"
-                " AND starts_at > ?", (clid, db.now())).fetchall()]
-            released_sessions = len(upcoming_ids)
-            released_bookings = 0
-            if upcoming_ids:
-                marks = ",".join("?" * len(upcoming_ids))
-                subs = {r["subscription_id"] for r in conn.execute(
-                    f"SELECT DISTINCT subscription_id FROM bookings"
-                    f" WHERE session_id IN ({marks}) AND subscription_id IS NOT NULL",
-                    upcoming_ids).fetchall()}
-                released_bookings = conn.execute(
-                    f"SELECT COUNT(*) n FROM bookings WHERE session_id IN ({marks})",
-                    upcoming_ids).fetchone()["n"]
-                conn.execute(f"DELETE FROM bookings WHERE session_id IN ({marks})", upcoming_ids)
-                conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", upcoming_ids)
-                for sub_id in subs:
-                    access.refresh_expiry(conn, sub_id)
-            conn.execute("UPDATE classes SET active=0 WHERE id=?", (clid,))
-            action = "archive"
-        conn.commit()
-        return {"ok": True, "action": action,
-                "released_sessions": released_sessions if action == "archive" else None,
-                "released_bookings": released_bookings if action == "archive" else None}
+        r = access.delete_class(conn, clid, hard=hard)
+        if not r["ok"]:
+            raise HTTPException(r.get("status", 400), r["error"])
+        return r
     finally:
         conn.close()
-
 
 @router.post("/api/classes/{clid}/unarchive")
 def unarchive_class(clid: int):

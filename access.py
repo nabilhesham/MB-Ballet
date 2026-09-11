@@ -1302,6 +1302,73 @@ def delete_sessions(conn, session_ids, force: bool = False) -> dict:
     return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
 
 
+def delete_class(conn, class_id: int, hard: bool = False) -> dict:
+    """
+    Archive a class, or -- with `hard` -- remove it and its whole history.
+
+    Archiving is the one archive path that cascades a delete into another
+    table. A class that stops being offered has nothing left to happen for,
+    so its upcoming sessions are deleted rather than left dangling on a class
+    nobody can see: the clients booked into them get the slot back as
+    unassigned on their plan, the same as any other booking removal. Past
+    sessions and their attendance are never touched.
+
+    (Client and instructor archiving deliberately do not do this. A client
+    with dates ahead of them is refused instead -- see delete_client.)
+
+    Both branches delete bookings directly rather than through unbook(), so
+    every plan that funded one needs refresh_expiry() by hand.
+    """
+    klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+    if not klass:
+        return {"ok": False, "status": 404, "error": "no such class"}
+
+    if hard:
+        held = conn.execute(
+            "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
+            " WHERE s.class_id=? AND b.status!='booked'", (class_id,)).fetchone()["n"]
+        if held:
+            return {"ok": False, "status": 400,
+                    "error": f"{klass['name']} has {held} attendance records "
+                             f"— archive instead"}
+        subs = {r["subscription_id"] for r in conn.execute(
+            "SELECT DISTINCT subscription_id FROM bookings"
+            " WHERE session_id IN (SELECT id FROM sessions WHERE class_id=?)"
+            "   AND subscription_id IS NOT NULL", (class_id,)).fetchall()}
+        conn.execute("DELETE FROM bookings WHERE session_id IN"
+                     " (SELECT id FROM sessions WHERE class_id=?)", (class_id,))
+        conn.execute("DELETE FROM sessions WHERE class_id=?", (class_id,))
+        conn.execute("DELETE FROM classes WHERE id=?", (class_id,))
+        for sub_id in subs:
+            refresh_expiry(conn, sub_id)
+        conn.commit()
+        return {"ok": True, "action": "delete",
+                "released_sessions": None, "released_bookings": None}
+
+    upcoming = [r["id"] for r in conn.execute(
+        "SELECT id FROM sessions WHERE class_id=? AND status='scheduled'"
+        " AND starts_at > ?", (class_id, db.now())).fetchall()]
+    released_bookings = 0
+    if upcoming:
+        marks = ",".join("?" * len(upcoming))
+        subs = {r["subscription_id"] for r in conn.execute(
+            f"SELECT DISTINCT subscription_id FROM bookings"
+            f" WHERE session_id IN ({marks}) AND subscription_id IS NOT NULL",
+            upcoming).fetchall()}
+        released_bookings = conn.execute(
+            f"SELECT COUNT(*) n FROM bookings WHERE session_id IN ({marks})",
+            upcoming).fetchone()["n"]
+        conn.execute(f"DELETE FROM bookings WHERE session_id IN ({marks})", upcoming)
+        conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", upcoming)
+        for sub_id in subs:
+            refresh_expiry(conn, sub_id)
+    conn.execute("UPDATE classes SET active=0 WHERE id=?", (class_id,))
+    conn.commit()
+    return {"ok": True, "action": "archive",
+            "released_sessions": len(upcoming),
+            "released_bookings": released_bookings}
+
+
 def expected_today(conn) -> dict:
     settle_past_sessions(conn)
     start, end = day_bounds()

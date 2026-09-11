@@ -539,3 +539,74 @@ def test_deleting_an_unknown_session_is_a_no_op(client):
     r = client.post("/api/sessions/bulk-delete", json={"ids": [9999]})
     assert r.status_code == 200
     assert r.json()["deleted"] == 0
+
+
+# -------------------------------------------------------- archiving a class
+
+def test_archiving_a_class_releases_its_upcoming_sessions(client):
+    """
+    A class that stops being offered has nothing left to happen for. This is
+    the one archive path that cascades a delete into another table.
+    """
+    a = client.academy
+    upcoming = [r["id"] for r in a.conn.execute(
+        "SELECT id FROM sessions WHERE class_id=? AND status='scheduled' AND starts_at > ?",
+        (a.ballet, __import__("db").now()))]
+    assert upcoming, "precondition"
+
+    r = client.delete(f"/api/classes/{a.ballet}")
+    assert r.status_code == 200, r.text
+    assert r.json()["action"] == "archive"
+    assert r.json()["released_sessions"] == len(upcoming)
+
+    left = a.conn.execute(
+        f"SELECT COUNT(*) n FROM sessions WHERE id IN ({','.join('?' * len(upcoming))})",
+        upcoming).fetchone()["n"]
+    assert left == 0
+
+
+def test_archiving_a_class_keeps_its_past_sessions_and_attendance(client):
+    a = client.academy
+    before = a.conn.execute(
+        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
+        " WHERE s.class_id=? AND b.status!='booked'", (a.ballet,)).fetchone()["n"]
+    assert before > 0, "precondition"
+
+    client.delete(f"/api/classes/{a.ballet}")
+
+    after = a.conn.execute(
+        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
+        " WHERE s.class_id=? AND b.status!='booked'", (a.ballet,)).fetchone()["n"]
+    assert after == before, "past attendance is never touched"
+
+
+def test_archiving_a_class_gives_the_slots_back_as_unassigned(client):
+    """The client gets the slot back on their plan rather than it dangling."""
+    a = client.academy
+    before = access.plan_state(a.conn, a.dual_ballet_plan)
+
+    client.delete(f"/api/classes/{a.ballet}")
+
+    after = access.plan_state(a.conn, a.dual_ballet_plan)
+    assert after["unassigned"] > before["unassigned"]
+    assert after["remaining"] == before["remaining"], "they are still owed the sessions"
+
+
+def test_archiving_a_class_hides_it_from_the_list(client):
+    a = client.academy
+    client.delete(f"/api/classes/{a.ballet}")
+    ids = [c["id"] for c in client.get("/api/classes").json()]
+    assert a.ballet not in ids
+    archived = [c["id"] for c in
+                client.get("/api/classes", params={"status": "archived"}).json()]
+    assert a.ballet in archived
+
+
+def test_hard_deleting_a_class_with_attendance_is_refused(client):
+    r = client.delete(f"/api/classes/{client.academy.ballet}", params={"hard": "true"})
+    assert r.status_code == 400
+    assert "attendance records" in r.json()["detail"]
+
+
+def test_an_unknown_class_is_a_404(client):
+    assert client.delete("/api/classes/9999").status_code == 404
