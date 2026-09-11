@@ -18,7 +18,6 @@ import access
 import db
 import repo as data
 
-from .helpers import rows, one
 
 router = APIRouter()
 
@@ -87,25 +86,10 @@ def list_sessions(start: int = 0, end: int = 0, class_id: int = 0, available_for
             start = db.now() - 7 * 86400
         if not end:
             end = start + 28 * 86400
-        sql = (
-            "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
-            "     AND b.status='present') AS attended"
-            "  FROM sessions s JOIN classes c ON c.id=s.class_id"
-            "  LEFT JOIN instructors i ON i.id=s.instructor_id"
-            " WHERE s.starts_at BETWEEN ? AND ?")
-        params = [start, end]
-        if class_id:
-            sql += " AND s.class_id = ?"
-            params.append(class_id)
-        if available_for:
-            # Sessions this client is not already booked into.
-            sql += (" AND NOT EXISTS (SELECT 1 FROM bookings b"
-                    " WHERE b.session_id = s.id AND b.client_id = ?)")
-            params.append(available_for)
-        sql += " ORDER BY s.starts_at"
-        return rows(repo.raw(sql, params))
+        # Half-open, where this was BETWEEN ... AND. `available_for` drops
+        # sessions the client already holds a slot in.
+        return repo.sessions_in_range(start, end + 1, class_id=class_id,
+                                      not_booked_by=available_for)
     finally:
         repo.close()
 
@@ -114,7 +98,7 @@ def list_sessions(start: int = 0, end: int = 0, class_id: int = 0, available_for
 def create_session(body: SessionIn):
     repo = data.connect()
     try:
-        cl = one(repo.raw("SELECT * FROM classes WHERE id=?", (body.class_id,)))
+        cl = repo.get("classes", body.class_id)
         if not cl:
             raise HTTPException(404, "no such class")
         # No instructor named explicitly -> fall back to the class's default,
@@ -127,12 +111,12 @@ def create_session(body: SessionIn):
             clash = access.slot_conflict(repo, body.starts_at, hours)
             if clash:
                 raise HTTPException(400, access.slot_taken_message(clash))
-            cur = repo.raw(
-                "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours,"
-                " ends_at, notes) VALUES (?,?,?,?,?,?)",
-                (body.class_id, instructor_id, body.starts_at, hours,
-                 access.ends_at_of(body.starts_at, hours), body.notes))
-        return {"id": cur.lastrowid}
+            new_id = repo.insert("sessions", {
+                "class_id": body.class_id, "instructor_id": instructor_id,
+                "starts_at": body.starts_at, "duration_hours": hours,
+                "ends_at": access.ends_at_of(body.starts_at, hours),
+                "notes": body.notes})
+        return {"id": new_id}
     finally:
         repo.close()
 
@@ -141,7 +125,7 @@ def create_session(body: SessionIn):
 def repeat_sessions(body: RepeatIn):
     repo = data.connect()
     try:
-        cl = one(repo.raw("SELECT * FROM classes WHERE id=?", (body.class_id,)))
+        cl = repo.get("classes", body.class_id)
         if not cl:
             raise HTTPException(404, "no such class")
         instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
@@ -162,8 +146,8 @@ def repeat_sessions(body: RepeatIn):
                     ts = int(when.timestamp())
                     if ts < body.starts_at:
                         continue
-                    if repo.raw("SELECT 1 FROM sessions WHERE class_id=? AND starts_at=?",
-                                    (body.class_id, ts)).fetchone():
+                    if repo.exists("sessions",
+                                   {"class_id": body.class_id, "starts_at": ts}):
                         continue
                     # A whole term is generated at once, so one taken evening in
                     # week 7 must not cost the other eleven. Skip it and say
@@ -173,11 +157,10 @@ def repeat_sessions(body: RepeatIn):
                     if clash:
                         skipped.append(access.slot_taken_message(clash))
                         continue
-                    repo.raw(
-                        "INSERT INTO sessions (class_id, instructor_id, starts_at,"
-                        " duration_hours, ends_at) VALUES (?,?,?,?,?)",
-                        (body.class_id, instructor_id, ts, hours,
-                         access.ends_at_of(ts, hours)))
+                    repo.insert("sessions", {
+                        "class_id": body.class_id, "instructor_id": instructor_id,
+                        "starts_at": ts, "duration_hours": hours,
+                        "ends_at": access.ends_at_of(ts, hours)})
                     made += 1
         return {"created": made, "skipped": skipped}
     finally:
@@ -189,10 +172,7 @@ def get_session(sid: int):
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        s = one(repo.raw(
-            "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name"
-            "  FROM sessions s JOIN classes c ON c.id=s.class_id"
-            "  LEFT JOIN instructors i ON i.id=s.instructor_id WHERE s.id=?", (sid,)))
+        s = repo.session_detail(sid)
         if not s:
             raise HTTPException(404, "no such session")
         s["roster"] = access.session_roster(repo, sid)
@@ -212,7 +192,7 @@ def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
     """
     repo = data.connect()
     try:
-        if not repo.raw("SELECT 1 FROM sessions WHERE id=?", (sid,)).fetchone():
+        if not repo.exists("sessions", {"id": sid}):
             raise HTTPException(404, "no such session")
         fields = body.model_dump(exclude_none=True)
         if clear_instructor:
@@ -224,7 +204,7 @@ def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
         # ignoring the session itself, which of course overlaps where it is.
         with repo.begin():
             if "starts_at" in fields or "duration_hours" in fields:
-                cur = one(repo.raw("SELECT * FROM sessions WHERE id=?", (sid,)))
+                cur = repo.get("sessions", sid)
                 clash = access.slot_conflict(
                     repo,
                     fields.get("starts_at", cur["starts_at"]),
@@ -237,8 +217,7 @@ def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
                 fields["ends_at"] = access.ends_at_of(
                     fields.get("starts_at", cur["starts_at"]),
                     fields.get("duration_hours", cur["duration_hours"]))
-            sets = ", ".join(f"{k}=?" for k in fields)
-            repo.raw(f"UPDATE sessions SET {sets} WHERE id=?", (*fields.values(), sid))
+            repo.update("sessions", sid, fields)
         return {"ok": True, "changed": list(fields)}
     finally:
         repo.close()
@@ -264,14 +243,14 @@ def set_session_status(sid: int, status: str):
         # would put two classes in one slot by the back door.
         with repo.begin():
             if status != "cancelled":
-                row = one(repo.raw("SELECT * FROM sessions WHERE id=?", (sid,)))
+                row = repo.get("sessions", sid)
                 if not row:
                     raise HTTPException(404, "no such session")
                 clash = access.slot_conflict(repo, row["starts_at"],
                                              row["duration_hours"], exclude_id=sid)
                 if clash:
                     raise HTTPException(400, access.slot_taken_message(clash))
-            repo.raw("UPDATE sessions SET status=? WHERE id=?", (status, sid))
+            repo.update("sessions", sid, {"status": status})
         return {"ok": True}
     finally:
         repo.close()

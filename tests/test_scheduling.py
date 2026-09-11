@@ -210,3 +210,73 @@ def test_migrate_repairs_a_session_whose_end_is_missing(empty):
     assert access.slot_conflict(repo, at(1, 18), 1.5) is not None
     assert repo.raw("SELECT ends_at FROM sessions WHERE id=?",
                         (sid,)).fetchone()["ends_at"] == at(1, 19, 30)
+
+
+# ------------------------------------------------------ the range boundary
+
+def test_a_session_at_the_exact_end_of_a_range_is_not_in_it(empty):
+    """
+    sessions_in_range is half-open: [start, end).
+
+    The queries it replaced used `starts_at BETWEEN ? AND ?`, which is
+    inclusive at both ends. day_bounds() returns (midnight, midnight+86400),
+    so a session at exactly midnight tomorrow counted as one of *today's* —
+    it appeared on the dashboard under today and again tomorrow. Half-open
+    is both the fix and the convention day_bounds() already assumed.
+    """
+    repo = empty.repo
+    start = at(1, 0)
+    end = start + 86400
+    add(empty, empty.ballet, start, 1.0)          # first instant of the range
+    add(empty, empty.flex, end, 1.0)              # first instant of the next
+
+    got = repo.sessions_in_range(start, end)
+
+    assert [s["starts_at"] for s in got] == [start]
+
+
+def test_a_session_at_the_start_of_a_range_is_in_it(empty):
+    start = at(2, 0)
+    add(empty, empty.ballet, start, 1.0)
+    assert len(empty.repo.sessions_in_range(start, start + 86400)) == 1
+
+
+def test_sessions_in_range_can_be_filtered_to_one_class(empty):
+    start = at(3, 9)
+    add(empty, empty.ballet, start, 1.0)
+    add(empty, empty.flex, start + 7200, 1.0)
+    got = empty.repo.sessions_in_range(start, start + 86400, class_id=empty.ballet)
+    assert [s["class_name"] for s in got] == ["Ballet"]
+
+
+def test_sessions_in_range_carries_the_booked_and_attended_counts(empty):
+    """The pair that used to be copied into five separate queries."""
+    repo = empty.repo
+    start = at(4, 9)
+    sid = add(empty, empty.ballet, start, 1.0)
+    cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
+    other = _ins(repo, "clients", name_en="Y", created_at=db.now(), active=1)
+    _ins(repo, "bookings", client_id=cid, session_id=sid,
+         status="present", created_at=db.now())
+    _ins(repo, "bookings", client_id=other, session_id=sid,
+         status="booked", created_at=db.now())
+
+    got = repo.sessions_in_range(start, start + 86400)[0]
+
+    assert got["booked"] == 2, "every slot, whatever its status"
+    assert got["attended"] == 1
+
+
+def test_sessions_in_range_can_exclude_what_a_client_already_holds(empty):
+    """The "somewhere to go" half of a kiosk swap."""
+    repo = empty.repo
+    start = at(5, 9)
+    mine = add(empty, empty.ballet, start, 1.0)
+    free = add(empty, empty.flex, start + 7200, 1.0)
+    cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
+    _ins(repo, "bookings", client_id=cid, session_id=mine,
+         status="booked", created_at=db.now())
+
+    got = repo.sessions_in_range(start, start + 86400, not_booked_by=cid)
+
+    assert [s["id"] for s in got] == [free]

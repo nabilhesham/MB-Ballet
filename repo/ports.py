@@ -53,6 +53,36 @@ class SessionsPort(ABC):
     def complete_finished_sessions(self, now: int) -> int:
         """Mark every scheduled session whose end has passed completed."""
 
+    @abstractmethod
+    def session_detail(self, session_id: int):
+        """One session with its class and instructor named, or None."""
+
+
+class ClassesPort(ABC):
+
+    @abstractmethod
+    def classes_with_counts(self, active: int) -> list:
+        """
+        The class list: each class with its default instructor named, how
+        many sessions are still ahead of it, and how many distinct clients
+        have ever had a slot in it.
+
+        Membership is derived from bookings — there is no enrolment list,
+        which is why this counts "students with a booking" rather than a
+        roster.
+        """
+
+    @abstractmethod
+    def class_sessions(self, class_id: int, limit: int) -> list:
+        """A class's sessions, newest first, with instructor and counts."""
+
+    @abstractmethod
+    def class_students(self, class_id: int) -> list:
+        """
+        Everyone with a booking in this class, with how many slots they have
+        had and how many they attended.
+        """
+
 
 class BookingsPort(ABC):
 

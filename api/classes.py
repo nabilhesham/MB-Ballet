@@ -9,7 +9,6 @@ import access
 import db
 import repo as data
 
-from .helpers import rows, one
 
 router = APIRouter()
 
@@ -38,14 +37,7 @@ def list_classes(status: str = "active"):
     repo = data.connect()
     try:
         active = 0 if status == "archived" else 1
-        return rows(repo.raw(
-            "SELECT c.*, i.name AS instructor_name,"
-            "  (SELECT COUNT(*) FROM sessions s WHERE s.class_id=c.id"
-            "     AND s.starts_at > ? AND s.status='scheduled') AS upcoming,"
-            "  (SELECT COUNT(DISTINCT b.client_id) FROM bookings b"
-            "     JOIN sessions s ON s.id=b.session_id WHERE s.class_id=c.id) AS students"
-            " FROM classes c LEFT JOIN instructors i ON i.id = c.instructor_id"
-            " WHERE c.active=? ORDER BY c.name", (db.now(), active)))
+        return repo.classes_with_counts(active)
     finally:
         repo.close()
 
@@ -54,12 +46,10 @@ def list_classes(status: str = "active"):
 def create_class(body: ClassIn):
     repo = data.connect()
     try:
-        cur = repo.raw(
-            "INSERT INTO classes (name, description, colour, duration_hours, level,"
-            " instructor_id) VALUES (?,?,?,?,?,?)",
-            (body.name, body.description, body.colour, body.duration_hours, body.level,
-             body.instructor_id))
-        return {"id": cur.lastrowid}
+        return {"id": repo.insert("classes", {
+            "name": body.name, "description": body.description,
+            "colour": body.colour, "duration_hours": body.duration_hours,
+            "level": body.level, "instructor_id": body.instructor_id})}
     finally:
         repo.close()
 
@@ -72,20 +62,20 @@ def update_class(clid: int, body: ClassIn):
         # default and then failed to apply it would leave the sessions
         # disagreeing with the class they belong to.
         with repo.begin():
-            repo.raw(
-                "UPDATE classes SET name=?, description=?, colour=?,"
-                " duration_hours=?, level=?, instructor_id=? WHERE id=?",
-                (body.name, body.description, body.colour,
-                 body.duration_hours, body.level, body.instructor_id, clid))
+            repo.update("classes", clid, {
+                "name": body.name, "description": body.description,
+                "colour": body.colour, "duration_hours": body.duration_hours,
+                "level": body.level, "instructor_id": body.instructor_id})
             # The class's instructor is a default that cascades: every session
             # that hasn't happened yet is overwritten to match, whatever
             # instructor it had before — not just the ones with none. Past and
             # cancelled sessions are untouched; the "upcoming" predicate here is
             # the same one list_classes' own `upcoming` count uses.
-            cascaded = repo.raw(
-                "UPDATE sessions SET instructor_id=? WHERE class_id=?"
-                " AND status='scheduled' AND starts_at > ?",
-                (body.instructor_id, clid, db.now())).rowcount
+            cascaded = repo.update_where(
+                "sessions",
+                {"class_id": clid, "status": "scheduled",
+                 "starts_at": {"gt": db.now()}},
+                {"instructor_id": body.instructor_id})
         return {"ok": True, "cascaded_sessions": cascaded}
     finally:
         repo.close()
@@ -96,24 +86,11 @@ def get_class(clid: int):
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        c = one(repo.raw("SELECT * FROM classes WHERE id=?", (clid,)))
+        c = repo.get("classes", clid)
         if not c:
             raise HTTPException(404, "no such class")
-        c["sessions"] = rows(repo.raw(
-            "SELECT s.*, i.name AS instructor_name,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
-            "     AND b.status='present') AS attended"
-            "  FROM sessions s LEFT JOIN instructors i ON i.id = s.instructor_id"
-            " WHERE s.class_id=? ORDER BY s.starts_at DESC LIMIT 80", (clid,)))
-        c["students"] = rows(repo.raw(
-            "SELECT cl.id, cl.name_en, cl.phone, cl.photo_path,"
-            "       COUNT(b.id) AS slots,"
-            "       SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) AS attended"
-            "  FROM bookings b JOIN sessions s ON s.id=b.session_id"
-            "  JOIN clients cl ON cl.id=b.client_id"
-            " WHERE s.class_id=? AND cl.active=1"
-            " GROUP BY cl.id ORDER BY cl.name_en", (clid,)))
+        c["sessions"] = repo.class_sessions(clid, 80)
+        c["students"] = repo.class_students(clid)
         return c
     finally:
         repo.close()
@@ -135,9 +112,8 @@ def delete_class(clid: int, hard: bool = False):
 def unarchive_class(clid: int):
     repo = data.connect()
     try:
-        if not repo.raw("SELECT 1 FROM classes WHERE id=?", (clid,)).fetchone():
+        if not repo.update("classes", clid, {"active": 1}):
             raise HTTPException(404, "no such class")
-        repo.raw("UPDATE classes SET active=1 WHERE id=?", (clid,))
         return {"ok": True}
     finally:
         repo.close()

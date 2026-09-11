@@ -7,7 +7,10 @@ and that is fine: the contract is the dict that comes back, which the parity
 tests check directly.
 """
 
-from ..ports import BookingsPort, EventsPort, PlansPort, SessionsPort
+import db
+
+from ..ports import (BookingsPort, ClassesPort, EventsPort, PlansPort,
+                     SessionsPort)
 
 
 def _marks(values):
@@ -53,6 +56,47 @@ class SqliteSessions(SessionsPort):
         return self.conn.execute(
             "UPDATE sessions SET status='completed'"
             " WHERE status='scheduled' AND ends_at < ?", (now,)).rowcount
+
+    def session_detail(self, session_id):
+        row = self.conn.execute(
+            "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name"
+            "  FROM sessions s JOIN classes c ON c.id=s.class_id"
+            "  LEFT JOIN instructors i ON i.id=s.instructor_id WHERE s.id=?",
+            (session_id,)).fetchone()
+        return dict(row) if row else None
+
+
+class SqliteClasses(ClassesPort):
+
+    def classes_with_counts(self, active):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT c.*, i.name AS instructor_name,"
+            "  (SELECT COUNT(*) FROM sessions s WHERE s.class_id=c.id"
+            "     AND s.starts_at > ? AND s.status='scheduled') AS upcoming,"
+            "  (SELECT COUNT(DISTINCT b.client_id) FROM bookings b"
+            "     JOIN sessions s ON s.id=b.session_id WHERE s.class_id=c.id) AS students"
+            " FROM classes c LEFT JOIN instructors i ON i.id = c.instructor_id"
+            " WHERE c.active=? ORDER BY c.name, c.id", (db.now(), active)).fetchall()]
+
+    def class_sessions(self, class_id, limit):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT s.*, i.name AS instructor_name,"
+            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
+            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
+            "     AND b.status='present') AS attended"
+            "  FROM sessions s LEFT JOIN instructors i ON i.id = s.instructor_id"
+            " WHERE s.class_id=? ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
+            (class_id, limit)).fetchall()]
+
+    def class_students(self, class_id):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT cl.id, cl.name_en, cl.phone, cl.photo_path,"
+            "       COUNT(b.id) AS slots,"
+            "       SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) AS attended"
+            "  FROM bookings b JOIN sessions s ON s.id=b.session_id"
+            "  JOIN clients cl ON cl.id=b.client_id"
+            " WHERE s.class_id=? AND cl.active=1"
+            " GROUP BY cl.id ORDER BY cl.name_en, cl.id", (class_id,)).fetchall()]
 
 
 class SqliteBookings(BookingsPort):
