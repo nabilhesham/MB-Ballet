@@ -14,9 +14,8 @@ from fixtures import add_session, later_today
 
 
 def test_a_client_holds_one_card_per_class(academy):
-    held = academy.repo.raw(
-        "SELECT class_id FROM credentials WHERE client_id=? AND revoked_at IS NULL",
-        (academy.dual,)).fetchall()
+    held = academy.repo.find("credentials", {"client_id": academy.dual,
+                                             "revoked_at": None})
     classes = [r["class_id"] for r in held]
     assert sorted(classes) == sorted([academy.ballet, academy.flex])
     assert len(classes) == len(set(classes)), "one card per class, not two for one"
@@ -97,15 +96,13 @@ def test_an_unattended_past_session_is_swept_to_absent(academy):
     repo = academy.repo
     past = add_session(repo, academy.ballet, academy.ana,
                        db.now() - 4 * 3600, 1.5, status="scheduled")
-    repo.raw(
-        "INSERT INTO bookings (client_id,session_id,subscription_id,status,created_at)"
-        " VALUES (?,?,NULL,'booked',?)", (academy.planless, past, db.now()))
+    repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
+                             "subscription_id": None, "status": "booked",
+                             "created_at": db.now()})
 
     access.settle_past_sessions(repo)
 
-    status = repo.raw("SELECT status FROM bookings WHERE session_id=?",
-                          (past,)).fetchone()["status"]
-    assert status == "absent"
+    assert repo.find_one("bookings", {"session_id": past})["status"] == "absent"
 
 
 def test_the_sweep_also_completes_the_session(academy):
@@ -113,8 +110,7 @@ def test_the_sweep_also_completes_the_session(academy):
     past = add_session(repo, academy.ballet, academy.ana,
                        db.now() - 4 * 3600, 1.5, status="scheduled")
     access.settle_past_sessions(repo)
-    assert repo.raw("SELECT status FROM sessions WHERE id=?",
-                        (past,)).fetchone()["status"] == "completed"
+    assert repo.get("sessions", past)["status"] == "completed"
 
 
 def test_instructor_pay_is_hours_times_rate(academy):
@@ -129,7 +125,7 @@ def test_correcting_a_rate_reprices_the_month(academy):
     """Pay is derived at read time, never stored, so a new rate re-prices."""
     repo = academy.repo
     a, b = (date.today() - timedelta(days=30)).isoformat(), date.today().isoformat()
-    repo.raw("UPDATE instructors SET hourly_rate=200 WHERE id=?", (academy.ana,))
+    repo.update("instructors", academy.ana, {"hourly_rate": 200})
     assert access.logged_hours(repo, academy.ana, a, b)["pay"] == 40.0 * 200.0
 
 

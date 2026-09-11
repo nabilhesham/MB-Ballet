@@ -39,6 +39,7 @@ hiddenimports = [
     "server", "access", "cards", "config", "db", "tokens",
     "repo", "repo.base", "repo.ports", "repo.errors", "repo.filters",
     "repo.sqlite", "repo.sqlite.filters", "repo.sqlite.ports",
+    "repo.mongo",
     "api", "api.clients", "api.plans", "api.classes",
     "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
 ]

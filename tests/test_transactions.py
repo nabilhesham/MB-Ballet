@@ -155,22 +155,21 @@ def test_a_failed_swap_leaves_the_booking_where_it_was(academy, monkeypatch):
     a = academy
     repo = a.repo
     target = a_session_today_they_are_not_booked_into(a)
-    give_up = repo.raw(
-        "SELECT session_id FROM bookings WHERE client_id=? AND status='booked'"
-        "   AND session_id != ? LIMIT 1", (a.dual, a.today_ballet)).fetchone()["session_id"]
-    events_before = repo.raw("SELECT COUNT(*) n FROM access_events").fetchone()["n"]
+    give_up = repo.find_one("bookings", {
+        "client_id": a.dual, "status": "booked",
+        "session_id": {"ne": a.today_ballet}})["session_id"]
+    events_before = repo.count("access_events")
 
     monkeypatch.setattr(access, "check_in",
                         lambda *args, **kw: (_ for _ in ()).throw(RuntimeError("crash")))
     with pytest.raises(RuntimeError):
         access.swap_and_check_in(repo, a.dual, give_up, target)
 
-    still_there = repo.raw(
-        "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id=?",
-        (a.dual, give_up)).fetchone()["n"]
-    assert still_there == 1, "the booking was not moved"
-    assert repo.raw("SELECT COUNT(*) n FROM access_events").fetchone()["n"] \
-        == events_before, "and no event was logged"
+    assert repo.count("bookings", {"client_id": a.dual,
+                                   "session_id": give_up}) == 1, \
+        "the booking was not moved"
+    assert repo.count("access_events") == events_before, \
+        "and no event was logged"
 
 
 def test_a_successful_swap_moves_the_booking_and_checks_in(academy):
@@ -178,19 +177,17 @@ def test_a_successful_swap_moves_the_booking_and_checks_in(academy):
     a = academy
     repo = a.repo
     target = a_session_today_they_are_not_booked_into(a)
-    give_up = repo.raw(
-        "SELECT session_id FROM bookings WHERE client_id=? AND status='booked'"
-        "   AND session_id != ? LIMIT 1", (a.dual, a.today_ballet)).fetchone()["session_id"]
+    give_up = repo.find_one("bookings", {
+        "client_id": a.dual, "status": "booked",
+        "session_id": {"ne": a.today_ballet}})["session_id"]
 
     r = access.swap_and_check_in(repo, a.dual, give_up, target)
 
     assert r["ok"], r
-    assert repo.raw(
-        "SELECT status FROM bookings WHERE client_id=? AND session_id=?",
-        (a.dual, target)).fetchone()["status"] == "present"
-    assert repo.raw(
-        "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id=?",
-        (a.dual, give_up)).fetchone()["n"] == 0
+    assert repo.find_one("bookings", {"client_id": a.dual,
+                                     "session_id": target})["status"] == "present"
+    assert repo.count("bookings", {"client_id": a.dual,
+                                   "session_id": give_up}) == 0
 
 
 def test_the_sweep_and_the_freezes_it_lifts_are_one_transaction(academy, monkeypatch):
@@ -232,10 +229,10 @@ def test_refresh_expiry_is_committed_by_whoever_opened_the_block(academy):
     a = academy
     repo = a.repo
     before = access.plan_state(repo, a.dual_ballet_plan)["expires_on"]
-    latest = repo.raw(
-        "SELECT b.session_id FROM bookings b JOIN sessions s ON s.id=b.session_id"
-        " WHERE b.subscription_id=? ORDER BY s.starts_at DESC LIMIT 1",
-        (a.dual_ballet_plan,)).fetchone()["session_id"]
+    booked = repo.find("bookings", {"subscription_id": a.dual_ballet_plan})
+    when = {s["id"]: s["starts_at"] for s in repo.find(
+        "sessions", {"id": {"in": [b["session_id"] for b in booked]}})}
+    latest = max(booked, key=lambda b: when[b["session_id"]])["session_id"]
 
     access.unbook(repo, a.dual, latest)
 

@@ -21,6 +21,7 @@ from datetime import date, datetime, time, timedelta
 import access
 import cards
 import db
+import repo as data
 import sheets
 
 # ---------------------------------------------------------------- the sheets
@@ -75,23 +76,22 @@ def parse_sheets(warn):
 
 
 # ---------------------------------------------------------------- instructors
-def seed_instructors(conn, payrolls, rosters, warn):
+def seed_instructors(repo, payrolls, rosters, warn):
     """
     Instructors come from the salary sheet, which is the only place their rate
     is written down. Anyone named on a roster block but absent from payroll is
     still created — they teach here, their rate just is not known yet.
     """
-    with db.tx(conn):
+    with repo.begin():
         ids = {}
         for p in payrolls:
             for pay in p.instructors:
                 key = pay.name.lower()
                 if key in ids:
                     continue
-                cur = conn.execute(
-                    "INSERT INTO instructors (name, hourly_rate, specialty)"
-                    " VALUES (?,?,?)", (pay.name, pay.hourly_rate, None))
-                ids[key] = cur.lastrowid
+                ids[key] = repo.insert("instructors", {
+                    "name": pay.name, "hourly_rate": pay.hourly_rate,
+                    "specialty": None})
 
         def match(name):
             """
@@ -112,10 +112,8 @@ def seed_instructors(conn, payrolls, rosters, warn):
                     continue
                 iid = match(g.instructor)
                 if iid is None:
-                    cur = conn.execute(
-                        "INSERT INTO instructors (name, hourly_rate) VALUES (?,?)",
-                        (g.instructor, 0))
-                    iid = ids[g.instructor.lower()] = cur.lastrowid
+                    iid = ids[g.instructor.lower()] = repo.insert(
+                        "instructors", {"name": g.instructor, "hourly_rate": 0})
                     warn(f"{g.instructor}: teaches {g.class_name} but is not on the "
                          f"salary sheet — created with no hourly rate")
                 g.instructor_id = iid
@@ -124,16 +122,15 @@ def seed_instructors(conn, payrolls, rosters, warn):
             for pay in p.instructors:
                 iid = ids[pay.name.lower()]
                 for when, hours in sorted(pay.days.items()):
-                    conn.execute(
-                        "INSERT OR IGNORE INTO instructor_hours (instructor_id,"
-                        " work_date, hours, source, created_at) VALUES (?,?,?,?,?)",
-                        (iid, when.isoformat(), hours,
-                         os.path.basename(p.path), db.now()))
+                    repo.insert_ignore("instructor_hours", {
+                        "instructor_id": iid, "work_date": when.isoformat(),
+                        "hours": hours, "source": os.path.basename(p.path),
+                        "created_at": db.now()})
         return ids
 
 
 # ---------------------------------------------------------------- the timetable
-def seed_classes_and_sessions(conn, rosters, warn):
+def seed_classes_and_sessions(repo, rosters, warn):
     """
     One class per block of the roster, and its weekly sessions.
 
@@ -143,7 +140,7 @@ def seed_classes_and_sessions(conn, rosters, warn):
     the class, so a substitute for one Wednesday stays a fact about that
     Wednesday.
     """
-    with db.tx(conn):
+    with repo.begin():
         class_of, sessions_of = {}, {}
         shade_used = {}
 
@@ -153,12 +150,10 @@ def seed_classes_and_sessions(conn, rosters, warn):
                 n = shade_used.get(g.family, 0)
                 shade_used[g.family] = n + 1
                 desc = g.title.strip()
-                cur = conn.execute(
-                    "INSERT INTO classes (name, description, colour, duration_hours,"
-                    " level) VALUES (?,?,?,?,?)",
-                    (g.class_name, desc, palette[n % len(palette)],
-                     g.duration_hours, g.level))
-                cid = class_of[id(g)] = cur.lastrowid
+                cid = class_of[id(g)] = repo.insert("classes", {
+                    "name": g.class_name, "description": desc,
+                    "colour": palette[n % len(palette)],
+                    "duration_hours": g.duration_hours, "level": g.level})
 
                 weekdays = g.grid_weekdays()
                 dates = [s.on for st in g.students for s in st.slots]
@@ -191,12 +186,11 @@ def seed_classes_and_sessions(conn, rosters, warn):
                     starts = int(datetime.combine(d, time(g.hour, g.minute)).timestamp())
                     ends = access.ends_at_of(starts, g.duration_hours)
                     status = "completed" if ends < db.now() else "scheduled"
-                    cur = conn.execute(
-                        "INSERT INTO sessions (class_id, instructor_id, starts_at,"
-                        " duration_hours, ends_at, status) VALUES (?,?,?,?,?,?)",
-                        (cid, getattr(g, "instructor_id", None), starts,
-                         g.duration_hours, ends, status))
-                    by_date[d] = (cur.lastrowid, starts)
+                    by_date[d] = (repo.insert("sessions", {
+                        "class_id": cid,
+                        "instructor_id": getattr(g, "instructor_id", None),
+                        "starts_at": starts, "duration_hours": g.duration_hours,
+                        "ends_at": ends, "status": status}), starts)
                 sessions_of[cid] = by_date
         return class_of, sessions_of
 
@@ -228,8 +222,8 @@ def _plan(student, family):
     return total, name, months
 
 
-def seed_clients(conn, rosters, class_of, sessions_of, warn):
-    with db.tx(conn):
+def seed_clients(repo, rosters, class_of, sessions_of, warn):
+    with repo.begin():
         clients, subs = {}, []
         today = date.today()
 
@@ -245,19 +239,15 @@ def seed_clients(conn, rosters, class_of, sessions_of, warn):
                     if key in clients:
                         client_id = clients[key]
                         # Later blocks fill in what the first one left blank.
-                        conn.execute(
-                            "UPDATE clients SET age=COALESCE(age,?), school=COALESCE(school,?),"
-                            " dob=COALESCE(dob,?), phone=COALESCE(phone,?),"
-                            " joined_on=MIN(joined_on,?) WHERE id=?",
-                            (st.age, st.school, st.dob, st.phone, joined.isoformat(),
-                             client_id))
+                        repo.merge_client_facts(
+                            client_id, age=st.age, school=st.school, dob=st.dob,
+                            phone=st.phone, joined_on=joined.isoformat())
                     else:
-                        cur = conn.execute(
-                            "INSERT INTO clients (name_en, phone, age, dob, school,"
-                            " joined_on, notes, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                            (st.name, st.phone, st.age, st.dob, st.school,
-                             joined.isoformat(), st.note, db.now()))
-                        client_id = clients[key] = cur.lastrowid
+                        client_id = clients[key] = repo.insert("clients", {
+                            "name_en": st.name, "phone": st.phone, "age": st.age,
+                            "dob": st.dob, "school": st.school,
+                            "joined_on": joined.isoformat(), "notes": st.note,
+                            "created_at": db.now()})
 
                     total, plan_name, months = _plan(st, g.family)
                     attended = len(st.slots)
@@ -268,30 +258,30 @@ def seed_clients(conn, rosters, class_of, sessions_of, warn):
 
                     starts = st.paid_date or joined
                     expires = starts + timedelta(days=30 * (months or 1))
-                    cur = conn.execute(
-                        "INSERT INTO subscriptions (client_id, class_id, plan,"
-                        " sessions_total, price, payment_note, months, days_pattern,"
-                        " starts_on, expires_on, paid_on, created_at)"
-                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (client_id, cid_class, plan_name, total, st.price,
-                         st.paid_raw, months, st.days, starts.isoformat(),
-                         expires.isoformat(),
-                         # The sheet's own PAID DATE column, kept as the answer to
-                         # "when was this paid" rather than only being spent on
-                         # starts_on. A blank cell stays blank: unpaid, not guessed.
-                         st.paid_date.isoformat() if st.paid_date else None,
-                         db.now()))
-                    sub_id = cur.lastrowid
+                    sub_id = repo.insert("subscriptions", {
+                        "client_id": client_id, "class_id": cid_class,
+                        "plan": plan_name, "sessions_total": total,
+                        "price": st.price, "payment_note": st.paid_raw,
+                        "months": months, "days_pattern": st.days,
+                        "starts_on": starts.isoformat(),
+                        "expires_on": expires.isoformat(),
+                        # The sheet's own PAID DATE column, kept as the answer
+                        # to "when was this paid" rather than only being spent
+                        # on starts_on. A blank cell stays blank: unpaid, not
+                        # guessed.
+                        "paid_on": (st.paid_date.isoformat()
+                                    if st.paid_date else None),
+                        "created_at": db.now()})
                     subs.append(sub_id)
 
-                    used = _book_attendance(conn, client_id, sub_id, st, grid,
+                    used = _book_attendance(repo, client_id, sub_id, st, grid,
                                             g.class_name, warn)
-                    _book_forward(conn, client_id, sub_id, st, grid, total - used)
-                    _fit_expiry(conn, sub_id, expires)
+                    _book_forward(repo, client_id, sub_id, st, grid, total - used)
+                    _fit_expiry(repo, sub_id, expires)
         return clients, subs
 
 
-def _fit_expiry(conn, sub_id, expires):
+def _fit_expiry(repo, sub_id, expires):
     """
     Stretch the expiry to cover the sessions the plan is actually paying for.
 
@@ -301,16 +291,15 @@ def _fit_expiry(conn, sub_id, expires):
     before the student started, so the plain arithmetic expires a plan
     halfway through the classes it bought.
     """
-    covers = access.last_session_date(conn, sub_id)
+    covers = access.last_session_date(repo, sub_id)
     if covers is None:
         return
     end = date.fromisoformat(covers) + timedelta(days=7)
     if end > expires:
-        conn.execute("UPDATE subscriptions SET expires_on=? WHERE id=?",
-                     (end.isoformat(), sub_id))
+        repo.update("subscriptions", sub_id, {"expires_on": end.isoformat()})
 
 
-def _book_attendance(conn, client_id, sub_id, student, grid, class_name, warn):
+def _book_attendance(repo, client_id, sub_id, student, grid, class_name, warn):
     """Turn the dates written across the row into settled bookings."""
     booked = 0
     seen = set()
@@ -327,16 +316,16 @@ def _book_attendance(conn, client_id, sub_id, student, grid, class_name, warn):
             continue
         session_id, starts = entry
         status = "present" if slot.present else "absent"
-        conn.execute(
-            "INSERT OR IGNORE INTO bookings (client_id, session_id, subscription_id,"
-            " status, checked_in_at, created_at) VALUES (?,?,?,?,?,?)",
-            (client_id, session_id, sub_id, status,
-             starts + 600 if slot.present else None, db.now()))
+        repo.insert_ignore("bookings", {
+            "client_id": client_id, "session_id": session_id,
+            "subscription_id": sub_id, "status": status,
+            "checked_in_at": starts + 600 if slot.present else None,
+            "created_at": db.now()})
         booked += 1
     return booked
 
 
-def _book_forward(conn, client_id, sub_id, student, grid, remaining):
+def _book_forward(repo, client_id, sub_id, student, grid, remaining):
     """
     Put the rest of the plan on the calendar.
 
@@ -354,35 +343,42 @@ def _book_forward(conn, client_id, sub_id, student, grid, remaining):
         if wanted and when.weekday() not in wanted:
             continue
         session_id, _ = grid[when]
-        cur = conn.execute(
-            "INSERT OR IGNORE INTO bookings (client_id, session_id,"
-            " subscription_id, status, created_at) VALUES (?,?,?,?,?)",
-            (client_id, session_id, sub_id, "booked", db.now()))
-        if cur.rowcount:
+        made = repo.insert_ignore("bookings", {
+            "client_id": client_id, "session_id": session_id,
+            "subscription_id": sub_id, "status": "booked",
+            "created_at": db.now()})
+        if made is not None:
             remaining -= 1
 
 
 # ---------------------------------------------------------------- the cards
-def seed_cards(conn, make_pngs=True):
+def seed_cards(repo, make_pngs=True):
     """One card per client per class they hold a plan in."""
-    with db.tx(conn):
+    with repo.begin():
         import tokens
         n = 0
-        for r in conn.execute(
-                "SELECT s.client_id, s.class_id, s.sessions_total, s.expires_on, c.name_en,"
-                "       cl.name AS class_name, cl.colour"
-                "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
-                "  JOIN classes cl ON cl.id=s.class_id"
-                " GROUP BY s.client_id, s.class_id").fetchall():
-            token = tokens.issue(r["client_id"])
-            conn.execute(
-                "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
-                " VALUES (?,?,?,?,?)",
-                (r["client_id"], r["class_id"], token, "card", db.now()))
+        plans = repo.find("subscriptions", {"class_id": {"ne": None}})
+        people = {c["id"]: c for c in repo.find("clients")}
+        klasses = {k["id"]: k for k in repo.find("classes")}
+        # One card per (client, class). The query this replaces leaned on
+        # SQLite letting a bare column through a GROUP BY, which picks an
+        # arbitrary row; taking the first deterministically is the same
+        # result and says so.
+        seen = set()
+        for plan in plans:
+            key = (plan["client_id"], plan["class_id"])
+            if key in seen:
+                continue
+            seen.add(key)
+            client, klass = people[plan["client_id"]], klasses[plan["class_id"]]
+            token = tokens.issue(plan["client_id"])
+            repo.insert("credentials", {
+                "client_id": plan["client_id"], "class_id": plan["class_id"],
+                "token": token, "kind": "card", "issued_at": db.now()})
             if make_pngs:
-                cards.build_card(r["client_id"], r["name_en"], token, r["sessions_total"],
-                                 r["expires_on"], class_name=r["class_name"],
-                                 colour=r["colour"])
+                cards.build_card(plan["client_id"], client["name_en"], token,
+                                 plan["sessions_total"], plan["expires_on"],
+                                 class_name=klass["name"], colour=klass["colour"])
             n += 1
         return n
 
@@ -394,8 +390,15 @@ def main():
     make_pngs = "--no-cards" not in argv
 
     if not dry:
-        if os.path.exists("academy.db") and "--force" not in argv:
-            print("academy.db exists. Re-run with --force to wipe it.")
+        # Asked of the backend rather than of the filesystem. A database that
+        # exists but was never seeded used to slip past this.
+        probe = data.connect()
+        try:
+            existing = not probe.is_empty()
+        finally:
+            probe.close()
+        if existing and "--force" not in argv:
+            print("The database already holds data. Re-run with --force to wipe it.")
             return
         if not os.environ.get("ENTRY_SECRET"):
             print("ENTRY_SECRET is not set — cards cannot be signed.\n"
@@ -428,28 +431,23 @@ def main():
         _report(warnings)
         return
 
-    for f in ("academy.db", "academy.db-wal", "academy.db-shm"):
-        if os.path.exists(f):
-            os.remove(f)
-
-    db.init()
-    conn = db.connect()
+    repo = data.connect()
     try:
-        seed_instructors(conn, payrolls, rosters, warn)
-        class_of, sessions_of = seed_classes_and_sessions(conn, rosters, warn)
-        seed_clients(conn, rosters, class_of, sessions_of, warn)
-        seed_cards(conn, make_pngs)
+        repo.drop_all()
+        seed_instructors(repo, payrolls, rosters, warn)
+        class_of, sessions_of = seed_classes_and_sessions(repo, rosters, warn)
+        seed_clients(repo, rosters, class_of, sessions_of, warn)
+        seed_cards(repo, make_pngs)
 
-        counts = {t: conn.execute(f"SELECT COUNT(*) n FROM {t}").fetchone()["n"]
+        counts = {t: repo.count(t)
                   for t in ("instructors", "instructor_hours", "classes",
                             "sessions", "clients", "subscriptions",
                             "bookings", "credentials")}
-        money = conn.execute(
-            "SELECT COALESCE(SUM(price),0) paid,"
-            "       SUM(CASE WHEN price IS NULL THEN 1 ELSE 0 END) unpriced"
-            "  FROM subscriptions").fetchone()
+        sold = repo.find("subscriptions", fields=["price"])
+        money = {"paid": round(sum(p["price"] or 0 for p in sold), 2),
+                 "unpriced": sum(1 for p in sold if p["price"] is None)}
     finally:
-        conn.close()
+        repo.close()
 
     print("\nMB Ballet Academy loaded from the sheets:")
     for k, v in counts.items():

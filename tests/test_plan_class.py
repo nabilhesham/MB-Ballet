@@ -10,9 +10,7 @@ import access
 
 
 def test_every_plan_names_a_class(academy):
-    n = academy.repo.raw(
-        "SELECT COUNT(*) n FROM subscriptions WHERE class_id IS NULL").fetchone()["n"]
-    assert n == 0
+    assert academy.repo.count("subscriptions", {"class_id": None}) == 0
 
 
 def test_a_plan_lookup_never_falls_back_to_another_class(academy):
@@ -23,21 +21,26 @@ def test_a_plan_lookup_never_falls_back_to_another_class(academy):
 
 
 def test_no_booking_crosses_from_its_plans_class(academy):
-    n = academy.repo.raw(
-        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-        "  JOIN subscriptions sub ON sub.id=b.subscription_id"
-        " WHERE sub.class_id IS NOT NULL AND s.class_id != sub.class_id").fetchone()["n"]
-    assert n == 0
+    repo = academy.repo
+    sessions = {s["id"]: s for s in repo.find("sessions")}
+    plans = {p["id"]: p for p in repo.find("subscriptions")}
+    crossed = [b for b in repo.find("bookings")
+               if b["subscription_id"] is not None
+               and plans[b["subscription_id"]]["class_id"] is not None
+               and sessions[b["session_id"]]["class_id"]
+               != plans[b["subscription_id"]]["class_id"]]
+    assert crossed == []
 
 
 def test_no_card_exists_without_a_matching_plan(academy):
     """A card that can never check anyone in reads at reception as a fault."""
-    n = academy.repo.raw(
-        "SELECT COUNT(*) n FROM credentials cr"
-        " WHERE cr.revoked_at IS NULL AND cr.class_id IS NOT NULL"
-        "   AND NOT EXISTS (SELECT 1 FROM subscriptions s WHERE s.client_id=cr.client_id"
-        "                     AND s.class_id=cr.class_id AND s.active=1)").fetchone()["n"]
-    assert n == 0
+    repo = academy.repo
+    live = {(p["client_id"], p["class_id"])
+            for p in repo.find("subscriptions", {"active": 1})}
+    orphans = [c for c in repo.find("credentials", {"revoked_at": None})
+               if c["class_id"] is not None
+               and (c["client_id"], c["class_id"]) not in live]
+    assert orphans == []
 
 
 def test_two_classes_give_two_different_plans(academy):
@@ -51,10 +54,8 @@ def test_two_classes_give_two_different_plans(academy):
 
 def test_can_freeze_agrees_with_the_rule(academy):
     repo = academy.repo
-    big = repo.raw("SELECT * FROM subscriptions WHERE id=?",
-                       (academy.dual_ballet_plan,)).fetchone()
-    small = repo.raw("SELECT * FROM subscriptions WHERE id=?",
-                         (academy.dual_flex_plan,)).fetchone()
+    big = repo.get("subscriptions", academy.dual_ballet_plan)
+    small = repo.get("subscriptions", academy.dual_flex_plan)
     assert access.can_freeze(big)[0] is True
     allowed, why = access.can_freeze(small)
     assert allowed is False
@@ -64,7 +65,6 @@ def test_can_freeze_agrees_with_the_rule(academy):
 def test_plan_state_reports_the_same_freeze_verdict_the_api_would(academy):
     """The button greys out for the same reason the endpoint refuses."""
     repo = academy.repo
-    for r in repo.raw("SELECT id FROM subscriptions WHERE active=1").fetchall():
-        state = access.plan_state(repo, r["id"])
-        sub = repo.raw("SELECT * FROM subscriptions WHERE id=?", (r["id"],)).fetchone()
-        assert state["can_freeze"] == access.can_freeze(sub)[0], r["id"]
+    for sub in repo.find("subscriptions", {"active": 1}):
+        state = access.plan_state(repo, sub["id"])
+        assert state["can_freeze"] == access.can_freeze(sub)[0], sub["id"]

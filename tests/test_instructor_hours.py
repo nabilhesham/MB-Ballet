@@ -45,20 +45,16 @@ def test_an_adjustment_is_a_dated_delta_not_a_rewrite(academy):
     """
     repo = academy.repo
     day = (date.today() - timedelta(days=1)).isoformat()
-    sessions_before = repo.raw(
-        "SELECT COALESCE(SUM(duration_hours),0) h FROM sessions WHERE instructor_id=?",
-        (academy.ana,)).fetchone()["h"]
+    sessions_before = repo.taught_totals_bulk(
+        [academy.ana], status=None)[academy.ana]["hours"]
 
     access.adjust_taught_hours(repo, academy.ana, day, 99.0)
 
-    rows = repo.raw(
-        "SELECT * FROM instructor_hour_adjustments WHERE instructor_id=?",
-        (academy.ana,)).fetchall()
+    rows = repo.find("instructor_hour_adjustments", {"instructor_id": academy.ana})
     assert len(rows) == 1
     assert rows[0]["adjustment_date"] == day
-    assert repo.raw(
-        "SELECT COALESCE(SUM(duration_hours),0) h FROM sessions WHERE instructor_id=?",
-        (academy.ana,)).fetchone()["h"] == sessions_before
+    assert repo.taught_totals_bulk(
+        [academy.ana], status=None)[academy.ana]["hours"] == sessions_before
 
 
 def test_a_correction_never_reaches_the_salary_sheet_figure(academy):

@@ -157,6 +157,31 @@ class ClientsPort(ABC):
     def plan_sessions(self, client_id: int, sub_id: int) -> list:
         """Every session one plan has paid for, in order."""
 
+    @abstractmethod
+    def merge_client_facts(self, client_id: int, **facts) -> None:
+        """
+        Fill in blanks on a client without overwriting what is already there,
+        and take the *earlier* of the two `joined_on` dates.
+
+        The same student appears in several roster blocks and later ones fill
+        in what the first left empty. "Fills blanks, never overwrites" is the
+        rule; `joined_on` is the exception because the earliest date is the
+        one they actually joined on.
+        """
+
+    @abstractmethod
+    def takings(self, date_field: str, month_from: str, month_to: str) -> dict:
+        """
+        `{"paid", "unpriced", "plans"}` over active clients' plans, filtered
+        by a month range on one of two dates.
+
+        `date_field` is "joined_on" (the client's) or "starts_on" (the
+        plan's), and the choice is the whole difference between the
+        dashboard's two intake figures: "earned from them" follows the
+        people out of the window, while "revenue" stays inside it. Unpriced
+        plans are counted separately and never as zero.
+        """
+
 
 class AccessPort(ABC):
 
@@ -199,6 +224,14 @@ class AccessPort(ABC):
     @abstractmethod
     def client_totals(self, client_id: int) -> dict:
         """`{"present", "absent", "last_visit"}` across their whole history."""
+
+    @abstractmethod
+    def giveable_slots(self, client_id: int, now: int) -> list:
+        """
+        Slots of the client's own that could be given up for a swap: one
+        still ahead of them, or one they were already marked absent for.
+        Each carries the plan that paid for it.
+        """
 
     @abstractmethod
     def session_roster(self, session_id: int) -> list:
@@ -244,6 +277,23 @@ class InstructorsPort(ABC):
         `{instructor_id: {"sessions", "hours"}}` for sessions of that status,
         optionally inside a half-open time range. One round trip.
         """
+
+    @abstractmethod
+    def salary_hours(self, instructor_id: int, period_from: str,
+                     period_to: str) -> dict:
+        """
+        What the salary sheet recorded: `{"hours", "days", "from", "to"}`.
+
+        `days` counts real sheet rows only — a correction is not a claim of
+        an extra day worked, and corrections belong to the *taught* figure.
+        Only one of the two may carry them or an instructor is paid twice for
+        the same hour.
+        """
+
+    @abstractmethod
+    def adjustments_sum(self, instructor_id: int, period_from: str,
+                        period_to: str) -> float:
+        """The net manual correction to hours taught across a date range."""
 
     @abstractmethod
     def instructor_sessions(self, instructor_id: int, start: int, end: int,

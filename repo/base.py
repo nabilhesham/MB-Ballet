@@ -163,21 +163,34 @@ class Repo(ABC):
     def delete_where(self, coll: str, flt: dict) -> int:
         ...
 
-    # ---------------------------------------------------------- escape hatch
+    # ---------------------------------------------------------- admin
 
     @abstractmethod
-    def raw(self, sql: str, params=()):
+    def init_schema(self) -> None:
         """
-        Run SQL. **Temporary, SQLite-only, and on its way out.**
+        Create whatever the backend needs before it can be written to.
 
-        This exists so the port can land in stages with the app working
-        throughout: every query moves onto the repository object first, and
-        the ones not yet expressible as a primitive or a port method keep
-        running through here. The Mongo backend raises NotImplementedError,
-        so a query still using it is impossible to miss rather than subtly
-        wrong.
+        Tables and indexes on SQLite; collections, indexes and the id
+        counters on Mongo. Idempotent — it runs on every startup.
+        """
 
-        The count only goes down. When it reaches zero this method is deleted
-        from the interface, so it cannot come back without someone deliberately
-        re-adding it.
+    @abstractmethod
+    def is_empty(self) -> bool:
+        """
+        Whether there is anything here yet.
+
+        Replaces `os.path.exists("academy.db")`, which is not a question a
+        networked backend can answer — and which was never quite the right
+        one anyway: a database that exists but was never seeded would skip
+        the seed prompt.
+        """
+
+    @abstractmethod
+    def drop_all(self) -> None:
+        """
+        Destroy everything. Only seed.py calls this, only with --force.
+
+        On SQLite it unlinks the file. On a shared remote database it is a
+        different class of accident entirely, which is why the Mongo
+        implementation must make the caller name what it is dropping.
         """

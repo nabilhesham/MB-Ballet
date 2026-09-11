@@ -52,7 +52,7 @@ def intake(repo):
 
     # Archived clients are out of both figures entirely.
     gone = client_with_plan("Archived", "2026-08-05", "2026-08-05", 9999.0)
-    repo.raw("UPDATE clients SET active=0 WHERE id=?", (gone,))
+    repo.update("clients", gone, {"active": 0})
 
     
     return repo

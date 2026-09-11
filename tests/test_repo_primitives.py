@@ -277,3 +277,51 @@ def test_begin_is_re_entrant(r):
 def test_the_repo_is_a_context_manager(repo):
     with data.connect() as r2:
         assert r2.count("clients") == 0
+
+
+# ---------------------------------------------------------------- admin
+
+def test_is_empty_answers_the_question_a_file_check_could_not(r):
+    """
+    `os.path.exists("academy.db")` is not a question a networked backend can
+    answer, and it was never quite the right one: a database that exists but
+    was never seeded slipped past it.
+    """
+    assert r.is_empty() is True
+    r.insert("clients", {"name_en": "Someone", "created_at": db.now(), "active": 1})
+    assert r.is_empty() is False
+
+
+def test_drop_all_leaves_a_usable_empty_database(r):
+    r.insert("clients", {"name_en": "Gone", "created_at": db.now(), "active": 1})
+    r.drop_all()
+    assert r.is_empty() is True
+    # Still writable afterwards — seed.py drops and then immediately fills.
+    r.insert("clients", {"name_en": "Fresh", "created_at": db.now(), "active": 1})
+    assert r.count("clients") == 1
+
+
+def test_init_schema_is_idempotent(r):
+    r.insert("clients", {"name_en": "Kept", "created_at": db.now(), "active": 1})
+    r.init_schema()
+    assert r.count("clients") == 1, "running it again destroys nothing"
+
+
+def test_merge_client_facts_fills_blanks_without_overwriting(r):
+    cid = r.insert("clients", {"name_en": "Dana", "phone": "0100", "age": None,
+                               "joined_on": "2026-03-01",
+                               "created_at": db.now(), "active": 1})
+    r.merge_client_facts(cid, phone="0999", age=12.5, school="Manor",
+                         joined_on="2026-01-15")
+    got = r.get("clients", cid)
+    assert got["phone"] == "0100", "what was already there wins"
+    assert got["age"] == 12.5, "a blank is filled"
+    assert got["school"] == "Manor"
+    assert got["joined_on"] == "2026-01-15", "joined_on takes the earlier of the two"
+
+
+def test_merge_client_facts_keeps_the_earlier_joined_on(r):
+    cid = r.insert("clients", {"name_en": "Dana", "joined_on": "2026-01-15",
+                               "created_at": db.now(), "active": 1})
+    r.merge_client_facts(cid, joined_on="2026-05-01")
+    assert r.get("clients", cid)["joined_on"] == "2026-01-15"

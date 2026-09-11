@@ -120,30 +120,26 @@ def test_a_fractional_duration_is_respected(empty):
 def test_a_session_that_has_ended_becomes_completed(empty):
     sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.5)
     access.settle_past_sessions(empty.repo)
-    assert empty.repo.raw("SELECT status FROM sessions WHERE id=?",
-                              (sid,)).fetchone()["status"] == "completed"
+    assert empty.repo.get("sessions", sid)["status"] == "completed"
 
 
 def test_a_session_still_running_is_left_alone(empty):
     """Its start has passed but its end has not."""
     sid = add(empty, empty.ballet, db.now() - 600, 1.5)
     access.settle_past_sessions(empty.repo)
-    assert empty.repo.raw("SELECT status FROM sessions WHERE id=?",
-                              (sid,)).fetchone()["status"] == "scheduled"
+    assert empty.repo.get("sessions", sid)["status"] == "scheduled"
 
 
 def test_a_future_session_is_left_alone(empty):
     sid = add(empty, empty.ballet, at(2, 18), 1.5)
     access.settle_past_sessions(empty.repo)
-    assert empty.repo.raw("SELECT status FROM sessions WHERE id=?",
-                              (sid,)).fetchone()["status"] == "scheduled"
+    assert empty.repo.get("sessions", sid)["status"] == "scheduled"
 
 
 def test_a_cancelled_session_is_never_completed_by_the_sweep(empty):
     sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.5, status="cancelled")
     access.settle_past_sessions(empty.repo)
-    assert empty.repo.raw("SELECT status FROM sessions WHERE id=?",
-                              (sid,)).fetchone()["status"] == "cancelled"
+    assert empty.repo.get("sessions", sid)["status"] == "cancelled"
 
 
 def test_a_booking_on_a_cancelled_session_is_not_swept_absent(empty):
@@ -153,8 +149,7 @@ def test_a_booking_on_a_cancelled_session_is_not_swept_absent(empty):
     _ins(repo, "bookings", client_id=cid, session_id=sid,
          status="booked", created_at=db.now())
     access.settle_past_sessions(repo)
-    assert repo.raw("SELECT status FROM bookings WHERE session_id=?",
-                        (sid,)).fetchone()["status"] == "booked"
+    assert repo.find_one("bookings", {"session_id": sid})["status"] == "booked"
 
 
 def test_the_sweep_returns_how_many_bookings_it_settled(empty):
@@ -187,12 +182,9 @@ def test_no_session_ever_disagrees_with_its_stored_end(academy):
     suggest it. Every path that writes starts_at or duration_hours must
     write this too.
     """
-    wrong = academy.repo.raw(
-        "SELECT COUNT(*) n FROM sessions"
-        " WHERE ends_at IS NULL"
-        "    OR ends_at != CAST(starts_at + duration_hours * 3600 AS INTEGER)"
-    ).fetchone()["n"]
-    assert wrong == 0
+    wrong = [s for s in academy.repo.find("sessions")
+             if s["ends_at"] != access.ends_at_of(s["starts_at"], s["duration_hours"])]
+    assert wrong == []
 
 
 def test_migrate_repairs_a_session_whose_end_is_missing(empty):
@@ -202,14 +194,13 @@ def test_migrate_repairs_a_session_whose_end_is_missing(empty):
     """
     repo = empty.repo
     sid = add(empty, empty.ballet, at(1, 18), 1.5)
-    repo.raw("UPDATE sessions SET ends_at=NULL WHERE id=?", (sid,))
+    repo.update("sessions", sid, {"ends_at": None})
     assert access.slot_conflict(repo, at(1, 18), 1.5) is None, "precondition: invisible"
 
     db.migrate(repo.conn)
 
     assert access.slot_conflict(repo, at(1, 18), 1.5) is not None
-    assert repo.raw("SELECT ends_at FROM sessions WHERE id=?",
-                        (sid,)).fetchone()["ends_at"] == at(1, 19, 30)
+    assert repo.get("sessions", sid)["ends_at"] == at(1, 19, 30)
 
 
 # ------------------------------------------------------ the range boundary

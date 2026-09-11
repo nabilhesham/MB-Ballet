@@ -212,6 +212,33 @@ class SqliteClients(ClientsPort):
             " ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
             (client_id, now, limit)).fetchall()]
 
+    def merge_client_facts(self, client_id, **facts):
+        joined = facts.pop("joined_on", None)
+        sets = [f"{k}=COALESCE({k},?)" for k in facts]
+        params = list(facts.values())
+        if joined is not None:
+            # MIN() with two arguments is the scalar form, not the aggregate.
+            sets.append("joined_on=MIN(joined_on,?)")
+            params.append(joined)
+        if not sets:
+            return
+        self.conn.execute(
+            f"UPDATE clients SET {', '.join(sets)} WHERE id=?",
+            (*params, client_id))
+
+    def takings(self, date_field, month_from, month_to):
+        assert date_field in ("joined_on", "starts_on"), date_field
+        col = f"c.{date_field}" if date_field == "joined_on" else f"s.{date_field}"
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(s.price),0) paid,"
+            "       SUM(CASE WHEN s.price IS NULL THEN 1 ELSE 0 END) unpriced,"
+            "       COUNT(*) plans"
+            "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
+            f" WHERE c.active=1 AND {col} >= ? AND {col} < ?",
+            (month_from, month_to)).fetchone()
+        return {"paid": r["paid"] or 0, "unpriced": r["unpriced"] or 0,
+                "plans": r["plans"] or 0}
+
     def plan_sessions(self, client_id, sub_id):
         return [dict(r) for r in self.conn.execute(
             "SELECT b.status, b.checked_in_at, s.id AS session_id, s.starts_at,"
@@ -279,6 +306,18 @@ class SqliteAccess(AccessPort):
             " WHERE b.client_id=?", (client_id,)).fetchone()
         return {"present": r["present"] or 0, "absent": r["absent"] or 0,
                 "last_visit": r["last_visit"]}
+
+    def giveable_slots(self, client_id, now):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT b.session_id, b.status, s.starts_at, c.name AS class_name,"
+            "       c.colour, sub.plan AS plan_name, pc.name AS plan_class"
+            "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
+            "  JOIN classes c ON c.id = s.class_id"
+            "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
+            "  LEFT JOIN classes pc ON pc.id = sub.class_id"
+            " WHERE b.client_id = ? AND s.status != 'cancelled'"
+            "   AND ((b.status = 'booked' AND s.starts_at > ?) OR b.status = 'absent')"
+            " ORDER BY s.starts_at, s.id", (client_id, now)).fetchall()]
 
     def session_roster(self, session_id):
         return [dict(r) for r in self.conn.execute(
@@ -360,6 +399,23 @@ class SqliteInstructors(InstructorsPort):
         for r in self.conn.execute(sql, params).fetchall():
             out[r["iid"]] = {"sessions": r["n"], "hours": round(r["h"] or 0, 2)}
         return out
+
+    def salary_hours(self, instructor_id, period_from, period_to):
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(hours),0) h, COUNT(*) days,"
+            "       MIN(work_date) a, MAX(work_date) b"
+            " FROM instructor_hours WHERE instructor_id=?"
+            "   AND work_date >= ? AND work_date <= ?",
+            (instructor_id, period_from, period_to)).fetchone()
+        return {"hours": round(r["h"] or 0, 2), "days": r["days"],
+                "from": r["a"], "to": r["b"]}
+
+    def adjustments_sum(self, instructor_id, period_from, period_to):
+        r = self.conn.execute(
+            "SELECT COALESCE(SUM(delta_hours),0) d FROM instructor_hour_adjustments"
+            " WHERE instructor_id=? AND adjustment_date >= ? AND adjustment_date <= ?",
+            (instructor_id, period_from, period_to)).fetchone()
+        return round(r["d"] or 0, 2)
 
     def instructor_sessions(self, instructor_id, start, end, limit):
         return [dict(r) for r in self.conn.execute(

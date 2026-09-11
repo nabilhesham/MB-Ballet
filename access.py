@@ -566,27 +566,10 @@ def swap_options(repo, client_id: int) -> dict:
     start, end = day_bounds()
     now = db.now()
 
-    today = [dict(r) for r in repo.raw(
-        "SELECT s.id, s.starts_at, s.duration_hours, c.name AS class_name, c.colour,"
-        "       i.name AS instructor_name,"
-        "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id = s.id) AS booked"
-        "  FROM sessions s JOIN classes c ON c.id = s.class_id"
-        "  LEFT JOIN instructors i ON i.id = s.instructor_id"
-        " WHERE s.starts_at BETWEEN ? AND ? AND s.status != 'cancelled'"
-        "   AND NOT EXISTS (SELECT 1 FROM bookings b"
-        "                    WHERE b.session_id = s.id AND b.client_id = ?)"
-        " ORDER BY s.starts_at", (start, end, client_id)).fetchall()]
+    today = [s for s in repo.sessions_in_range(start, end, not_booked_by=client_id)
+             if s["status"] != "cancelled"]
 
-    slots = [dict(r) for r in repo.raw(
-        "SELECT b.session_id, b.status, s.starts_at, c.name AS class_name, c.colour,"
-        "       sub.plan AS plan_name, pc.name AS plan_class"
-        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        "  JOIN classes c ON c.id = s.class_id"
-        "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
-        "  LEFT JOIN classes pc ON pc.id = sub.class_id"
-        " WHERE b.client_id = ? AND s.status != 'cancelled'"
-        "   AND ((b.status = 'booked' AND s.starts_at > ?) OR b.status = 'absent')",
-        (client_id, now)).fetchall()]
+    slots = repo.giveable_slots(client_id, now)
     for s in slots:
         s["tag"] = "upcoming" if s["status"] == "booked" else "absent"
     # Dates still ahead first, soonest first — the slot reception gives up by
@@ -871,7 +854,7 @@ def add_plan(repo, client_id: int, class_id: int, plan: str, sessions_total: int
         if len(set(session_ids)) != len(session_ids):
             return {"ok": False, "status": 400, "error": "the same session was chosen twice"}
 
-        klass = repo.raw("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        klass = repo.get("classes", class_id)
         if not klass:
             return {"ok": False, "status": 404, "error": "no such class"}
 
@@ -882,21 +865,21 @@ def add_plan(repo, client_id: int, class_id: int, plan: str, sessions_total: int
 
         # Only this class's previous plan is retired. The client's other class
         # keeps running.
-        repo.raw("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
-                     (client_id, class_id))
+        repo.update_where("subscriptions",
+                          {"client_id": client_id, "class_id": class_id},
+                          {"active": 0})
 
         starts = starts_on or date.today().isoformat()
         # Validity follows the sessions the plan actually pays for: it runs
         # through the last of them. Reception can still type a date instead -- a
         # courtesy extension -- and that is what expires_on carries when set.
         expires = expires_on or last_of_sessions(repo, session_ids) or starts
-        cur = repo.raw(
-            "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
-            " starts_on, expires_on, paid_on, notes, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (client_id, class_id, plan, sessions_total, price, starts, expires,
-             paid_on or None, (notes or "").strip() or None, db.now()))
-        sub_id = cur.lastrowid
+        sub_id = repo.insert("subscriptions", {
+            "client_id": client_id, "class_id": class_id, "plan": plan,
+            "sessions_total": sessions_total, "price": price,
+            "starts_on": starts, "expires_on": expires,
+            "paid_on": paid_on or None,
+            "notes": (notes or "").strip() or None, "created_at": db.now()})
         _book_slots(repo, client_id, sub_id, session_ids)
         return {"ok": True, "id": sub_id, "booked": len(session_ids),
                 "class_id": class_id, "class_name": klass["name"]}
@@ -953,7 +936,7 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
     issuing the new class's card is the caller's next step.
     """
     with repo.begin():
-        sub = repo.raw("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        sub = repo.get("subscriptions", sub_id)
         if sub is None:
             return {"ok": False, "error": "no such plan"}
         if sub["frozen_on"]:
@@ -965,23 +948,21 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
 
         moving = class_id is not None and class_id != sub["class_id"]
         if moving:
-            klass = repo.raw("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+            klass = repo.get("classes", class_id)
             if klass is None:
                 return {"ok": False, "error": "no such class"}
             if session_ids is None:
                 return {"ok": False, "error": "changing the class means reassigning the sessions"}
-            held = repo.raw(
-                "SELECT COUNT(*) n FROM subscriptions"
-                " WHERE client_id=? AND class_id=? AND active=1 AND id!=?",
-                (sub["client_id"], class_id, sub_id)).fetchone()["n"]
+            held = repo.count("subscriptions", {
+                "client_id": sub["client_id"], "class_id": class_id,
+                "active": 1, "id": {"ne": sub_id}})
             if held:
                 return {"ok": False,
                         "error": f"this client already has a live {klass['name']} plan"
                                  " — renew that one instead"}
 
-        current = repo.raw(
-            "SELECT session_id, status FROM bookings WHERE subscription_id=?",
-            (sub_id,)).fetchall()
+        current = repo.find("bookings", {"subscription_id": sub_id},
+                            fields=["session_id", "status"])
         current_ids = {b["session_id"] for b in current}
         attended_ids = {b["session_id"] for b in current if b["status"] != "booked"}
 
@@ -1007,10 +988,8 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
 
             to_drop = current_ids - wanted
             if to_drop:
-                marks = ",".join("?" * len(to_drop))
-                repo.raw(
-                    f"DELETE FROM bookings WHERE subscription_id=? AND session_id IN ({marks})",
-                    (sub_id, *to_drop))
+                repo.delete_where("bookings", {"subscription_id": sub_id,
+                                               "session_id": {"in": sorted(to_drop)}})
             _book_slots(repo, sub["client_id"], sub_id, sorted(new_ids))
 
         fields = {}
@@ -1030,13 +1009,10 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
             # because the route drops None before we ever see it.
             fields["notes"] = notes.strip() or None
         if fields:
-            sets = ", ".join(f"{k}=?" for k in fields)
-            repo.raw(f"UPDATE subscriptions SET {sets} WHERE id=?",
-                         (*fields.values(), sub_id))
+            repo.update("subscriptions", sub_id, fields)
 
         if expires_on:
-            repo.raw("UPDATE subscriptions SET expires_on=? WHERE id=?",
-                         (expires_on, sub_id))
+            repo.update("subscriptions", sub_id, {"expires_on": expires_on})
         else:
             refresh_expiry(repo, sub_id)
 
@@ -1045,14 +1021,15 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
             # The old class's card proved this plan. Revoke it unless another live
             # plan still stands behind that class — credentials are revoked, never
             # deleted, so the log keeps pointing at the one that was used.
-            still = repo.raw(
-                "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
-                (sub["client_id"], sub["class_id"])).fetchone()
+            still = repo.exists("subscriptions", {
+                "client_id": sub["client_id"], "class_id": sub["class_id"],
+                "active": 1})
             if not still:
-                revoked = repo.raw(
-                    "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
-                    "   AND revoked_at IS NULL",
-                    (db.now(), sub["client_id"], sub["class_id"])).rowcount
+                revoked = repo.update_where(
+                    "credentials",
+                    {"client_id": sub["client_id"], "class_id": sub["class_id"],
+                     "revoked_at": None},
+                    {"revoked_at": db.now()})
 
         return {"ok": True, "moved": moving, "cards_revoked": revoked,
                 **plan_state(repo, sub_id)}
@@ -1081,10 +1058,10 @@ def issue_card(repo, client_id: int, class_id: int) -> dict:
         if not class_id:
             return {"ok": False, "status": 400,
                     "error": "a card belongs to a class — say which"}
-        client = repo.raw("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        client = repo.get("clients", client_id)
         if not client:
             return {"ok": False, "status": 404, "error": "no such client"}
-        klass = repo.raw("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        klass = repo.get("classes", class_id)
         if not klass:
             return {"ok": False, "status": 404, "error": "no such class"}
 
@@ -1096,19 +1073,17 @@ def issue_card(repo, client_id: int, class_id: int) -> dict:
 
         # `class_id IS ?` rather than `= ?`: a card issued before cards had a
         # class carries NULL, and NULL = NULL is not true in SQL.
-        old = repo.raw(
-            "SELECT token FROM credentials WHERE client_id=? AND revoked_at IS NULL"
-            "   AND (class_id IS ? OR class_id = ?)",
-            (client_id, class_id, class_id)).fetchone()
-        repo.raw(
-            "UPDATE credentials SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL"
-            "   AND (class_id IS ? OR class_id = ?)",
-            (db.now(), client_id, class_id, class_id))
+        # `(class_id IS ? OR class_id = ?)` collapses to plain equality here:
+        # class_id is guaranteed non-null by the guard above, and `x IS 5`
+        # differs from `x = 5` only when the parameter itself is NULL.
+        live = {"client_id": client_id, "revoked_at": None, "class_id": class_id}
+        old = repo.find_one("credentials", live)
+        repo.update_where("credentials", live, {"revoked_at": db.now()})
 
         token = tokens.issue(client_id)
-        repo.raw(
-            "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
-            " VALUES (?,?,?,?,?)", (client_id, class_id, token, "card", db.now()))
+        repo.insert("credentials", {
+            "client_id": client_id, "class_id": class_id, "token": token,
+            "kind": "card", "issued_at": db.now()})
 
         state = plan_state(repo, sub["id"])
         return {"ok": True, "token": token,
@@ -1132,33 +1107,32 @@ def delete_plan(repo, sub_id: int) -> dict:
     whose expiry would be recomputed is itself gone.
     """
     with repo.begin():
-        sub = repo.raw("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        sub = repo.get("subscriptions", sub_id)
         if not sub:
             return {"ok": False, "status": 404, "error": "no such plan"}
 
-        counts = repo.raw(
-            "SELECT COUNT(*) n,"
-            "       SUM(CASE WHEN status='booked' THEN 1 ELSE 0 END) upcoming,"
-            "       SUM(CASE WHEN status!='booked' THEN 1 ELSE 0 END) attended"
-            "  FROM bookings WHERE subscription_id=?", (sub_id,)).fetchone()
-        repo.raw("DELETE FROM bookings WHERE subscription_id=?", (sub_id,))
-        repo.raw("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+        # Counted before the delete, so the dialog says what will go
+        # rather than what did.
+        c = repo.plan_counts(sub_id)
+        attended = c["present"] + c["absent"]
+        total = c["assigned"]
+        repo.delete_where("bookings", {"subscription_id": sub_id})
+        repo.delete("subscriptions", sub_id)
 
-        # The card for this class now proves a plan that does not exist. Revoke it
-        # unless another plan in the same class still stands behind it.
         revoked = 0
         if sub["class_id"]:
-            still = repo.raw(
-                "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
-                (sub["client_id"], sub["class_id"])).fetchone()
+            still = repo.exists("subscriptions",
+                                {"client_id": sub["client_id"],
+                                 "class_id": sub["class_id"], "active": 1})
             if not still:
-                revoked = repo.raw(
-                    "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
-                    "   AND revoked_at IS NULL",
-                    (db.now(), sub["client_id"], sub["class_id"])).rowcount
-        return {"ok": True, "bookings": counts["n"] or 0,
-                "upcoming": counts["upcoming"] or 0,
-                "attended": counts["attended"] or 0, "cards_revoked": revoked}
+                revoked = repo.update_where(
+                    "credentials",
+                    {"client_id": sub["client_id"], "class_id": sub["class_id"],
+                     "revoked_at": None},
+                    {"revoked_at": db.now()})
+        return {"ok": True, "bookings": total,
+                "upcoming": total - attended,
+                "attended": attended, "cards_revoked": revoked}
 
 
 def delete_client(repo, client_id: int, hard: bool = False) -> dict:
@@ -1185,44 +1159,41 @@ def delete_client(repo, client_id: int, hard: bool = False) -> dict:
         # rather than as something still upcoming in the guard below.
         settle_past_sessions(repo)
 
-        client = repo.raw("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        client = repo.get("clients", client_id)
         if not client:
             return {"ok": False, "status": 404, "error": "no such client"}
 
         if hard:
-            visits = repo.raw(
-                "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND status!='booked'",
-                (client_id,)).fetchone()["n"]
+            visits = repo.count("bookings", {"client_id": client_id,
+                                             "status": {"ne": "booked"}})
             if visits:
                 return {"ok": False, "status": 400,
                         "error": f"{client['name_en']} has {visits} recorded sessions "
                                  f"— archive instead"}
-            for q in ("DELETE FROM bookings WHERE client_id=?",
-                      "DELETE FROM credentials WHERE client_id=?",
-                      "DELETE FROM subscriptions WHERE client_id=?",
-                      "DELETE FROM access_events WHERE client_id=?",
-                      "DELETE FROM clients WHERE id=?"):
-                repo.raw(q, (client_id,))
+            # Ordered by hand to respect the foreign keys.
+            for coll in ("bookings", "credentials", "subscriptions", "access_events"):
+                repo.delete_where(coll, {"client_id": client_id})
+            repo.delete("clients", client_id)
             return {"ok": True, "action": "delete"}
 
-        upcoming = repo.raw(
-            "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
-            (client_id, db.now())).fetchone()["n"]
+        # The same list the profile shows, so the number in the error is the
+        # number reception is looking at.
+        upcoming = len(repo.client_upcoming(client_id, db.now()))
         if upcoming:
             return {"ok": False, "status": 400,
                     "error": f"{client['name_en']} has {upcoming} upcoming session"
                              f"{'' if upcoming == 1 else 's'} — remove or reassign "
                              f"{'it' if upcoming == 1 else 'them'} before archiving"}
 
-        repo.raw("UPDATE clients SET active=0 WHERE id=?", (client_id,))
-        # Archiving revokes the card, so a restored client needs a new one issued.
-        repo.raw("UPDATE credentials SET revoked_at=? WHERE client_id=?"
-                     " AND revoked_at IS NULL", (db.now(), client_id))
-        # The guard above ignores bookings whose session was cancelled, so those
-        # are the ones still left to release here.
-        repo.raw("DELETE FROM bookings WHERE client_id=? AND status='booked'",
-                     (client_id,))
+        repo.update("clients", client_id, {"active": 0})
+        # Archiving revokes the card, so a restored client needs a new one.
+        repo.update_where("credentials",
+                          {"client_id": client_id, "revoked_at": None},
+                          {"revoked_at": db.now()})
+        # The guard above ignores bookings whose session was cancelled, so
+        # those are the ones still left to release here.
+        repo.delete_where("bookings", {"client_id": client_id,
+                                       "status": "booked"})
         return {"ok": True, "action": "archive"}
 
 
@@ -1251,26 +1222,26 @@ def delete_sessions(repo, session_ids, force: bool = False) -> dict:
     with repo.begin():
         deleted, released, blocked = 0, 0, []
         for sid in session_ids:
-            row = repo.raw(
-                "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
-                "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)).fetchone()
-            if not row:
+            full = repo.session_detail(sid)
+            if not full:
                 continue
-            held = repo.raw(
-                "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
-                (sid,)).fetchone()["n"]
+            row = {"id": full["id"], "starts_at": full["starts_at"],
+                   "class_name": full["class_name"]}
+            held = repo.count("bookings", {"session_id": sid,
+                                           "status": {"ne": "booked"}})
             if held and not force:
-                blocked.append({**dict(row), "attendance": held})
+                blocked.append({**row, "attendance": held})
                 continue
 
-            n = repo.raw("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
-                             (sid,)).fetchone()["n"]
-            subs = {r["subscription_id"] for r in repo.raw(
-                "SELECT DISTINCT subscription_id FROM bookings"
-                " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
-            repo.raw("DELETE FROM bookings WHERE session_id=?", (sid,))
-            repo.raw("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
-            repo.raw("DELETE FROM sessions WHERE id=?", (sid,))
+            n = repo.count("bookings", {"session_id": sid})
+            subs = {x for x in repo.distinct("bookings", "subscription_id",
+                                             {"session_id": sid}) if x is not None}
+            repo.delete_where("bookings", {"session_id": sid})
+            # Nulled rather than cascaded: the event records that someone
+            # scanned, which stays true after the session is gone.
+            repo.update_where("access_events", {"session_id": sid},
+                              {"session_id": None})
+            repo.delete("sessions", sid)
             for sub_id in subs:
                 refresh_expiry(repo, sub_id)
             deleted += 1
@@ -1297,49 +1268,49 @@ def delete_class(repo, class_id: int, hard: bool = False) -> dict:
     every plan that funded one needs refresh_expiry() by hand.
     """
     with repo.begin():
-        klass = repo.raw("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        klass = repo.get("classes", class_id)
         if not klass:
             return {"ok": False, "status": 404, "error": "no such class"}
 
+        # The class's own sessions, which both branches work from. A subquery
+        # in a DELETE has no document-store equivalent; the id list does.
+        mine = [x["id"] for x in repo.find("sessions", {"class_id": class_id},
+                                           fields=["id"])]
+
         if hard:
-            held = repo.raw(
-                "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-                " WHERE s.class_id=? AND b.status!='booked'", (class_id,)).fetchone()["n"]
+            held = repo.count("bookings", {"session_id": {"in": mine},
+                                           "status": {"ne": "booked"}})
             if held:
                 return {"ok": False, "status": 400,
                         "error": f"{klass['name']} has {held} attendance records "
                                  f"— archive instead"}
-            subs = {r["subscription_id"] for r in repo.raw(
-                "SELECT DISTINCT subscription_id FROM bookings"
-                " WHERE session_id IN (SELECT id FROM sessions WHERE class_id=?)"
-                "   AND subscription_id IS NOT NULL", (class_id,)).fetchall()}
-            repo.raw("DELETE FROM bookings WHERE session_id IN"
-                         " (SELECT id FROM sessions WHERE class_id=?)", (class_id,))
-            repo.raw("DELETE FROM sessions WHERE class_id=?", (class_id,))
-            repo.raw("DELETE FROM classes WHERE id=?", (class_id,))
+            subs = {x for x in repo.distinct("bookings", "subscription_id",
+                                             {"session_id": {"in": mine}})
+                    if x is not None}
+            repo.delete_where("bookings", {"session_id": {"in": mine}})
+            repo.delete_where("sessions", {"class_id": class_id})
+            repo.delete("classes", class_id)
             for sub_id in subs:
                 refresh_expiry(repo, sub_id)
             return {"ok": True, "action": "delete",
                     "released_sessions": None, "released_bookings": None}
 
-        upcoming = [r["id"] for r in repo.raw(
-            "SELECT id FROM sessions WHERE class_id=? AND status='scheduled'"
-            " AND starts_at > ?", (class_id, db.now())).fetchall()]
+        upcoming = [x["id"] for x in repo.find(
+            "sessions",
+            {"class_id": class_id, "status": "scheduled",
+             "starts_at": {"gt": db.now()}}, fields=["id"])]
         released_bookings = 0
         if upcoming:
-            marks = ",".join("?" * len(upcoming))
-            subs = {r["subscription_id"] for r in repo.raw(
-                f"SELECT DISTINCT subscription_id FROM bookings"
-                f" WHERE session_id IN ({marks}) AND subscription_id IS NOT NULL",
-                upcoming).fetchall()}
-            released_bookings = repo.raw(
-                f"SELECT COUNT(*) n FROM bookings WHERE session_id IN ({marks})",
-                upcoming).fetchone()["n"]
-            repo.raw(f"DELETE FROM bookings WHERE session_id IN ({marks})", upcoming)
-            repo.raw(f"DELETE FROM sessions WHERE id IN ({marks})", upcoming)
+            subs = {x for x in repo.distinct("bookings", "subscription_id",
+                                             {"session_id": {"in": upcoming}})
+                    if x is not None}
+            released_bookings = repo.count("bookings",
+                                           {"session_id": {"in": upcoming}})
+            repo.delete_where("bookings", {"session_id": {"in": upcoming}})
+            repo.delete_where("sessions", {"id": {"in": upcoming}})
             for sub_id in subs:
                 refresh_expiry(repo, sub_id)
-        repo.raw("UPDATE classes SET active=0 WHERE id=?", (class_id,))
+        repo.update("classes", class_id, {"active": 0})
         return {"ok": True, "action": "archive",
                 "released_sessions": len(upcoming),
                 "released_bookings": released_bookings}
@@ -1417,18 +1388,10 @@ def logged_hours(repo, instructor_id: int, period_from: str, period_to: str) -> 
     stays visible. `days`/`from`/`to` count only real salary-sheet rows; a
     correction is not a claim of an extra day worked.
     """
-    sheet = repo.raw(
-        "SELECT COALESCE(SUM(hours),0) h, COUNT(*) days, MIN(work_date) a, MAX(work_date) b"
-        " FROM instructor_hours WHERE instructor_id=? AND work_date BETWEEN ? AND ?",
-        (instructor_id, period_from, period_to)).fetchone()
-    rate_row = repo.raw("SELECT hourly_rate FROM instructors WHERE id=?",
-                            (instructor_id,)).fetchone()
-    rate = (rate_row["hourly_rate"] or 0) if rate_row else 0
-    hours = round(sheet["h"] or 0, 2)
-    return {
-        "hours": hours, "days": sheet["days"], "from": sheet["a"], "to": sheet["b"],
-        "pay": round(hours * rate, 2),
-    }
+    sheet = repo.salary_hours(instructor_id, period_from, period_to)
+    who = repo.get("instructors", instructor_id)
+    rate = (who["hourly_rate"] or 0) if who else 0
+    return {**sheet, "pay": round(sheet["hours"] * rate, 2)}
 
 
 def taught_hours(repo, instructor_id: int, period_from: str, period_to: str) -> dict:
@@ -1447,18 +1410,11 @@ def taught_hours(repo, instructor_id: int, period_from: str, period_to: str) -> 
     disagrees with the sessions listed beneath it.
     """
     start_ts, end_ts = date_range_ts(period_from, period_to)
-    t = repo.raw(
-        "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
-        " WHERE instructor_id=? AND status='completed'"
-        "   AND starts_at >= ? AND starts_at < ?",
-        (instructor_id, start_ts, end_ts)).fetchone()
-    adj = repo.raw(
-        "SELECT COALESCE(SUM(delta_hours),0) d FROM instructor_hour_adjustments"
-        " WHERE instructor_id=? AND adjustment_date BETWEEN ? AND ?",
-        (instructor_id, period_from, period_to)).fetchone()
-    scheduled = round(t["h"] or 0, 2)
-    adjustment = round(adj["d"] or 0, 2)
-    return {"sessions": t["n"], "scheduled": scheduled, "adjustment": adjustment,
+    t = repo.taught_totals_bulk([instructor_id], start_ts, end_ts)[instructor_id]
+    adjustment = repo.adjustments_sum(instructor_id, period_from, period_to)
+    scheduled = t["hours"]
+    return {"sessions": t["sessions"], "scheduled": scheduled,
+            "adjustment": adjustment,
             "hours": round(scheduled + adjustment, 2)}
 
 
@@ -1479,10 +1435,9 @@ def adjust_taught_hours(repo, instructor_id: int, day: str,
     with repo.begin():
         current = taught_hours(repo, instructor_id, day, day)
         delta = round(new_total - current["hours"], 2)
-        repo.raw(
-            "INSERT INTO instructor_hour_adjustments (instructor_id, adjustment_date, delta_hours,"
-            " note, created_at) VALUES (?,?,?,?,?)",
-            (instructor_id, day, delta, note, db.now()))
+        repo.insert("instructor_hour_adjustments", {
+            "instructor_id": instructor_id, "adjustment_date": day,
+            "delta_hours": delta, "note": note, "created_at": db.now()})
         return taught_hours(repo, instructor_id, day, day)
 
 
@@ -1549,31 +1504,23 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
     # the range form is the one an index can use. substr() on the column
     # defeated ix_cli_joined and ix_sub_starts entirely.
     def joined_in(a: str, b: str) -> int:
-        return repo.raw(
-            "SELECT COUNT(*) n FROM clients"
-            " WHERE active=1 AND joined_on >= ? AND joined_on < ?",
-            (a, next_month(b))).fetchone()["n"]
+        return repo.count("clients", {"active": 1,
+                                     "joined_on": {"gte": a, "lt": next_month(b)}})
 
     new_clients = joined_in(month, month_to)
     before = joined_in(prev_from, prev_to)
 
-    def takings(where: str) -> tuple:
-        r = repo.raw(
-            "SELECT COALESCE(SUM(s.price),0) paid,"
-            "       SUM(CASE WHEN s.price IS NULL THEN 1 ELSE 0 END) unpriced,"
-            "       COUNT(*) plans"
-            "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
-            f" WHERE c.active=1 AND {where} >= ? AND {where} < ?",
-            (month, next_month(month_to))).fetchone()
-        return r["paid"] or 0, r["unpriced"] or 0, r["plans"] or 0
+    def takings(date_field: str) -> tuple:
+        r = repo.takings(date_field, month, next_month(month_to))
+        return r["paid"], r["unpriced"], r["plans"]
 
     # Every plan belonging to a client who joined in the period, whenever they
     # bought it — see the note above on why this is not also filtered by when
     # the plan started.
-    new_paid, new_unpriced, new_plans = takings("c.joined_on")
+    new_paid, new_unpriced, new_plans = takings("joined_on")
     # Every plan sold in the period, whoever bought it. This one is the
     # period's own takings and stays inside the window.
-    all_paid, all_unpriced, all_plans = takings("s.starts_on")
+    all_paid, all_unpriced, all_plans = takings("starts_on")
 
     return {
         "month": month,
@@ -1624,7 +1571,7 @@ def freeze_plan(repo, sub_id: int, until: str = None, reason: str = None,
     Returns how many booked sessions were released.
     """
     with repo.begin():
-        sub = repo.raw("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        sub = repo.get("subscriptions", sub_id)
         if sub is None:
             return {"ok": False, "error": "no such plan"}
         if not sub["active"]:
@@ -1645,28 +1592,29 @@ def freeze_plan(repo, sub_id: int, until: str = None, reason: str = None,
         # it already was so unfreeze_plan()'s day-shift has a real date to shift
         # from, not one that just collapsed back to an earlier remaining session.
         cutoff_from = int(datetime.combine(date.fromisoformat(start), _t.min).timestamp())
-        params = [sub_id, cutoff_from]
-        window = ""
-        if until:
-            window = " AND s.starts_at < ?"
-            params.append(int(datetime.combine(date.fromisoformat(until), _t.min).timestamp()))
+        cutoff_to = (int(datetime.combine(date.fromisoformat(until), _t.min).timestamp())
+                     if until else None)
 
-        doomed = repo.raw(
-            "SELECT b.id FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            " WHERE b.subscription_id = ? AND b.status = 'booked'"
-            f"   AND s.starts_at >= ?{window}", params).fetchall()
+        # The plan's still-booked slots, then their dates. Bounded by the
+        # plan's size -- a dozen or two -- so filtering the window in Python
+        # costs nothing and needs no join.
+        booked = repo.find("bookings", {"subscription_id": sub_id,
+                                        "status": "booked"})
+        when = {x["id"]: x["starts_at"] for x in repo.find(
+            "sessions", {"id": {"in": [b["session_id"] for b in booked]}},
+            fields=["id", "starts_at"])}
+        doomed = [b["id"] for b in booked
+                  if when.get(b["session_id"], -1) >= cutoff_from
+                  and (cutoff_to is None or when[b["session_id"]] < cutoff_to)]
         released = len(doomed)
         if released:
-            repo.raw(
-                f"DELETE FROM bookings WHERE id IN ({','.join('?' * released)})",
-                [r["id"] for r in doomed])
+            repo.delete_where("bookings", {"id": {"in": doomed}})
 
-        repo.raw("UPDATE subscriptions SET frozen_on=?, frozen_until=? WHERE id=?",
-                     (start, until, sub_id))
-        repo.raw(
-            "INSERT INTO freezes (subscription_id, from_date, until_date, released, reason,"
-            " created_at) VALUES (?,?,?,?,?,?)",
-            (sub_id, start, until, released, reason, db.now()))
+        repo.update("subscriptions", sub_id,
+                    {"frozen_on": start, "frozen_until": until})
+        repo.insert("freezes", {
+            "subscription_id": sub_id, "from_date": start, "until_date": until,
+            "released": released, "reason": reason, "created_at": db.now()})
         return {"ok": True, "released": released, "frozen_on": start, "frozen_until": until}
 
 

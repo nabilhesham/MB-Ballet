@@ -17,6 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import access
+import db
 
 
 @pytest.fixture
@@ -93,9 +94,7 @@ def test_creating_a_session_sets_its_end(client):
     assert r.status_code == 200, r.text
     sid = r.json()["id"]
 
-    row = client.academy.repo.raw(
-        "SELECT starts_at, duration_hours, ends_at FROM sessions WHERE id=?",
-        (sid,)).fetchone()
+    row = client.academy.repo.get("sessions", sid)
     assert row["ends_at"] == access.ends_at_of(row["starts_at"], row["duration_hours"])
 
 
@@ -130,9 +129,7 @@ def test_moving_a_session_moves_its_end(client):
     moved = client.put(f"/api/sessions/{sid}", json={"starts_at": at(7, 9)})
     assert moved.status_code == 200, moved.text
 
-    row = client.academy.repo.raw(
-        "SELECT starts_at, duration_hours, ends_at FROM sessions WHERE id=?",
-        (sid,)).fetchone()
+    row = client.academy.repo.get("sessions", sid)
     assert row["starts_at"] == at(7, 9)
     assert row["ends_at"] == access.ends_at_of(at(7, 9), row["duration_hours"])
 
@@ -145,9 +142,7 @@ def test_stretching_a_session_moves_its_end(client):
 
     client.put(f"/api/sessions/{sid}", json={"duration_hours": 2.5})
 
-    row = client.academy.repo.raw(
-        "SELECT starts_at, duration_hours, ends_at FROM sessions WHERE id=?",
-        (sid,)).fetchone()
+    row = client.academy.repo.get("sessions", sid)
     assert row["duration_hours"] == 2.5
     assert row["ends_at"] == access.ends_at_of(row["starts_at"], 2.5)
 
@@ -159,11 +154,9 @@ def test_repeating_weekly_sets_every_end(client):
     assert r.status_code == 200, r.text
     assert r.json()["created"] >= 1
 
-    wrong = client.academy.repo.raw(
-        "SELECT COUNT(*) n FROM sessions WHERE ends_at IS NULL"
-        "    OR ends_at != CAST(starts_at + duration_hours * 3600 AS INTEGER)"
-    ).fetchone()["n"]
-    assert wrong == 0
+    wrong = [s for s in client.academy.repo.find("sessions")
+             if s["ends_at"] != access.ends_at_of(s["starts_at"], s["duration_hours"])]
+    assert wrong == []
 
 
 # ---------------------------------------------------------------- access
@@ -215,9 +208,7 @@ def test_a_plan_runs_through_the_last_session_it_pays_for(client):
     a = client.academy
     chosen = a.ballet_sessions[-4:]
     body = sell(client).json()
-    last = a.repo.raw(
-        "SELECT MAX(starts_at) t FROM sessions WHERE id IN (?,?,?,?)",
-        tuple(chosen)).fetchone()["t"]
+    last = a.repo.max_starts_at(chosen)
     from datetime import date as _d
     assert access.plan_state(a.repo, body["id"])["expires_on"] == \
         _d.fromtimestamp(last).isoformat()
@@ -270,10 +261,8 @@ def test_selling_replaces_only_that_classs_previous_plan(client):
              session_ids=a.ballet_sessions[-4:])
     assert r.status_code == 200, r.text
 
-    old = a.repo.raw("SELECT active FROM subscriptions WHERE id=?",
-                         (a.dual_ballet_plan,)).fetchone()["active"]
-    flex = a.repo.raw("SELECT active FROM subscriptions WHERE id=?",
-                          (a.dual_flex_plan,)).fetchone()["active"]
+    old = a.repo.get("subscriptions", a.dual_ballet_plan)["active"]
+    flex = a.repo.get("subscriptions", a.dual_flex_plan)["active"]
     assert old == 0, "the previous ballet plan is retired"
     assert flex == 1, "the flexibility plan is untouched"
 
@@ -285,8 +274,7 @@ def test_a_past_session_is_booked_straight_to_absent(client):
     """
     a = client.academy
     past = [s for s in a.ballet_sessions
-            if a.repo.raw("SELECT ends_at FROM sessions WHERE id=?",
-                              (s,)).fetchone()["ends_at"] < __import__("db").now()]
+            if a.repo.get("sessions", s)["ends_at"] < db.now()]
     r = sell(client, sessions_total=2, session_ids=past[:2])
     assert r.status_code == 200, r.text
     state = access.plan_state(a.repo, r.json()["id"])
@@ -303,9 +291,8 @@ def test_issuing_a_card_revokes_only_that_classs_previous_one(client):
     assert r.status_code == 200, r.text
     assert r.json()["revoked"] == a.dual_ballet_card
 
-    live = {row["class_id"]: row["token"] for row in a.repo.raw(
-        "SELECT class_id, token FROM credentials WHERE client_id=? AND revoked_at IS NULL",
-        (a.dual,))}
+    live = {row["class_id"]: row["token"] for row in a.repo.find(
+        "credentials", {"client_id": a.dual, "revoked_at": None})}
     assert live[a.flex] == a.dual_flex_card, "the flex card is untouched"
     assert live[a.ballet] != a.dual_ballet_card, "the ballet card was replaced"
 
@@ -322,8 +309,7 @@ def test_a_revoked_credential_is_kept_not_deleted(client):
     """The access log must keep pointing at the credential actually used."""
     a = client.academy
     client.post(f"/api/clients/{a.dual}/card", json={"class_id": a.ballet})
-    row = a.repo.raw("SELECT revoked_at FROM credentials WHERE token=?",
-                         (a.dual_ballet_card,)).fetchone()
+    row = a.repo.find_one("credentials", {"token": a.dual_ballet_card})
     assert row is not None, "the old credential row still exists"
     assert row["revoked_at"] is not None
 
@@ -361,9 +347,7 @@ def test_deleting_a_plan_takes_its_bookings_with_it(client):
     assert body["bookings"] == before["assigned"]
     assert body["attended"] == before["present"] + before["absent"]
 
-    left = a.repo.raw("SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
-                          (a.dual_ballet_plan,)).fetchone()["n"]
-    assert left == 0
+    assert a.repo.count("bookings", {"subscription_id": a.dual_ballet_plan}) == 0
 
 
 def test_deleting_a_plan_revokes_that_classs_card(client):
@@ -388,10 +372,7 @@ def test_archiving_a_client_with_upcoming_sessions_is_refused(client):
     detail = r.json()["detail"]
     assert "upcoming session" in detail
 
-    upcoming = a.repo.raw(
-        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-        " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
-        (a.dual, __import__("db").now())).fetchone()["n"]
+    upcoming = len(a.repo.client_upcoming(a.dual, db.now()))
     assert str(upcoming) in detail, "the number named is the number on the profile"
 
 
@@ -400,8 +381,7 @@ def test_archiving_a_client_with_nothing_ahead_revokes_their_card(client):
     r = client.delete(f"/api/clients/{a.lapsed}")
     assert r.status_code == 200, r.text
     assert r.json()["action"] == "archive"
-    assert a.repo.raw("SELECT active FROM clients WHERE id=?",
-                          (a.lapsed,)).fetchone()["active"] == 0
+    assert a.repo.get("clients", a.lapsed)["active"] == 0
 
 
 def test_an_unused_slot_with_no_date_does_not_block_archiving(client):
@@ -412,8 +392,8 @@ def test_an_unused_slot_with_no_date_does_not_block_archiving(client):
     a = client.academy
     # Widen the lapsed plan so it owes two sessions nobody has picked dates
     # for. Those are slots, not appointments, and must not block the archive.
-    a.repo.raw("UPDATE subscriptions SET sessions_total=sessions_total+2 WHERE id=?",
-                   (a.lapsed_plan,))
+    a.repo.update("subscriptions", a.lapsed_plan, {
+        "sessions_total": a.repo.get("subscriptions", a.lapsed_plan)["sessions_total"] + 2})
     
     assert access.plan_state(a.repo, a.lapsed_plan)["unassigned"] == 2
 
@@ -433,8 +413,7 @@ def test_hard_deleting_a_client_with_no_history_removes_everything(client):
     r = client.delete(f"/api/clients/{a.planless}", params={"hard": "true"})
     assert r.status_code == 200, r.text
     assert r.json()["action"] == "delete"
-    assert a.repo.raw("SELECT COUNT(*) n FROM clients WHERE id=?",
-                          (a.planless,)).fetchone()["n"] == 0
+    assert a.repo.get("clients", a.planless) is None
 
 
 # ------------------------------------------------------- deleting sessions
@@ -444,8 +423,7 @@ def test_deleting_a_session_releases_its_bookings(client):
     r = client.delete(f"/api/sessions/{a.today_ballet}")
     assert r.status_code == 200, r.text
     assert r.json()["released"] >= 1
-    assert a.repo.raw("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
-                          (a.today_ballet,)).fetchone()["n"] == 0
+    assert a.repo.count("bookings", {"session_id": a.today_ballet}) == 0
 
 
 def test_deleting_a_session_pulls_the_plans_expiry_back(client):
@@ -456,10 +434,10 @@ def test_deleting_a_session_pulls_the_plans_expiry_back(client):
     """
     a = client.academy
     plan = a.dual_ballet_plan
-    latest = a.repo.raw(
-        "SELECT b.session_id, MAX(s.starts_at) t FROM bookings b"
-        "  JOIN sessions s ON s.id=b.session_id WHERE b.subscription_id=?",
-        (plan,)).fetchone()
+    booked = a.repo.find("bookings", {"subscription_id": plan})
+    when = {s["id"]: s["starts_at"] for s in a.repo.find(
+        "sessions", {"id": {"in": [b["session_id"] for b in booked]}})}
+    latest = max(booked, key=lambda b: when[b["session_id"]])
     before = access.plan_state(a.repo, plan)["expires_on"]
 
     client.delete(f"/api/sessions/{latest['session_id']}", params={"force": "true"})
@@ -470,23 +448,19 @@ def test_deleting_a_session_pulls_the_plans_expiry_back(client):
 
 def test_a_session_carrying_attendance_is_kept_back(client):
     a = client.academy
-    attended = a.repo.raw(
-        "SELECT session_id FROM bookings WHERE status='present' LIMIT 1").fetchone()
+    attended = a.repo.find_one("bookings", {"status": "present"})
     r = client.delete(f"/api/sessions/{attended['session_id']}")
     assert r.status_code == 400
     assert "attendance record" in r.json()["detail"]
-    assert a.repo.raw("SELECT COUNT(*) n FROM sessions WHERE id=?",
-                          (attended["session_id"],)).fetchone()["n"] == 1
+    assert a.repo.get("sessions", attended["session_id"]) is not None
 
 
 def test_force_deletes_a_session_carrying_attendance(client):
     a = client.academy
-    attended = a.repo.raw(
-        "SELECT session_id FROM bookings WHERE status='present' LIMIT 1").fetchone()
+    attended = a.repo.find_one("bookings", {"status": "present"})
     r = client.delete(f"/api/sessions/{attended['session_id']}", params={"force": "true"})
     assert r.status_code == 200, r.text
-    assert a.repo.raw("SELECT COUNT(*) n FROM sessions WHERE id=?",
-                          (attended["session_id"],)).fetchone()["n"] == 0
+    assert a.repo.get("sessions", attended["session_id"]) is None
 
 
 def test_a_bulk_delete_names_what_it_kept_back_rather_than_failing(client):
@@ -495,15 +469,14 @@ def test_a_bulk_delete_names_what_it_kept_back_rather_than_failing(client):
     other eleven and say why the twelfth stayed.
     """
     a = client.academy
-    attended = a.repo.raw(
-        "SELECT session_id FROM bookings WHERE status='present' LIMIT 1").fetchone()["session_id"]
+    attended = a.repo.find_one("bookings", {"status": "present"})["session_id"]
     # Sessions nobody was marked present or absent at — the ones that should
     # go. Selected rather than assumed: most of the fixture's past sessions
     # carry attendance, which is the whole point of the one that is kept.
-    untouched = [r["id"] for r in a.repo.raw(
-        "SELECT s.id FROM sessions s WHERE s.class_id=? AND NOT EXISTS ("
-        "  SELECT 1 FROM bookings b WHERE b.session_id=s.id AND b.status!='booked')"
-        " LIMIT 3", (a.ballet,))]
+    settled = {b["session_id"] for b in a.repo.find("bookings")
+               if b["status"] != "booked"}
+    untouched = [s["id"] for s in a.repo.find("sessions", {"class_id": a.ballet})
+                 if s["id"] not in settled][:3]
     assert len(untouched) == 3 and attended not in untouched
 
     r = client.post("/api/sessions/bulk-delete",
@@ -528,8 +501,7 @@ def test_a_scan_survives_its_session_being_deleted(client):
 
     client.delete(f"/api/sessions/{a.today_ballet}", params={"force": "true"})
 
-    row = a.repo.raw("SELECT client_id, session_id FROM access_events WHERE id=?",
-                         (verified["event_id"],)).fetchone()
+    row = a.repo.get("access_events", verified["event_id"])
     assert row is not None, "the event survives"
     assert row["session_id"] is None
     assert row["client_id"] == a.dual
@@ -549,9 +521,9 @@ def test_archiving_a_class_releases_its_upcoming_sessions(client):
     the one archive path that cascades a delete into another table.
     """
     a = client.academy
-    upcoming = [r["id"] for r in a.repo.raw(
-        "SELECT id FROM sessions WHERE class_id=? AND status='scheduled' AND starts_at > ?",
-        (a.ballet, __import__("db").now()))]
+    upcoming = [s["id"] for s in a.repo.find("sessions", {
+        "class_id": a.ballet, "status": "scheduled",
+        "starts_at": {"gt": db.now()}})]
     assert upcoming, "precondition"
 
     r = client.delete(f"/api/classes/{a.ballet}")
@@ -559,24 +531,22 @@ def test_archiving_a_class_releases_its_upcoming_sessions(client):
     assert r.json()["action"] == "archive"
     assert r.json()["released_sessions"] == len(upcoming)
 
-    left = a.repo.raw(
-        f"SELECT COUNT(*) n FROM sessions WHERE id IN ({','.join('?' * len(upcoming))})",
-        upcoming).fetchone()["n"]
-    assert left == 0
+    assert a.repo.count("sessions", {"id": {"in": upcoming}}) == 0
 
 
 def test_archiving_a_class_keeps_its_past_sessions_and_attendance(client):
     a = client.academy
-    before = a.repo.raw(
-        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-        " WHERE s.class_id=? AND b.status!='booked'", (a.ballet,)).fetchone()["n"]
+    def settled_in_ballet():
+        mine = {s["id"] for s in a.repo.find("sessions", {"class_id": a.ballet})}
+        return len([b for b in a.repo.find("bookings")
+                    if b["session_id"] in mine and b["status"] != "booked"])
+
+    before = settled_in_ballet()
     assert before > 0, "precondition"
 
     client.delete(f"/api/classes/{a.ballet}")
 
-    after = a.repo.raw(
-        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-        " WHERE s.class_id=? AND b.status!='booked'", (a.ballet,)).fetchone()["n"]
+    after = settled_in_ballet()
     assert after == before, "past attendance is never touched"
 
 

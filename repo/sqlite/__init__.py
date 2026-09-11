@@ -129,8 +129,33 @@ class SqliteRepo(SqliteAccess, SqliteSessions, SqliteBookings,
             sql += f" WHERE {where}"
         return self.conn.execute(sql, params).rowcount
 
-    # ---------------------------------------------------------- escape hatch
+    # ---------------------------------------------------------- admin
 
-    def raw(self, sql, params=()):
-        """See Repo.raw. Temporary, and the count only goes down."""
-        return self.conn.execute(sql, params)
+    # `settings` is deliberately not here. migrate() writes its own
+    # bookkeeping row into it, so a database that has only ever been
+    # initialised would otherwise report itself as non-empty — which is the
+    # exact false answer this method exists to stop giving.
+    TABLES = ("instructors", "classes", "sessions", "clients", "subscriptions",
+              "freezes", "bookings", "credentials", "instructor_hours",
+              "instructor_hour_adjustments", "access_events")
+
+    def init_schema(self):
+        self.conn.executescript(db.SCHEMA)
+        db.migrate(self.conn)
+
+    def is_empty(self):
+        return not any(self.count(t) for t in self.TABLES)
+
+    def drop_all(self):
+        # The file, its write-ahead log and its shared-memory index. Closing
+        # first so the handles are released before they are unlinked.
+        import os
+        import config
+        self.conn.close()
+        base = config.sqlite_path()
+        for suffix in ("", "-wal", "-shm"):
+            path = base + suffix
+            if os.path.exists(path):
+                os.remove(path)
+        self.conn = db.connect()
+        self.init_schema()

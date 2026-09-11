@@ -19,9 +19,7 @@ def test_freezing_releases_future_bookings(academy):
     repo = academy.repo
     plan = academy.dual_ballet_plan
     before = access.plan_state(repo, plan)
-    booked = repo.raw(
-        "SELECT COUNT(*) n FROM bookings WHERE subscription_id=? AND status='booked'",
-        (plan,)).fetchone()["n"]
+    booked = repo.count("bookings", {"subscription_id": plan, "status": "booked"})
 
     r = access.freeze_plan(repo, plan, reason="travelling")
     after = access.plan_state(repo, plan)
@@ -50,15 +48,14 @@ def test_the_sweep_leaves_a_frozen_clients_session_alone(academy):
 
     past = add_session(repo, academy.ballet, academy.ana,
                        db.now() - 4 * 3600, 1.5, status="scheduled")
-    repo.raw(
-        "INSERT INTO bookings (client_id,session_id,subscription_id,status,created_at)"
-        " VALUES (?,?,?,'booked',?)", (academy.dual, past, plan, db.now()))
+    repo.insert("bookings", {"client_id": academy.dual, "session_id": past,
+                             "subscription_id": plan, "status": "booked",
+                             "created_at": db.now()})
 
     access.settle_past_sessions(repo)
 
-    status = repo.raw(
-        "SELECT status FROM bookings WHERE session_id=? AND client_id=?",
-        (past, academy.dual)).fetchone()["status"]
+    status = repo.find_one("bookings", {"session_id": past,
+                                       "client_id": academy.dual})["status"]
     assert status == "booked"
 
 
@@ -136,8 +133,7 @@ def test_freeze_history_is_kept(academy):
     access.unfreeze_plan(repo, plan)
     access.freeze_plan(repo, plan, reason="second")
 
-    rows = repo.raw("SELECT * FROM freezes WHERE subscription_id=? ORDER BY id",
-                        (plan,)).fetchall()
+    rows = repo.find("freezes", {"subscription_id": plan}, sort=[("id", 1)])
     assert len(rows) == 2
     finished = [r for r in rows if r["ended_on"]]
     assert finished and all(r["days_added"] is not None for r in finished)
