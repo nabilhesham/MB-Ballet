@@ -9,8 +9,8 @@ tests check directly.
 
 import db
 
-from ..ports import (BookingsPort, ClassesPort, EventsPort, PlansPort,
-                     SessionsPort)
+from ..ports import (BookingsPort, ClassesPort, ClientsPort, EventsPort,
+                     PlansPort, SessionsPort)
 
 
 def _marks(values):
@@ -155,6 +155,73 @@ class SqliteBookings(BookingsPort):
         return self.conn.execute(sql, params).rowcount
 
 
+class SqliteClients(ClientsPort):
+
+    # The three booking lists share a join but not their columns, so they
+    # stay three named questions rather than one method with flags. Widening
+    # them into a single superset would change what the profile receives.
+    _BOOKING_JOIN = (
+        "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
+        "  JOIN classes cl ON cl.id = s.class_id"
+        "  LEFT JOIN instructors i ON i.id = s.instructor_id")
+
+    def search_clients(self, active, q):
+        like = f"%{q}%"
+        return [dict(r) for r in self.conn.execute(
+            "SELECT c.* FROM clients c"
+            " WHERE c.active = ? AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
+            "   OR c.school LIKE ?)"
+            " ORDER BY c.name_en, c.id", (active, q, like, like, like)).fetchall()]
+
+    def card_counts_bulk(self, client_ids):
+        out = {c: 0 for c in client_ids}
+        if not client_ids:
+            return out
+        rows = self.conn.execute(
+            "SELECT client_id, COUNT(*) n FROM credentials"
+            f" WHERE revoked_at IS NULL AND client_id IN ({_marks(client_ids)})"
+            " GROUP BY client_id", tuple(client_ids)).fetchall()
+        for r in rows:
+            out[r["client_id"]] = r["n"]
+        return out
+
+    def client_cards(self, client_id):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT cr.id, cr.token, cr.class_id, cr.issued_at,"
+            "       cl.name AS class_name, cl.colour"
+            "  FROM credentials cr LEFT JOIN classes cl ON cl.id = cr.class_id"
+            " WHERE cr.client_id=? AND cr.revoked_at IS NULL"
+            " ORDER BY cl.name, cr.id", (client_id,)).fetchall()]
+
+    def client_upcoming(self, client_id, now):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT b.id AS booking_id, b.status, s.id AS session_id, s.starts_at,"
+            "       s.duration_hours, s.class_id, cl.name AS class_name, cl.colour,"
+            "       i.name AS instructor_name"
+            + self._BOOKING_JOIN +
+            " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'"
+            " ORDER BY s.starts_at, s.id", (client_id, now)).fetchall()]
+
+    def client_history(self, client_id, now, limit):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT b.id AS booking_id, b.status, b.checked_in_at, b.subscription_id,"
+            "       s.id AS session_id, s.starts_at, cl.name AS class_name, cl.colour,"
+            "       i.name AS instructor_name"
+            + self._BOOKING_JOIN +
+            " WHERE b.client_id=? AND s.starts_at < ?"
+            " ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
+            (client_id, now, limit)).fetchall()]
+
+    def plan_sessions(self, client_id, sub_id):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT b.status, b.checked_in_at, s.id AS session_id, s.starts_at,"
+            "       s.duration_hours, cl.name AS class_name, cl.colour,"
+            "       i.name AS instructor_name"
+            + self._BOOKING_JOIN +
+            " WHERE b.client_id=? AND b.subscription_id=?"
+            " ORDER BY s.starts_at, s.id", (client_id, sub_id)).fetchall()]
+
+
 class SqlitePlans(PlansPort):
 
     def active_plans_with_clients(self):
@@ -175,6 +242,20 @@ class SqlitePlans(PlansPort):
         return self.conn.execute(
             f"SELECT MAX(starts_at) t FROM sessions WHERE id IN ({_marks(session_ids)})",
             tuple(session_ids)).fetchone()["t"]
+
+    def active_plans_for(self, client_ids):
+        if not client_ids:
+            return {}
+        rows = self.conn.execute(
+            "SELECT * FROM subscriptions"
+            f" WHERE active=1 AND client_id IN ({_marks(client_ids)})"
+            " ORDER BY expires_on ASC, id ASC", tuple(client_ids)).fetchall()
+        out = {}
+        for r in rows:
+            # ORDER BY expires_on ASC, so the first seen for a client is the
+            # soonest to expire -- the one needing attention.
+            out.setdefault(r["client_id"], dict(r))
+        return out
 
 
 class SqliteEvents(EventsPort):

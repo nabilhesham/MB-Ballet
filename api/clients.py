@@ -66,17 +66,19 @@ def list_clients(q: str = "", status: str = "all"):
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        like = f"%{q}%"
         active = 0 if status == "archived" else 1
-        out = rows(repo.raw(
-            "SELECT c.* FROM clients c"
-            " WHERE c.active = ? AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
-            "   OR c.school LIKE ?)"
-            " ORDER BY c.name_en", (active, q, like, like, like)))
+        out = repo.search_clients(active, q)
         today = date.today().isoformat()
+        # Five queries for the whole list rather than four per client. The
+        # difference is invisible on a local file and is the whole page
+        # against a networked backend.
+        ids = [d["id"] for d in out]
+        plans = repo.active_plans_for(ids)
+        states = access.plan_states(repo, [p["id"] for p in plans.values()])
+        cards = repo.card_counts_bulk(ids)
         for d in out:
-            sub = access.active_plan(repo, d["id"])
-            state = access.plan_state(repo, sub["id"]) if sub else {}
+            sub = plans.get(d["id"])
+            state = states.get(sub["id"], {}) if sub else {}
             d.update({
                 "plan": state.get("plan"),
                 "sessions_total": state.get("sessions_total"),
@@ -90,9 +92,7 @@ def list_clients(q: str = "", status: str = "all"):
                                 and not d["frozen"])
             d["low"] = d["remaining"] is not None and 0 < d["remaining"] <= 2
             d["empty"] = d["remaining"] is not None and d["remaining"] <= 0
-            d["cards"] = repo.raw(
-                "SELECT COUNT(*) n FROM credentials WHERE client_id=? AND revoked_at IS NULL",
-                (d["id"],)).fetchone()["n"]
+            d["cards"] = cards[d["id"]]
         if status == "attention":
             out = [d for d in out if not d["frozen"] and (
                     d["expired"] or d["low"] or d["empty"] or not d["cards"]
@@ -106,12 +106,11 @@ def list_clients(q: str = "", status: str = "all"):
 def create_client(body: ClientIn):
     repo = data.connect()
     try:
-        cur = repo.raw(
-            "INSERT INTO clients (name_en, phone, age, school, joined_on, notes, created_at)"
-            " VALUES (?,?,?,?,?,?,?)",
-            (body.name_en, body.phone, body.age, body.school,
-             body.joined_on or date.today().isoformat(), body.notes, db.now()))
-        return {"id": cur.lastrowid}
+        return {"id": repo.insert("clients", {
+            "name_en": body.name_en, "phone": body.phone, "age": body.age,
+            "school": body.school,
+            "joined_on": body.joined_on or date.today().isoformat(),
+            "notes": body.notes, "created_at": db.now()})}
     finally:
         repo.close()
 
@@ -121,14 +120,15 @@ def get_client(cid: int):
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        c = one(repo.raw("SELECT * FROM clients WHERE id=?", (cid,)))
+        c = repo.get("clients", cid)
         if not c:
             raise HTTPException(404, "no such client")
 
         # Payment history: every plan bought, newest first.
-        c["plans"] = [access.plan_state(repo, r["id"]) for r in repo.raw(
-            "SELECT id FROM subscriptions WHERE client_id=? ORDER BY created_at DESC",
-            (cid,)).fetchall()]
+        owned = repo.find("subscriptions", {"client_id": cid},
+                          sort=[("created_at", -1)], fields=["id"])
+        states = access.plan_states(repo, [r["id"] for r in owned])
+        c["plans"] = [states[r["id"]] for r in owned]
         # One live plan per class. The profile is organised around these: each
         # gets its own card, its own sessions and its own freeze state.
         c["active_plans"] = [p for p in c["plans"] if p["active"]]
@@ -145,12 +145,7 @@ def get_client(cid: int):
              "unassigned": p["unassigned"], "frozen": p["frozen"]}
             for p in c["active_plans"] if p["class_id"]]
 
-        c["cards"] = rows(repo.raw(
-            "SELECT cr.id, cr.token, cr.class_id, cr.issued_at,"
-            "       cl.name AS class_name, cl.colour"
-            "  FROM credentials cr LEFT JOIN classes cl ON cl.id = cr.class_id"
-            " WHERE cr.client_id=? AND cr.revoked_at IS NULL"
-            " ORDER BY cl.name", (cid,)))
+        c["cards"] = repo.client_cards(cid)
         # The PNG the card was written to, so the profile can offer it for
         # download and print without guessing at the filename in the browser.
         #
@@ -163,25 +158,9 @@ def get_client(cid: int):
             cd["card_url"] = f"/{cards.card_path(cid, cd['class_name'])}?v={cd['issued_at']}"
 
         now = db.now()
-        c["upcoming"] = rows(repo.raw(
-            "SELECT b.id AS booking_id, b.status, s.id AS session_id, s.starts_at,"
-            "       s.duration_hours, s.class_id, cl.name AS class_name, cl.colour,"
-            "       i.name AS instructor_name"
-            "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            "  JOIN classes cl ON cl.id = s.class_id"
-            "  LEFT JOIN instructors i ON i.id = s.instructor_id"
-            " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'"
-            " ORDER BY s.starts_at", (cid, now)))
+        c["upcoming"] = repo.client_upcoming(cid, now)
 
-        c["history"] = rows(repo.raw(
-            "SELECT b.id AS booking_id, b.status, b.checked_in_at, b.subscription_id,"
-            "       s.id AS session_id, s.starts_at, cl.name AS class_name, cl.colour,"
-            "       i.name AS instructor_name"
-            "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            "  JOIN classes cl ON cl.id = s.class_id"
-            "  LEFT JOIN instructors i ON i.id = s.instructor_id"
-            " WHERE b.client_id=? AND s.starts_at < ?"
-            " ORDER BY s.starts_at DESC LIMIT 100", (cid, now)))
+        c["history"] = repo.client_history(cid, now, 100)
         return c
     finally:
         repo.close()
@@ -193,15 +172,7 @@ def plan_sessions(cid: int, pid: int):
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        return rows(repo.raw(
-            "SELECT b.status, b.checked_in_at, s.id AS session_id, s.starts_at,"
-            "       s.duration_hours, cl.name AS class_name, cl.colour,"
-            "       i.name AS instructor_name"
-            "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            "  JOIN classes cl ON cl.id = s.class_id"
-            "  LEFT JOIN instructors i ON i.id = s.instructor_id"
-            " WHERE b.client_id=? AND b.subscription_id=?"
-            " ORDER BY s.starts_at", (cid, pid)))
+        return repo.plan_sessions(cid, pid)
     finally:
         repo.close()
 
@@ -210,11 +181,10 @@ def plan_sessions(cid: int, pid: int):
 def update_client(cid: int, body: ClientIn):
     repo = data.connect()
     try:
-        repo.raw(
-            "UPDATE clients SET name_en=?, phone=?, age=?, school=?, joined_on=?, notes=?"
-            " WHERE id=?",
-            (body.name_en, body.phone, body.age, body.school, body.joined_on,
-             body.notes, cid))
+        repo.update("clients", cid, {
+            "name_en": body.name_en, "phone": body.phone, "age": body.age,
+            "school": body.school, "joined_on": body.joined_on,
+            "notes": body.notes})
         return {"ok": True}
     finally:
         repo.close()
@@ -240,7 +210,7 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
     repo = data.connect()
     try:
-        repo.raw("UPDATE clients SET photo_path=? WHERE id=?", ("/" + path, cid))
+        repo.update("clients", cid, {"photo_path": "/" + path})
         return {"photo_path": "/" + path}
     finally:
         repo.close()
@@ -310,9 +280,8 @@ def unarchive_client(cid: int):
     """
     repo = data.connect()
     try:
-        if not repo.raw("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
+        if not repo.update("clients", cid, {"active": 1}):
             raise HTTPException(404, "no such client")
-        repo.raw("UPDATE clients SET active=1 WHERE id=?", (cid,))
         return {"ok": True}
     finally:
         repo.close()

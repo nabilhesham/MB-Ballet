@@ -124,6 +124,40 @@ class BookingsPort(ABC):
         """
 
 
+class ClientsPort(ABC):
+
+    @abstractmethod
+    def search_clients(self, active: int, q: str) -> list:
+        """
+        The clients list. `q` matches name, phone or school; blank matches
+        everyone.
+
+        Searching server-side is deliberate — the kiosk's name lookup goes
+        through the same endpoint, so what reception finds at the desk is
+        what they would find on the Clients page.
+        """
+
+    @abstractmethod
+    def card_counts_bulk(self, client_ids: list) -> dict:
+        """How many live cards each client holds. One round trip."""
+
+    @abstractmethod
+    def client_cards(self, client_id: int) -> list:
+        """A client's live cards, each with its class named."""
+
+    @abstractmethod
+    def client_upcoming(self, client_id: int, now: int) -> list:
+        """Bookings whose session is still ahead and not cancelled."""
+
+    @abstractmethod
+    def client_history(self, client_id: int, now: int, limit: int) -> list:
+        """Bookings whose session has been, newest first."""
+
+    @abstractmethod
+    def plan_sessions(self, client_id: int, sub_id: int) -> list:
+        """Every session one plan has paid for, in order."""
+
+
 class PlansPort(ABC):
 
     @abstractmethod
@@ -140,6 +174,14 @@ class PlansPort(ABC):
     @abstractmethod
     def max_starts_at(self, session_ids: list):
         """The latest `starts_at` among the given sessions, or None."""
+
+    @abstractmethod
+    def active_plans_for(self, client_ids: list) -> dict:
+        """
+        Each client's live plan, keyed by client id — the soonest to expire
+        where they hold more than one, which is the one needing attention.
+        One round trip, for the clients list.
+        """
 
 
 class EventsPort(ABC):

@@ -138,6 +138,34 @@ def test_the_dashboard_stays_under_its_ceiling(client):
     assert len(counted) <= 22, counted.report()
 
 
+def test_the_clients_list_does_not_grow_a_query_per_client(client):
+    """
+    It used to be four per client: active_plan, then plan_state's three, then
+    a card count. Now five for the whole list.
+    """
+    a = client.academy
+    with Counted() as few:
+        client.get("/api/clients")
+
+    more_clients(a.repo, a, 40)
+    with Counted() as many:
+        r = client.get("/api/clients")
+
+    assert r.status_code == 200
+    assert len(r.json()) > 40
+    assert len(many) <= len(few) + 2, (
+        f"adding 40 clients cost {len(many) - len(few)} extra calls\n{many.report()}")
+
+
+def test_a_client_profile_costs_a_fixed_number_of_queries(client):
+    """plan_states() answers for every plan the client has ever had at once."""
+    with Counted() as counted:
+        r = client.get(f"/api/clients/{client.academy.dual}")
+    assert r.status_code == 200
+    assert len(r.json()["plans"]) == 2
+    assert len(counted) <= 16, counted.report()
+
+
 def test_attendance_counts_is_one_query_for_many_sessions(academy):
     repo = academy.repo
     with Counted() as counted:
