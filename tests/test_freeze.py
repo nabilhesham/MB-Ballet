@@ -16,15 +16,15 @@ from fixtures import add_session
 
 
 def test_freezing_releases_future_bookings(academy):
-    conn = academy.conn
+    repo = academy.repo
     plan = academy.dual_ballet_plan
-    before = access.plan_state(conn, plan)
-    booked = conn.execute(
+    before = access.plan_state(repo, plan)
+    booked = repo.raw(
         "SELECT COUNT(*) n FROM bookings WHERE subscription_id=? AND status='booked'",
         (plan,)).fetchone()["n"]
 
-    r = access.freeze_plan(conn, plan, reason="travelling")
-    after = access.plan_state(conn, plan)
+    r = access.freeze_plan(repo, plan, reason="travelling")
+    after = access.plan_state(repo, plan)
 
     assert r["ok"], r
     assert r["released"] == booked, f"{booked} booked -> {r['released']} released"
@@ -35,43 +35,42 @@ def test_freezing_releases_future_bookings(academy):
 
 
 def test_a_frozen_plan_cannot_be_scanned(academy):
-    conn = academy.conn
-    access.freeze_plan(conn, academy.dual_ballet_plan)
-    v = access.verify(conn, academy.dual_ballet_card)
+    repo = academy.repo
+    access.freeze_plan(repo, academy.dual_ballet_plan)
+    v = access.verify(repo, academy.dual_ballet_card)
     assert not v["granted"], v
     assert v.get("frozen") is True
 
 
 def test_the_sweep_leaves_a_frozen_clients_session_alone(academy):
     """A paused client must never lose a session to the absent sweep."""
-    conn = academy.conn
+    repo = academy.repo
     plan = academy.dual_ballet_plan
-    access.freeze_plan(conn, plan)
+    access.freeze_plan(repo, plan)
 
-    past = add_session(conn, academy.ballet, academy.ana,
+    past = add_session(repo, academy.ballet, academy.ana,
                        db.now() - 4 * 3600, 1.5, status="scheduled")
-    conn.execute(
+    repo.raw(
         "INSERT INTO bookings (client_id,session_id,subscription_id,status,created_at)"
         " VALUES (?,?,?,'booked',?)", (academy.dual, past, plan, db.now()))
-    conn.commit()
 
-    access.settle_past_sessions(conn)
+    access.settle_past_sessions(repo)
 
-    status = conn.execute(
+    status = repo.raw(
         "SELECT status FROM bookings WHERE session_id=? AND client_id=?",
         (past, academy.dual)).fetchone()["status"]
     assert status == "booked"
 
 
 def test_unfreezing_extends_the_expiry_by_the_frozen_days(academy):
-    conn = academy.conn
+    repo = academy.repo
     plan = academy.dual_ballet_plan
-    before = access.plan_state(conn, plan)["expires_on"]
+    before = access.plan_state(repo, plan)["expires_on"]
 
-    access.freeze_plan(conn, plan,
+    access.freeze_plan(repo, plan,
                        from_date=(date.today() - timedelta(days=10)).isoformat())
-    u = access.unfreeze_plan(conn, plan)
-    after = access.plan_state(conn, plan)
+    u = access.unfreeze_plan(repo, plan)
+    after = access.plan_state(repo, plan)
 
     assert u["ok"], u
     assert u["days"] == 10, u
@@ -82,35 +81,35 @@ def test_unfreezing_extends_the_expiry_by_the_frozen_days(academy):
 
 
 def test_a_dated_freeze_lifts_itself_once_the_date_passes(academy):
-    conn = academy.conn
+    repo = academy.repo
     plan = academy.dual_ballet_plan
-    access.freeze_plan(conn, plan,
+    access.freeze_plan(repo, plan,
                        from_date=(date.today() - timedelta(days=8)).isoformat(),
                        until=(date.today() - timedelta(days=1)).isoformat())
-    assert access.plan_state(conn, plan)["frozen"] is True
+    assert access.plan_state(repo, plan)["frozen"] is True
 
-    lifted = access.lift_expired_freezes(conn)
+    lifted = access.lift_expired_freezes(repo)
 
     assert lifted == 1
-    assert access.plan_state(conn, plan)["frozen"] is False
+    assert access.plan_state(repo, plan)["frozen"] is False
 
 
 def test_a_plan_cannot_be_frozen_twice(academy):
-    conn = academy.conn
-    access.freeze_plan(conn, academy.dual_ballet_plan)
-    again = access.freeze_plan(conn, academy.dual_ballet_plan)
+    repo = academy.repo
+    access.freeze_plan(repo, academy.dual_ballet_plan)
+    again = access.freeze_plan(repo, academy.dual_ballet_plan)
     assert not again["ok"]
     assert "already frozen" in again["error"]
 
 
 def test_an_unfrozen_plan_cannot_be_unfrozen(academy):
-    r = access.unfreeze_plan(academy.conn, academy.dual_ballet_plan)
+    r = access.unfreeze_plan(academy.repo, academy.dual_ballet_plan)
     assert not r["ok"]
     assert "not frozen" in r["error"]
 
 
 def test_a_freeze_ending_before_it_starts_is_refused(academy):
-    r = access.freeze_plan(academy.conn, academy.dual_ballet_plan,
+    r = access.freeze_plan(academy.repo, academy.dual_ballet_plan,
                            until=(date.today() - timedelta(days=3)).isoformat())
     assert not r["ok"]
     assert "after it starts" in r["error"]
@@ -118,26 +117,26 @@ def test_a_freeze_ending_before_it_starts_is_refused(academy):
 
 def test_only_plans_of_twelve_or_more_can_be_frozen(academy):
     """Short packs are meant to be used inside their window."""
-    conn = academy.conn
-    r = access.freeze_plan(conn, academy.dual_flex_plan)      # 8 sessions
+    repo = academy.repo
+    r = access.freeze_plan(repo, academy.dual_flex_plan)      # 8 sessions
     assert not r["ok"]
     assert str(access.FREEZE_MIN_SESSIONS) in r["error"], r
 
 
 def test_freezing_one_class_leaves_the_other_alone(academy):
-    conn = academy.conn
-    access.freeze_plan(conn, academy.dual_ballet_plan)
-    assert access.plan_state(conn, academy.dual_flex_plan)["frozen"] is False
+    repo = academy.repo
+    access.freeze_plan(repo, academy.dual_ballet_plan)
+    assert access.plan_state(repo, academy.dual_flex_plan)["frozen"] is False
 
 
 def test_freeze_history_is_kept(academy):
-    conn = academy.conn
+    repo = academy.repo
     plan = academy.dual_ballet_plan
-    access.freeze_plan(conn, plan, reason="first")
-    access.unfreeze_plan(conn, plan)
-    access.freeze_plan(conn, plan, reason="second")
+    access.freeze_plan(repo, plan, reason="first")
+    access.unfreeze_plan(repo, plan)
+    access.freeze_plan(repo, plan, reason="second")
 
-    rows = conn.execute("SELECT * FROM freezes WHERE subscription_id=? ORDER BY id",
+    rows = repo.raw("SELECT * FROM freezes WHERE subscription_id=? ORDER BY id",
                         (plan,)).fetchall()
     assert len(rows) == 2
     finished = [r for r in rows if r["ended_on"]]

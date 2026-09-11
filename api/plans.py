@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 import access
 import db
+import repo as data
 
 from .helpers import rows
 
@@ -41,43 +42,43 @@ def edit_plan(pid: int, body: PlanEdit, clear_paid_on: bool = False):
     ?clear_paid_on=true instead of paid_on to blank it back to unpaid — the
     same shape edit_session() uses for clear_instructor.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        r = access.edit_plan(conn, pid, clear_paid_on=clear_paid_on,
+        r = access.edit_plan(repo, pid, clear_paid_on=clear_paid_on,
                              **body.model_dump(exclude_none=True))
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/plans/{pid}/freeze")
 def freeze_plan(pid: int, body: FreezeIn):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        r = access.freeze_plan(conn, pid, until=body.until, reason=body.reason)
+        r = access.freeze_plan(repo, pid, until=body.until, reason=body.reason)
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/plans/{pid}/unfreeze")
 def unfreeze_plan(pid: int):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        r = access.unfreeze_plan(conn, pid)
+        r = access.unfreeze_plan(repo, pid)
         return JSONResponse(r, status_code=200 if r["ok"] else 400)
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.get("/api/plans/{pid}/freezes")
 def plan_freezes(pid: int):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        return rows(conn.execute(
+        return rows(repo.raw(
             "SELECT * FROM freezes WHERE subscription_id=? ORDER BY created_at DESC", (pid,)))
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.delete("/api/plans/{pid}")
@@ -96,11 +97,11 @@ def delete_plan(pid: int):
     No refresh_expiry() here, unlike the other bulk booking deletes: the plan
     whose expiry would be recomputed is itself gone.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        r = access.delete_plan(conn, pid)
+        r = access.delete_plan(repo, pid)
         if not r["ok"]:
             raise HTTPException(r.get("status", 400), r["error"])
         return r
     finally:
-        conn.close()
+        repo.close()

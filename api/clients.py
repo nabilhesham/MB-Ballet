@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import access
 import cards
 import db
+import repo as data
 
 from .helpers import rows, one
 
@@ -62,20 +63,20 @@ def list_clients(q: str = "", status: str = "all"):
     once each row has been enriched with the plan state it needs; it is not a
     third value of the same switch.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        access.settle_past_sessions(conn)
+        access.settle_past_sessions(repo)
         like = f"%{q}%"
         active = 0 if status == "archived" else 1
-        data = rows(conn.execute(
+        out = rows(repo.raw(
             "SELECT c.* FROM clients c"
             " WHERE c.active = ? AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
             "   OR c.school LIKE ?)"
             " ORDER BY c.name_en", (active, q, like, like, like)))
         today = date.today().isoformat()
-        for d in data:
-            sub = access.active_plan(conn, d["id"])
-            state = access.plan_state(conn, sub["id"]) if sub else {}
+        for d in out:
+            sub = access.active_plan(repo, d["id"])
+            state = access.plan_state(repo, sub["id"]) if sub else {}
             d.update({
                 "plan": state.get("plan"),
                 "sessions_total": state.get("sessions_total"),
@@ -89,43 +90,43 @@ def list_clients(q: str = "", status: str = "all"):
                                 and not d["frozen"])
             d["low"] = d["remaining"] is not None and 0 < d["remaining"] <= 2
             d["empty"] = d["remaining"] is not None and d["remaining"] <= 0
-            d["cards"] = conn.execute(
+            d["cards"] = repo.raw(
                 "SELECT COUNT(*) n FROM credentials WHERE client_id=? AND revoked_at IS NULL",
                 (d["id"],)).fetchone()["n"]
         if status == "attention":
-            data = [d for d in data if not d["frozen"] and (
+            out = [d for d in out if not d["frozen"] and (
                     d["expired"] or d["low"] or d["empty"] or not d["cards"]
                     or (d["unassigned"] or 0) > 0)]
-        return data
+        return out
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/clients")
 def create_client(body: ClientIn):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        cur = conn.execute(
+        cur = repo.raw(
             "INSERT INTO clients (name_en, phone, age, school, joined_on, notes, created_at)"
             " VALUES (?,?,?,?,?,?,?)",
             (body.name_en, body.phone, body.age, body.school,
              body.joined_on or date.today().isoformat(), body.notes, db.now()))
         return {"id": cur.lastrowid}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.get("/api/clients/{cid}")
 def get_client(cid: int):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        access.settle_past_sessions(conn)
-        c = one(conn.execute("SELECT * FROM clients WHERE id=?", (cid,)))
+        access.settle_past_sessions(repo)
+        c = one(repo.raw("SELECT * FROM clients WHERE id=?", (cid,)))
         if not c:
             raise HTTPException(404, "no such client")
 
         # Payment history: every plan bought, newest first.
-        c["plans"] = [access.plan_state(conn, r["id"]) for r in conn.execute(
+        c["plans"] = [access.plan_state(repo, r["id"]) for r in repo.raw(
             "SELECT id FROM subscriptions WHERE client_id=? ORDER BY created_at DESC",
             (cid,)).fetchall()]
         # One live plan per class. The profile is organised around these: each
@@ -144,7 +145,7 @@ def get_client(cid: int):
              "unassigned": p["unassigned"], "frozen": p["frozen"]}
             for p in c["active_plans"] if p["class_id"]]
 
-        c["cards"] = rows(conn.execute(
+        c["cards"] = rows(repo.raw(
             "SELECT cr.id, cr.token, cr.class_id, cr.issued_at,"
             "       cl.name AS class_name, cl.colour"
             "  FROM credentials cr LEFT JOIN classes cl ON cl.id = cr.class_id"
@@ -162,7 +163,7 @@ def get_client(cid: int):
             cd["card_url"] = f"/{cards.card_path(cid, cd['class_name'])}?v={cd['issued_at']}"
 
         now = db.now()
-        c["upcoming"] = rows(conn.execute(
+        c["upcoming"] = rows(repo.raw(
             "SELECT b.id AS booking_id, b.status, s.id AS session_id, s.starts_at,"
             "       s.duration_hours, s.class_id, cl.name AS class_name, cl.colour,"
             "       i.name AS instructor_name"
@@ -172,7 +173,7 @@ def get_client(cid: int):
             " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'"
             " ORDER BY s.starts_at", (cid, now)))
 
-        c["history"] = rows(conn.execute(
+        c["history"] = rows(repo.raw(
             "SELECT b.id AS booking_id, b.status, b.checked_in_at, b.subscription_id,"
             "       s.id AS session_id, s.starts_at, cl.name AS class_name, cl.colour,"
             "       i.name AS instructor_name"
@@ -183,16 +184,16 @@ def get_client(cid: int):
             " ORDER BY s.starts_at DESC LIMIT 100", (cid, now)))
         return c
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.get("/api/clients/{cid}/plan/{pid}/sessions")
 def plan_sessions(cid: int, pid: int):
     """Every session paid for by one plan — the popup on a payment row."""
-    conn = db.connect()
+    repo = data.connect()
     try:
-        access.settle_past_sessions(conn)
-        return rows(conn.execute(
+        access.settle_past_sessions(repo)
+        return rows(repo.raw(
             "SELECT b.status, b.checked_in_at, s.id AS session_id, s.starts_at,"
             "       s.duration_hours, cl.name AS class_name, cl.colour,"
             "       i.name AS instructor_name"
@@ -202,21 +203,21 @@ def plan_sessions(cid: int, pid: int):
             " WHERE b.client_id=? AND b.subscription_id=?"
             " ORDER BY s.starts_at", (cid, pid)))
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.put("/api/clients/{cid}")
 def update_client(cid: int, body: ClientIn):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        conn.execute(
+        repo.raw(
             "UPDATE clients SET name_en=?, phone=?, age=?, school=?, joined_on=?, notes=?"
             " WHERE id=?",
             (body.name_en, body.phone, body.age, body.school, body.joined_on,
              body.notes, cid))
         return {"ok": True}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/clients/{cid}/photo")
@@ -237,28 +238,28 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
             pass
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    conn = db.connect()
+    repo = data.connect()
     try:
-        conn.execute("UPDATE clients SET photo_path=? WHERE id=?", ("/" + path, cid))
+        repo.raw("UPDATE clients SET photo_path=? WHERE id=?", ("/" + path, cid))
         return {"photo_path": "/" + path}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/clients/{cid}/plan")
 def add_plan(cid: int, body: PlanIn):
     """Sell a plan for one class. The rules live in access.add_plan()."""
-    conn = db.connect()
+    repo = data.connect()
     try:
         r = access.add_plan(
-            conn, cid, body.class_id, body.plan, body.sessions_total,
+            repo, cid, body.class_id, body.plan, body.sessions_total,
             body.session_ids, price=body.price, starts_on=body.starts_on,
             expires_on=body.expires_on, paid_on=body.paid_on, notes=body.notes)
         if not r["ok"]:
             raise HTTPException(r.get("status", 400), r["error"])
         return r
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/clients/{cid}/card")
@@ -267,9 +268,9 @@ def issue_card(cid: int, body: CardIn):
     One card per class. Reissuing replaces only that class's card, so a client
     taking Ballet and Flexibility keeps the other one working.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        r = access.issue_card(conn, cid, body.class_id)
+        r = access.issue_card(repo, cid, body.class_id)
         if not r["ok"]:
             raise HTTPException(r.get("status", 400), r["error"])
         # Drawing the PNG is file I/O and presentation, so it stays here
@@ -284,20 +285,20 @@ def issue_card(cid: int, body: CardIn):
         return {"token": r["token"], "card_url": f"/{path}?v={db.now()}",
                 "revoked": r["revoked"]}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.delete("/api/clients/{cid}")
 def delete_client(cid: int, hard: bool = False):
     """Archive, or remove entirely. The rules live in access.delete_client()."""
-    conn = db.connect()
+    repo = data.connect()
     try:
-        r = access.delete_client(conn, cid, hard=hard)
+        r = access.delete_client(repo, cid, hard=hard)
         if not r["ok"]:
             raise HTTPException(r.get("status", 400), r["error"])
         return r
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/clients/{cid}/unarchive")
@@ -307,11 +308,11 @@ def unarchive_client(cid: int):
     credentials are revoked rather than deleted, so a restored client needs
     one reissued.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        if not conn.execute("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
+        if not repo.raw("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
             raise HTTPException(404, "no such client")
-        conn.execute("UPDATE clients SET active=1 WHERE id=?", (cid,))
+        repo.raw("UPDATE clients SET active=1 WHERE id=?", (cid,))
         return {"ok": True}
     finally:
-        conn.close()
+        repo.close()

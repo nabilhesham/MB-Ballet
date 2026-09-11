@@ -6,9 +6,6 @@ ran against the live `academy.db` and wrote to it — inserting sessions and
 bookings, and in one case rewriting a subscription's `frozen_on` to fabricate
 a ten-day-old freeze. That is a standing hazard on a machine where that file
 is the business record.
-
-The `academy` fixture is deliberately the only way in, so a test cannot
-quietly reach a database that outlives it.
 """
 
 import os
@@ -25,11 +22,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("ENTRY_SECRET", "test-secret-not-a-real-key")
 
 import db                                    # noqa: E402
+import repo as data                          # noqa: E402
 from fixtures import build_academy           # noqa: E402
 
 
-# Named so the parametrisation added in a later phase — sqlite and mongo —
-# is a change to this one list rather than to every fixture below.
+# Named so that adding "mongo" is a change to this one list rather than to
+# every fixture below.
 BACKENDS = ["sqlite"]
 
 
@@ -39,27 +37,39 @@ def backend(request):
 
 
 @pytest.fixture
-def conn(backend, tmp_path, monkeypatch):
+def repo(backend, tmp_path, monkeypatch):
     """
-    A throwaway database, pointed at through config rather than by passing a
-    path around.
+    A repository over a throwaway database, chosen through config.
 
-    That matters: route handlers call a bare `db.connect()`, so the only way
-    to test one without it reaching for the real academy.db is for config to
-    be the thing that answers "which database?". Before config.py existed
-    this fixture could reach access.py but not the api/ layer at all.
+    Config is what answers "which database?", rather than a path passed from
+    hand to hand. That is what makes the api/ layer testable at all: route
+    handlers call a bare `data.connect()`, so without it any test touching
+    one would reach for the real academy.db.
     """
     if backend != "sqlite":                  # pragma: no cover - until phase 4
         pytest.skip(f"no {backend} backend yet")
-    monkeypatch.setenv("MB_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("MB_DB_BACKEND", backend)
     monkeypatch.setenv("MB_SQLITE_PATH", str(tmp_path / "academy.db"))
     db.init()
-    c = db.connect()
-    yield c
-    c.close()
+    r = data.connect()
+    yield r
+    r.close()
 
 
 @pytest.fixture
-def academy(conn):
+def conn(repo):
+    """
+    The raw sqlite3 connection behind the repository.
+
+    Only for tests that are *about* SQLite — the schema-shape checks, and the
+    transaction tests that assert on `in_transaction`. Anything describing
+    the app's behaviour should go through `repo`, or it cannot be run against
+    a second backend.
+    """
+    return repo.conn
+
+
+@pytest.fixture
+def academy(repo):
     """A populated academy. See tests/fixtures.py for what is in it."""
-    return build_academy(conn)
+    return build_academy(repo)

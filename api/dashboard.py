@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 import access
 import db
+import repo as data
 
 from .helpers import rows
 
@@ -20,12 +21,12 @@ def dashboard(month_from: str = None, month_to: str = None):
     the only ones on the page that are about a period rather than about
     today. Left out, both default to the month we are in.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        access.settle_past_sessions(conn)
+        access.settle_past_sessions(repo)
         midnight, tomorrow = access.day_bounds()
 
-        today_sessions = rows(conn.execute(
+        today_sessions = rows(repo.raw(
             "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name,"
             "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
             "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
@@ -35,7 +36,7 @@ def dashboard(month_from: str = None, month_to: str = None):
             " WHERE s.starts_at BETWEEN ? AND ? ORDER BY s.starts_at",
             (midnight, tomorrow)))
 
-        recent = rows(conn.execute(
+        recent = rows(repo.raw(
             "SELECT e.id, e.scanned_at, e.decision, e.reason, e.confirmed_at,"
             "       c.name_en, cl.name AS class_name"
             "  FROM access_events e LEFT JOIN clients c ON c.id=e.client_id"
@@ -43,22 +44,22 @@ def dashboard(month_from: str = None, month_to: str = None):
             "  LEFT JOIN classes cl ON cl.id=s.class_id"
             " WHERE e.scanned_at >= ? ORDER BY e.scanned_at DESC LIMIT 60", (midnight,)))
 
-        exp = access.expected_today(conn)
-        intake = access.month_intake(conn, month_from, month_to)
+        exp = access.expected_today(repo)
+        intake = access.month_intake(repo, month_from, month_to)
         stats = {
             **{f"exp_{k}": v for k, v in exp.items()},
             **{f"mo_{k}": v for k, v in intake.items()},
-            "scans_today": conn.execute(
+            "scans_today": repo.raw(
                 "SELECT COUNT(*) n FROM access_events WHERE scanned_at>=? AND source='scan'",
                 (midnight,)).fetchone()["n"],
-            "denied_today": conn.execute(
+            "denied_today": repo.raw(
                 "SELECT COUNT(*) n FROM access_events WHERE scanned_at>=? AND decision='deny'",
                 (midnight,)).fetchone()["n"],
-            "active_clients": conn.execute(
+            "active_clients": repo.raw(
                 "SELECT COUNT(*) n FROM clients WHERE active=1").fetchone()["n"],
-            "classes": conn.execute(
+            "classes": repo.raw(
                 "SELECT COUNT(*) n FROM classes WHERE active=1").fetchone()["n"],
-            "sessions_week": conn.execute(
+            "sessions_week": repo.raw(
                 "SELECT COUNT(*) n FROM sessions WHERE starts_at BETWEEN ? AND ?"
                 " AND status='scheduled'", (db.now(), db.now() + 7 * 86400)).fetchone()["n"],
         }
@@ -66,11 +67,11 @@ def dashboard(month_from: str = None, month_to: str = None):
         today = date.today().isoformat()
         soon = (date.today() + timedelta(days=7)).isoformat()
         attention = []
-        for r in conn.execute(
+        for r in repo.raw(
                 "SELECT c.id, c.name_en, c.phone, s.id AS sub_id, s.plan"
                 "  FROM clients c JOIN subscriptions s ON s.client_id=c.id AND s.active=1"
                 " WHERE c.active=1").fetchall():
-            st = access.plan_state(conn, r["sub_id"])
+            st = access.plan_state(repo, r["sub_id"])
             if st["frozen"]:
                 continue          # deliberately paused, not a problem to chase
             # plan_state owns what a plan is valid through — the stored
@@ -88,4 +89,4 @@ def dashboard(month_from: str = None, month_to: str = None):
         return {"stats": stats, "today_sessions": today_sessions,
                 "recent": recent, "attention": attention[:20], "today": today}
     finally:
-        conn.close()
+        repo.close()

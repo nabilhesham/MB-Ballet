@@ -17,7 +17,7 @@ from fixtures import _ins
 
 
 @pytest.fixture
-def intake(conn):
+def intake(repo):
     """
     A tiny academy with dates chosen by hand, not derived from today.
 
@@ -25,13 +25,13 @@ def intake(conn):
     counts at specific boundaries, and a fixture anchored to the current date
     cannot express "the last day of July".
     """
-    cls = _ins(conn, "classes", name="Ballet", colour="#87438E",
+    cls = _ins(repo, "classes", name="Ballet", colour="#87438E",
                duration_hours=1.5, active=1)
 
     def client_with_plan(name, joined_on, starts_on, price):
-        cid = _ins(conn, "clients", name_en=name, joined_on=joined_on,
+        cid = _ins(repo, "clients", name_en=name, joined_on=joined_on,
                    created_at=db.now(), active=1)
-        _ins(conn, "subscriptions", client_id=cid, class_id=cls, plan="p",
+        _ins(repo, "subscriptions", client_id=cid, class_id=cls, plan="p",
              sessions_total=4, price=price, starts_on=starts_on,
              expires_on=starts_on, active=1, created_at=db.now())
         return cid
@@ -52,10 +52,10 @@ def intake(conn):
 
     # Archived clients are out of both figures entirely.
     gone = client_with_plan("Archived", "2026-08-05", "2026-08-05", 9999.0)
-    conn.execute("UPDATE clients SET active=0 WHERE id=?", (gone,))
+    repo.raw("UPDATE clients SET active=0 WHERE id=?", (gone,))
 
-    conn.commit()
-    return conn
+    
+    return repo
 
 
 def test_a_single_month_takes_both_its_edges(intake):
@@ -142,15 +142,15 @@ def test_a_month_with_nothing_in_it_is_zero_not_none(intake):
 
 def test_a_year_boundary_does_not_leak(intake):
     """'2026-01' must not match '2026-10' the way a prefix compare could."""
-    conn = intake
-    cid = _ins(conn, "clients", name_en="Oct", joined_on="2026-10-15",
+    repo = intake
+    cid = _ins(repo, "clients", name_en="Oct", joined_on="2026-10-15",
                created_at=db.now(), active=1)
-    _ins(conn, "subscriptions", client_id=cid, class_id=1, plan="p",
+    _ins(repo, "subscriptions", client_id=cid, class_id=1, plan="p",
          sessions_total=4, price=50.0, starts_on="2026-10-15",
          expires_on="2026-10-15", active=1, created_at=db.now())
-    conn.commit()
-    assert access.month_intake(conn, "2026-01")["new_clients"] == 0
-    assert access.month_intake(conn, "2026-10")["new_clients"] == 1
+    
+    assert access.month_intake(repo, "2026-01")["new_clients"] == 0
+    assert access.month_intake(repo, "2026-10")["new_clients"] == 1
 
 
 # ---------------------------------------------------------------- next_month

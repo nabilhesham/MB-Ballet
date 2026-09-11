@@ -15,9 +15,9 @@ from repo.filters import FilterError
 
 
 @pytest.fixture
-def r(conn):
-    """A repository over the same throwaway database the other tests use."""
-    return data.connect()
+def r(repo):
+    """The repository under test. Named short; it is on every line here."""
+    return repo
 
 
 @pytest.fixture
@@ -274,6 +274,6 @@ def test_begin_is_re_entrant(r):
     assert r.count("clients") == 1
 
 
-def test_the_repo_is_a_context_manager(conn):
-    with data.connect() as r:
-        assert r.count("clients") == 0
+def test_the_repo_is_a_context_manager(repo):
+    with data.connect() as r2:
+        assert r2.count("clients") == 0

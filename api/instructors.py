@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 import access
 import db
+import repo as data
 
 from .helpers import rows, one
 
@@ -42,48 +43,48 @@ def list_instructors(status: str = "active"):
     way; /api/clients additionally carries "attention", which filters within
     the active half rather than choosing a half.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        access.settle_past_sessions(conn)
+        access.settle_past_sessions(repo)
         active = 0 if status == "archived" else 1
-        data = rows(conn.execute(
+        out = rows(repo.raw(
             "SELECT * FROM instructors WHERE active=? ORDER BY name", (active,)))
-        for i in data:
-            t = conn.execute(
+        for i in out:
+            t = repo.raw(
                 "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
                 " WHERE instructor_id=? AND status='completed'", (i["id"],)).fetchone()
             i["sessions_taught"] = t["n"]
             i["hours_taught"] = round(t["h"], 2)
             i["earned"] = round(t["h"] * (i["hourly_rate"] or 0), 2)
-        return data
+        return out
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/instructors")
 def create_instructor(body: InstructorIn):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        cur = conn.execute(
+        cur = repo.raw(
             "INSERT INTO instructors (name, phone, specialty, hourly_rate)"
             " VALUES (?,?,?,?)",
             (body.name, body.phone, body.specialty, body.hourly_rate))
         return {"id": cur.lastrowid}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.put("/api/instructors/{iid}")
 def update_instructor(iid: int, body: InstructorIn):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        conn.execute(
+        repo.raw(
             "UPDATE instructors SET name=?, phone=?, specialty=?, hourly_rate=?"
             " WHERE id=?",
             (body.name, body.phone, body.specialty, body.hourly_rate, iid))
         return {"ok": True}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.get("/api/instructors/{iid}")
@@ -96,10 +97,10 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
     inputs and recalculates every figure, including what's "upcoming", from
     the same query params.
     """
-    conn = db.connect()
+    repo = data.connect()
     try:
-        access.settle_past_sessions(conn)
-        i = one(conn.execute("SELECT * FROM instructors WHERE id=?", (iid,)))
+        access.settle_past_sessions(repo)
+        i = one(repo.raw("SELECT * FROM instructors WHERE id=?", (iid,)))
         if not i:
             raise HTTPException(404, "no such instructor")
 
@@ -109,7 +110,7 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
             raise HTTPException(400, "the end of the range must not be before its start")
         start_ts, end_ts = access.date_range_ts(period_from, period_to)
 
-        i["sessions"] = rows(conn.execute(
+        i["sessions"] = rows(repo.raw(
             "SELECT s.id, s.starts_at, s.duration_hours, s.status,"
             "       c.name AS class_name, c.colour,"
             "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
@@ -118,7 +119,7 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
             " WHERE s.instructor_id = ? AND s.starts_at >= ? AND s.starts_at < ?"
             " ORDER BY s.starts_at DESC LIMIT 200", (iid, start_ts, end_ts)))
 
-        t = conn.execute(
+        t = repo.raw(
             "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
             " WHERE instructor_id=? AND status='completed'"
             "   AND starts_at >= ? AND starts_at < ?", (iid, start_ts, end_ts)).fetchone()
@@ -126,7 +127,7 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
         # past range has none (nothing in it is still ahead), and a future
         # range only counts what's still ahead within that window.
         up_start = max(start_ts, db.now())
-        up = conn.execute(
+        up = repo.raw(
             "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
             " WHERE instructor_id=? AND status='scheduled' AND starts_at >= ? AND starts_at < ?",
             (iid, up_start, end_ts)).fetchone()
@@ -136,10 +137,10 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
         # class that never made it onto the timetable or an hour nobody
         # billed for, and both are worth seeing.
         rate = i["hourly_rate"] or 0
-        i["logged"] = access.logged_hours(conn, iid, period_from, period_to)
+        i["logged"] = access.logged_hours(repo, iid, period_from, period_to)
         # Hours taught carries reception's corrections, so pay follows the
         # corrected figure rather than the raw timetable.
-        taught = access.taught_hours(conn, iid, period_from, period_to)
+        taught = access.taught_hours(repo, iid, period_from, period_to)
         i["period_from"], i["period_to"] = period_from, period_to
         # A day is the only period whose hours may be edited — a correction
         # has to land on the day it happened on to be worth anything later.
@@ -157,20 +158,20 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
         }
         return i
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/instructors/{iid}/hours-adjustment")
 def adjust_hours(iid: int, body: HoursAdjustIn):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        if not conn.execute("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
+        if not repo.raw("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
             raise HTTPException(404, "no such instructor")
         if body.new_total < 0:
             raise HTTPException(400, "hours cannot be negative")
-        return access.adjust_taught_hours(conn, iid, body.day, body.new_total, body.note)
+        return access.adjust_taught_hours(repo, iid, body.day, body.new_total, body.note)
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/instructors/{iid}/photo")
@@ -188,40 +189,40 @@ async def upload_photo(iid: int, file: UploadFile = File(...)):
             pass
     with open(path, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    conn = db.connect()
+    repo = data.connect()
     try:
-        conn.execute("UPDATE instructors SET photo_path=? WHERE id=?", ("/" + path, iid))
+        repo.raw("UPDATE instructors SET photo_path=? WHERE id=?", ("/" + path, iid))
         return {"photo_path": "/" + path}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.post("/api/instructors/{iid}/unarchive")
 def unarchive_instructor(iid: int):
-    conn = db.connect()
+    repo = data.connect()
     try:
-        if not conn.execute("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
+        if not repo.raw("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
             raise HTTPException(404, "no such instructor")
-        conn.execute("UPDATE instructors SET active=1 WHERE id=?", (iid,))
+        repo.raw("UPDATE instructors SET active=1 WHERE id=?", (iid,))
         return {"ok": True}
     finally:
-        conn.close()
+        repo.close()
 
 
 @router.delete("/api/instructors/{iid}")
 def archive_instructor(iid: int):
-    conn = db.connect()
+    repo = data.connect()
     try:
         # The guard and the archive under one lock, so a session cannot be
         # booked into the gap between deciding there are none and archiving.
-        with db.tx(conn):
-            n = conn.execute(
+        with repo.begin():
+            n = repo.raw(
                 "SELECT COUNT(*) n FROM sessions WHERE instructor_id=? AND status='scheduled'"
                 "   AND starts_at >= ?", (iid, db.now())).fetchone()["n"]
             if n:
                 raise HTTPException(
                     400, f"Still assigned to {n} upcoming session(s) — reassign first")
-            conn.execute("UPDATE instructors SET active=0 WHERE id=?", (iid,))
+            repo.raw("UPDATE instructors SET active=0 WHERE id=?", (iid,))
         return {"ok": True}
     finally:
-        conn.close()
+        repo.close()
