@@ -26,52 +26,37 @@ def dashboard(month_from: str = None, month_to: str = None):
         access.settle_past_sessions(repo)
         midnight, tomorrow = access.day_bounds()
 
-        today_sessions = rows(repo.raw(
-            "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
-            "     AND b.status='present') AS attended"
-            "  FROM sessions s JOIN classes c ON c.id=s.class_id"
-            "  LEFT JOIN instructors i ON i.id=s.instructor_id"
-            " WHERE s.starts_at BETWEEN ? AND ? ORDER BY s.starts_at",
-            (midnight, tomorrow)))
+        today_sessions = repo.sessions_in_range(midnight, tomorrow)
 
-        recent = rows(repo.raw(
-            "SELECT e.id, e.scanned_at, e.decision, e.reason, e.confirmed_at,"
-            "       c.name_en, cl.name AS class_name"
-            "  FROM access_events e LEFT JOIN clients c ON c.id=e.client_id"
-            "  LEFT JOIN sessions s ON s.id=e.session_id"
-            "  LEFT JOIN classes cl ON cl.id=s.class_id"
-            " WHERE e.scanned_at >= ? ORDER BY e.scanned_at DESC LIMIT 60", (midnight,)))
+        recent = repo.recent_events(midnight, 60)
 
         exp = access.expected_today(repo)
         intake = access.month_intake(repo, month_from, month_to)
         stats = {
             **{f"exp_{k}": v for k, v in exp.items()},
             **{f"mo_{k}": v for k, v in intake.items()},
-            "scans_today": repo.raw(
-                "SELECT COUNT(*) n FROM access_events WHERE scanned_at>=? AND source='scan'",
-                (midnight,)).fetchone()["n"],
-            "denied_today": repo.raw(
-                "SELECT COUNT(*) n FROM access_events WHERE scanned_at>=? AND decision='deny'",
-                (midnight,)).fetchone()["n"],
-            "active_clients": repo.raw(
-                "SELECT COUNT(*) n FROM clients WHERE active=1").fetchone()["n"],
-            "classes": repo.raw(
-                "SELECT COUNT(*) n FROM classes WHERE active=1").fetchone()["n"],
-            "sessions_week": repo.raw(
-                "SELECT COUNT(*) n FROM sessions WHERE starts_at BETWEEN ? AND ?"
-                " AND status='scheduled'", (db.now(), db.now() + 7 * 86400)).fetchone()["n"],
+            "scans_today": repo.count(
+                "access_events", {"scanned_at": {"gte": midnight}, "source": "scan"}),
+            "denied_today": repo.count(
+                "access_events", {"scanned_at": {"gte": midnight}, "decision": "deny"}),
+            "active_clients": repo.count("clients", {"active": 1}),
+            "classes": repo.count("classes", {"active": 1}),
+            "sessions_week": repo.count("sessions", {
+                "starts_at": {"gte": db.now(), "lte": db.now() + 7 * 86400},
+                "status": "scheduled"}),
         }
 
         today = date.today().isoformat()
         soon = (date.today() + timedelta(days=7)).isoformat()
         attention = []
-        for r in repo.raw(
-                "SELECT c.id, c.name_en, c.phone, s.id AS sub_id, s.plan"
-                "  FROM clients c JOIN subscriptions s ON s.client_id=c.id AND s.active=1"
-                " WHERE c.active=1").fetchall():
-            st = access.plan_state(repo, r["sub_id"])
+        # One query for the plans, one for all their counts, rather than
+        # plan_state() per client. On a local file the difference is
+        # invisible; against a networked backend it is three round trips per
+        # client, which is the whole page.
+        live = repo.active_plans_with_clients()
+        states = access.plan_states(repo, [r["sub_id"] for r in live])
+        for r in live:
+            st = states[r["sub_id"]]
             if st["frozen"]:
                 continue          # deliberately paused, not a problem to chase
             # plan_state owns what a plan is valid through — the stored

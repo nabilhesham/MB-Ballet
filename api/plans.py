@@ -10,7 +10,6 @@ import access
 import db
 import repo as data
 
-from .helpers import rows
 
 router = APIRouter()
 
@@ -75,8 +74,8 @@ def unfreeze_plan(pid: int):
 def plan_freezes(pid: int):
     repo = data.connect()
     try:
-        return rows(repo.raw(
-            "SELECT * FROM freezes WHERE subscription_id=? ORDER BY created_at DESC", (pid,)))
+        return repo.find("freezes", {"subscription_id": pid},
+                         sort=[("created_at", -1)])
     finally:
         repo.close()
 

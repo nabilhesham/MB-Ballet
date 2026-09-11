@@ -14,9 +14,11 @@ from ..base import Repo
 from ..errors import DuplicateKey
 from ..filters import normalise_sort
 from .filters import compile_order, compile_where
+from .ports import SqliteBookings, SqliteEvents, SqlitePlans, SqliteSessions
 
 
-class SqliteRepo(Repo):
+class SqliteRepo(SqliteSessions, SqliteBookings, SqlitePlans,
+                 SqliteEvents, Repo):
 
     def __init__(self, conn):
         self.conn = conn

@@ -193,46 +193,62 @@ def plan_state(repo, sub_id: int) -> dict:
     Where a plan stands. Used slots are counted from the bookings rather than
     tracked in a column, so the two can never drift apart.
     """
-    sub = repo.raw("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
-    if sub is None:
+    return plan_states(repo, [sub_id]).get(sub_id, {})
+
+
+def plan_states(repo, sub_ids) -> dict:
+    """
+    The same for many plans, in three queries rather than three per plan.
+
+    The dashboard's attention list and the clients list both ask this of
+    every active client. On a local SQLite file the N+1 is free; against a
+    networked backend it is three round trips per client, which on a few
+    hundred of them is the whole page. There is one implementation and the
+    single-plan case goes through it, so the two cannot drift.
+    """
+    sub_ids = [s for s in dict.fromkeys(sub_ids) if s is not None]
+    if not sub_ids:
         return {}
-    c = repo.raw(
-        "SELECT COUNT(*) assigned,"
-        "       SUM(CASE WHEN status='present' THEN 1 ELSE 0 END) present,"
-        "       SUM(CASE WHEN status='absent'  THEN 1 ELSE 0 END) absent"
-        "  FROM bookings WHERE subscription_id=?", (sub_id,)).fetchone()
-    present, absent = c["present"] or 0, c["absent"] or 0
-    used = present + absent
-    klass = repo.raw("SELECT name, colour FROM classes WHERE id=?",
-                         (sub["class_id"],)).fetchone() if sub["class_id"] else None
-    allowed, why = can_freeze(sub)
-    # The stored date is the answer, not a floor: refresh_expiry() rewrites it
-    # whenever the plan's bookings change, so deriving it again here would
-    # only be able to disagree with what an edit deliberately set.
-    expires = sub["expires_on"]
-    return {
-        "id": sub["id"], "plan": sub["plan"],
-        "class_id": sub["class_id"],
-        "class_name": klass["name"] if klass else None,
-        "class_colour": klass["colour"] if klass else None,
-        "can_freeze": allowed, "freeze_blocked_because": why,
-        "sessions_total": sub["sessions_total"],
-        "assigned": c["assigned"] or 0,
-        "present": present, "absent": absent, "used": used,
-        "remaining": max(0, sub["sessions_total"] - used),
-        "unassigned": max(0, sub["sessions_total"] - (c["assigned"] or 0)),
-        "starts_on": sub["starts_on"], "expires_on": expires,
-        "active": sub["active"], "price": sub["price"],
-        # NULL means unpaid. Everything that shows a paid/unpaid indicator —
-        # the profile, the payment history, the kiosk — reads it from here,
-        # so there is one answer rather than four re-derivations.
-        "paid_on": sub["paid_on"],
-        "notes": sub["notes"],
-        "frozen": bool(sub["frozen_on"]),
-        "frozen_on": sub["frozen_on"],
-        "frozen_until": sub["frozen_until"],
-        "frozen_days": sub["frozen_days"] or 0,
-    }
+    subs = {s["id"]: s for s in repo.find("subscriptions", {"id": {"in": sub_ids}})}
+    counts = repo.plan_counts_bulk(list(subs))
+    class_ids = sorted({s["class_id"] for s in subs.values() if s["class_id"]})
+    classes = {c["id"]: c for c in repo.find("classes", {"id": {"in": class_ids}})}
+
+    out = {}
+    for sid, sub in subs.items():
+        c = counts[sid]
+        present, absent, assigned = c["present"], c["absent"], c["assigned"]
+        used = present + absent
+        klass = classes.get(sub["class_id"])
+        allowed, why = can_freeze(sub)
+        out[sid] = {
+            "id": sub["id"], "plan": sub["plan"],
+            "class_id": sub["class_id"],
+            "class_name": klass["name"] if klass else None,
+            "class_colour": klass["colour"] if klass else None,
+            "can_freeze": allowed, "freeze_blocked_because": why,
+            "sessions_total": sub["sessions_total"],
+            "assigned": assigned,
+            "present": present, "absent": absent, "used": used,
+            "remaining": max(0, sub["sessions_total"] - used),
+            "unassigned": max(0, sub["sessions_total"] - assigned),
+            "starts_on": sub["starts_on"],
+            # The stored date is the answer, not a floor: refresh_expiry()
+            # rewrites it whenever the plan's bookings change, so deriving it
+            # again here could only disagree with what an edit deliberately set.
+            "expires_on": sub["expires_on"],
+            "active": sub["active"], "price": sub["price"],
+            # NULL means unpaid. Everything that shows a paid/unpaid indicator
+            # -- the profile, the payment history, the kiosk -- reads it from
+            # here, so there is one answer rather than four re-derivations.
+            "paid_on": sub["paid_on"],
+            "notes": sub["notes"],
+            "frozen": bool(sub["frozen_on"]),
+            "frozen_on": sub["frozen_on"],
+            "frozen_until": sub["frozen_until"],
+            "frozen_days": sub["frozen_days"] or 0,
+        }
+    return out
 
 
 def active_plan(repo, client_id: int, class_id: int = None):
