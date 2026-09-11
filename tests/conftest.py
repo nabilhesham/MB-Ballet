@@ -26,18 +26,52 @@ import repo as data                          # noqa: E402
 from fixtures import build_academy           # noqa: E402
 
 
-# Named so that adding "mongo" is a change to this one list rather than to
-# every fixture below.
-BACKENDS = ["sqlite"]
+BACKENDS = ["sqlite", "mongo"]
+
+# A URI kept deliberately separate from MB_MONGO_URI, so a misconfigured run
+# cannot point the suite at production.
+TEST_MONGO_URI = "MB_TEST_MONGO_URI"
+
+# Every test database is named like this, and nothing else is ever dropped.
+# See the guard in mongo_database() below and in MongoRepo.drop_all().
+TEST_DB_PREFIX = "mbtest_"
 
 
 @pytest.fixture(params=BACKENDS)
 def backend(request):
+    if request.param == "mongo" and not os.environ.get(TEST_MONGO_URI):
+        # Skipped, never failed. The reception laptop and a CI run with no
+        # secrets must still get a green SQLite result.
+        pytest.skip(f"{TEST_MONGO_URI} is not set")
     return request.param
 
 
+@pytest.fixture(scope="session")
+def mongo_database():
+    """
+    One database for the whole session, cleared between tests.
+
+    Not one per test: creating and dropping a database on Atlas costs a
+    round trip each way and there are hundreds of tests.
+    """
+    uri = os.environ.get(TEST_MONGO_URI)
+    if not uri:
+        # A generator fixture must yield even when it has nothing to give.
+        yield None
+        return
+    import uuid
+    name = f"{TEST_DB_PREFIX}{uuid.uuid4().hex[:12]}"
+    yield name
+    from pymongo import MongoClient
+    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    try:
+        client.drop_database(name)
+    finally:
+        client.close()
+
+
 @pytest.fixture
-def repo(backend, tmp_path, monkeypatch):
+def repo(backend, tmp_path, monkeypatch, mongo_database):
     """
     A repository over a throwaway database, chosen through config.
 
@@ -46,12 +80,22 @@ def repo(backend, tmp_path, monkeypatch):
     handlers call a bare `data.connect()`, so without it any test touching
     one would reach for the real academy.db.
     """
-    if backend != "sqlite":                  # pragma: no cover - until phase 4
-        pytest.skip(f"no {backend} backend yet")
     monkeypatch.setenv("MB_DB_BACKEND", backend)
-    monkeypatch.setenv("MB_SQLITE_PATH", str(tmp_path / "academy.db"))
-    db.init()
+    if backend == "sqlite":
+        monkeypatch.setenv("MB_SQLITE_PATH", str(tmp_path / "academy.db"))
+        db.init()
+    else:
+        assert mongo_database.startswith(TEST_DB_PREFIX), mongo_database
+        monkeypatch.setenv("MB_MONGO_URI", os.environ[TEST_MONGO_URI])
+        monkeypatch.setenv("MB_MONGO_DB", mongo_database)
+        monkeypatch.setenv("MB_MONGO_ALLOW_DROP", "1")
+
     r = data.connect()
+    if backend == "mongo":
+        # Each test starts from nothing, and ids start from 1 again --
+        # which is what lets the parity tests compare documents directly.
+        r.drop_all()
+    r.init_schema()
     yield r
     r.close()
 

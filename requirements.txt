@@ -8,3 +8,13 @@ pillow
 # seed.py only: reads the academy's roster and salary workbooks.
 # The server itself never touches Excel.
 openpyxl
+
+# Only imported when MB_DB_BACKEND=mongo, so a SQLite install that fails to
+# download this still starts -- which is the reception laptop's case.
+#
+# Pinned to a floor, unlike everything else here, because the backend needs
+# two things older releases lack: aggregation-pipeline updates (for
+# merge_client_facts) and start_transaction. dnspython is a hard dependency
+# of modern pymongo rather than the old [srv] extra, and mongodb+srv:// URIs
+# do not resolve without it.
+pymongo>=4.6
