@@ -1080,6 +1080,175 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
             **plan_state(conn, sub_id)}
 
 
+def issue_card(conn, client_id: int, class_id: int) -> dict:
+    """
+    Mint a card for one class, revoking that class's previous one.
+
+    Revoke-and-insert has to be one write. Between the two statements the
+    client holds no working card at all, and a crash there leaves them
+    holding a revoked one with nothing issued to replace it -- which reads at
+    reception as a system fault rather than as something reception can fix.
+
+    Credentials are revoked, never deleted, so the access log keeps pointing
+    at the credential that was actually used.
+
+    A card is proof of a plan in that class. Issuing a Flexibility card to
+    someone who only takes Ballet would create a credential that can never
+    check anyone in.
+
+    Returns what the card needs printing on it. Drawing the PNG stays in the
+    route: it is file I/O and a matter of presentation, not a business rule.
+    """
+    if not class_id:
+        return {"ok": False, "status": 400,
+                "error": "a card belongs to a class — say which"}
+    client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+    if not client:
+        return {"ok": False, "status": 404, "error": "no such client"}
+    klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+    if not klass:
+        return {"ok": False, "status": 404, "error": "no such class"}
+
+    sub = active_plan(conn, client_id, class_id)
+    if not sub:
+        return {"ok": False, "status": 400,
+                "error": f"{client['name_en']} has no active {klass['name']} plan — "
+                         f"add one before issuing this card"}
+
+    # `class_id IS ?` rather than `= ?`: a card issued before cards had a
+    # class carries NULL, and NULL = NULL is not true in SQL.
+    old = conn.execute(
+        "SELECT token FROM credentials WHERE client_id=? AND revoked_at IS NULL"
+        "   AND (class_id IS ? OR class_id = ?)",
+        (client_id, class_id, class_id)).fetchone()
+    conn.execute(
+        "UPDATE credentials SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL"
+        "   AND (class_id IS ? OR class_id = ?)",
+        (db.now(), client_id, class_id, class_id))
+
+    token = tokens.issue(client_id)
+    conn.execute(
+        "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
+        " VALUES (?,?,?,?,?)", (client_id, class_id, token, "card", db.now()))
+    conn.commit()
+
+    state = plan_state(conn, sub["id"])
+    return {"ok": True, "token": token,
+            "revoked": old["token"] if old else None,
+            "client_name": client["name_en"],
+            "class_name": klass["name"], "class_colour": klass["colour"],
+            "sessions_total": state["sessions_total"],
+            "expires_on": state["expires_on"]}
+
+
+def delete_plan(conn, sub_id: int) -> dict:
+    """
+    Remove a plan for good, along with every booking it paid for.
+
+    The one deletion in the app that takes attendance with it, because a
+    plan's bookings *are* its attendance: there is no version of removing the
+    plan that keeps the record. So the counts are taken before the delete and
+    returned, and the confirm dialog says what will go rather than what did.
+
+    No refresh_expiry() here, unlike the other bulk booking deletes: the plan
+    whose expiry would be recomputed is itself gone.
+    """
+    sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+    if not sub:
+        return {"ok": False, "status": 404, "error": "no such plan"}
+
+    counts = conn.execute(
+        "SELECT COUNT(*) n,"
+        "       SUM(CASE WHEN status='booked' THEN 1 ELSE 0 END) upcoming,"
+        "       SUM(CASE WHEN status!='booked' THEN 1 ELSE 0 END) attended"
+        "  FROM bookings WHERE subscription_id=?", (sub_id,)).fetchone()
+    conn.execute("DELETE FROM bookings WHERE subscription_id=?", (sub_id,))
+    conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+
+    # The card for this class now proves a plan that does not exist. Revoke it
+    # unless another plan in the same class still stands behind it.
+    revoked = 0
+    if sub["class_id"]:
+        still = conn.execute(
+            "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
+            (sub["client_id"], sub["class_id"])).fetchone()
+        if not still:
+            revoked = conn.execute(
+                "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
+                "   AND revoked_at IS NULL",
+                (db.now(), sub["client_id"], sub["class_id"])).rowcount
+    conn.commit()
+    return {"ok": True, "bookings": counts["n"] or 0,
+            "upcoming": counts["upcoming"] or 0,
+            "attended": counts["attended"] or 0, "cards_revoked": revoked}
+
+
+def delete_client(conn, client_id: int, hard: bool = False) -> dict:
+    """
+    Archive a client, or -- with `hard` -- remove them entirely.
+
+    Archiving is refused while they have sessions still ahead of them. Not
+    released, refused: a client with dates in the future is not finished with
+    the academy, and the older behaviour deleted those bookings without
+    saying so. The predicate is the same one get_client builds the profile's
+    `upcoming` list from, so the number in the error is the number on the
+    screen reception is looking at.
+
+    Unused slots with no dates on them do not block it. A lapsed plan holding
+    slots nobody will ever book must not make a client permanently
+    un-archivable.
+
+    The hard path is a manual cascade, ordered by hand to respect the foreign
+    keys, and is refused outright once any attendance exists -- losing the
+    record of who attended what is worse than a cluttered list.
+    """
+    # So a booking whose session has already finished counts as history
+    # rather than as something still upcoming in the guard below.
+    settle_past_sessions(conn)
+
+    client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+    if not client:
+        return {"ok": False, "status": 404, "error": "no such client"}
+
+    if hard:
+        visits = conn.execute(
+            "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND status!='booked'",
+            (client_id,)).fetchone()["n"]
+        if visits:
+            return {"ok": False, "status": 400,
+                    "error": f"{client['name_en']} has {visits} recorded sessions "
+                             f"— archive instead"}
+        for q in ("DELETE FROM bookings WHERE client_id=?",
+                  "DELETE FROM credentials WHERE client_id=?",
+                  "DELETE FROM subscriptions WHERE client_id=?",
+                  "DELETE FROM access_events WHERE client_id=?",
+                  "DELETE FROM clients WHERE id=?"):
+            conn.execute(q, (client_id,))
+        conn.commit()
+        return {"ok": True, "action": "delete"}
+
+    upcoming = conn.execute(
+        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id = b.session_id"
+        " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
+        (client_id, db.now())).fetchone()["n"]
+    if upcoming:
+        return {"ok": False, "status": 400,
+                "error": f"{client['name_en']} has {upcoming} upcoming session"
+                         f"{'' if upcoming == 1 else 's'} — remove or reassign "
+                         f"{'it' if upcoming == 1 else 'them'} before archiving"}
+
+    conn.execute("UPDATE clients SET active=0 WHERE id=?", (client_id,))
+    # Archiving revokes the card, so a restored client needs a new one issued.
+    conn.execute("UPDATE credentials SET revoked_at=? WHERE client_id=?"
+                 " AND revoked_at IS NULL", (db.now(), client_id))
+    # The guard above ignores bookings whose session was cancelled, so those
+    # are the ones still left to release here.
+    conn.execute("DELETE FROM bookings WHERE client_id=? AND status='booked'",
+                 (client_id,))
+    conn.commit()
+    return {"ok": True, "action": "archive"}
+
+
 def expected_today(conn) -> dict:
     settle_past_sessions(conn)
     start, end = day_bounds()

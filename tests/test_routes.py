@@ -292,3 +292,146 @@ def test_a_past_session_is_booked_straight_to_absent(client):
     state = access.plan_state(a.conn, r.json()["id"])
     assert state["absent"] == 2
     assert state["remaining"] == 0
+
+
+# ---------------------------------------------------------------- cards
+
+def test_issuing_a_card_revokes_only_that_classs_previous_one(client):
+    """A client taking two classes keeps the other card working."""
+    a = client.academy
+    r = client.post(f"/api/clients/{a.dual}/card", json={"class_id": a.ballet})
+    assert r.status_code == 200, r.text
+    assert r.json()["revoked"] == a.dual_ballet_card
+
+    live = {row["class_id"]: row["token"] for row in a.conn.execute(
+        "SELECT class_id, token FROM credentials WHERE client_id=? AND revoked_at IS NULL",
+        (a.dual,))}
+    assert live[a.flex] == a.dual_flex_card, "the flex card is untouched"
+    assert live[a.ballet] != a.dual_ballet_card, "the ballet card was replaced"
+
+
+def test_a_revoked_card_stops_scanning_and_the_new_one_works(client):
+    a = client.academy
+    new = client.post(f"/api/clients/{a.dual}/card",
+                      json={"class_id": a.ballet}).json()["token"]
+    assert access.verify(a.conn, a.dual_ballet_card)["granted"] is False
+    assert access.verify(a.conn, new)["granted"] is True
+
+
+def test_a_revoked_credential_is_kept_not_deleted(client):
+    """The access log must keep pointing at the credential actually used."""
+    a = client.academy
+    client.post(f"/api/clients/{a.dual}/card", json={"class_id": a.ballet})
+    row = a.conn.execute("SELECT revoked_at FROM credentials WHERE token=?",
+                         (a.dual_ballet_card,)).fetchone()
+    assert row is not None, "the old credential row still exists"
+    assert row["revoked_at"] is not None
+
+
+def test_a_card_for_a_class_with_no_plan_is_refused(client):
+    """It would mint a credential that can never check anyone in."""
+    a = client.academy
+    r = client.post(f"/api/clients/{a.solo_ballet}/card", json={"class_id": a.flex})
+    assert r.status_code == 400
+    assert "no active Evening Flexibility plan" in r.json()["detail"]
+
+
+def test_a_card_must_name_a_class(client):
+    r = client.post(f"/api/clients/{client.academy.dual}/card", json={})
+    assert r.status_code == 400
+    assert "belongs to a class" in r.json()["detail"]
+
+
+def test_the_card_url_is_stamped_so_a_reissue_is_not_cached(client):
+    a = client.academy
+    url = client.post(f"/api/clients/{a.dual}/card",
+                      json={"class_id": a.ballet}).json()["card_url"]
+    assert "?v=" in url, "one stable filename per client per class, so it needs a stamp"
+
+
+# ---------------------------------------------------------------- deleting
+
+def test_deleting_a_plan_takes_its_bookings_with_it(client):
+    a = client.academy
+    before = access.plan_state(a.conn, a.dual_ballet_plan)
+
+    r = client.delete(f"/api/plans/{a.dual_ballet_plan}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["bookings"] == before["assigned"]
+    assert body["attended"] == before["present"] + before["absent"]
+
+    left = a.conn.execute("SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
+                          (a.dual_ballet_plan,)).fetchone()["n"]
+    assert left == 0
+
+
+def test_deleting_a_plan_revokes_that_classs_card(client):
+    a = client.academy
+    assert client.delete(f"/api/plans/{a.dual_ballet_plan}").json()["cards_revoked"] == 1
+    assert access.verify(a.conn, a.dual_ballet_card)["granted"] is False
+    assert access.verify(a.conn, a.dual_flex_card) is not None, "the other class is unaffected"
+
+
+def test_deleting_an_unknown_plan_is_a_404(client):
+    assert client.delete("/api/plans/9999").status_code == 404
+
+
+def test_archiving_a_client_with_upcoming_sessions_is_refused(client):
+    """
+    Refused, not released. The older behaviour deleted those bookings without
+    saying so.
+    """
+    a = client.academy
+    r = client.delete(f"/api/clients/{a.dual}")
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert "upcoming session" in detail
+
+    upcoming = a.conn.execute(
+        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
+        " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
+        (a.dual, __import__("db").now())).fetchone()["n"]
+    assert str(upcoming) in detail, "the number named is the number on the profile"
+
+
+def test_archiving_a_client_with_nothing_ahead_revokes_their_card(client):
+    a = client.academy
+    r = client.delete(f"/api/clients/{a.lapsed}")
+    assert r.status_code == 200, r.text
+    assert r.json()["action"] == "archive"
+    assert a.conn.execute("SELECT active FROM clients WHERE id=?",
+                          (a.lapsed,)).fetchone()["active"] == 0
+
+
+def test_an_unused_slot_with_no_date_does_not_block_archiving(client):
+    """
+    A lapsed plan holding slots nobody will book must not make a client
+    permanently un-archivable.
+    """
+    a = client.academy
+    # Widen the lapsed plan so it owes two sessions nobody has picked dates
+    # for. Those are slots, not appointments, and must not block the archive.
+    a.conn.execute("UPDATE subscriptions SET sessions_total=sessions_total+2 WHERE id=?",
+                   (a.lapsed_plan,))
+    a.conn.commit()
+    assert access.plan_state(a.conn, a.lapsed_plan)["unassigned"] == 2
+
+    assert client.delete(f"/api/clients/{a.lapsed}").status_code == 200
+
+
+def test_hard_deleting_a_client_with_attendance_is_refused(client):
+    """Losing the record of who attended what is worse than a cluttered list."""
+    a = client.academy
+    r = client.delete(f"/api/clients/{a.dual}", params={"hard": "true"})
+    assert r.status_code == 400
+    assert "recorded sessions" in r.json()["detail"]
+
+
+def test_hard_deleting_a_client_with_no_history_removes_everything(client):
+    a = client.academy
+    r = client.delete(f"/api/clients/{a.planless}", params={"hard": "true"})
+    assert r.status_code == 200, r.text
+    assert r.json()["action"] == "delete"
+    assert a.conn.execute("SELECT COUNT(*) n FROM clients WHERE id=?",
+                          (a.planless,)).fetchone()["n"] == 0

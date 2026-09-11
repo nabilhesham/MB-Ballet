@@ -12,7 +12,6 @@ from pydantic import BaseModel
 import access
 import cards
 import db
-import tokens
 
 from .helpers import rows, one
 
@@ -273,97 +272,33 @@ def issue_card(cid: int, body: CardIn):
     """
     conn = db.connect()
     try:
-        c = one(conn.execute("SELECT * FROM clients WHERE id=?", (cid,)))
-        if not c:
-            raise HTTPException(404, "no such client")
-        if not body.class_id:
-            raise HTTPException(400, "a card belongs to a class — say which")
-        klass = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
-        if not klass:
-            raise HTTPException(404, "no such class")
-
-        # A card is proof of a plan in that class. Issuing a Flexibility card
-        # to someone who only takes Ballet would create a credential that can
-        # never check anyone in, and reads at reception as a system fault.
-        sub = access.active_plan(conn, cid, body.class_id)
-        if not sub:
-            raise HTTPException(
-                400, f"{c['name_en']} has no active {klass['name']} plan — "
-                     f"add one before issuing this card")
-
-        old = one(conn.execute(
-            "SELECT token FROM credentials WHERE client_id=? AND revoked_at IS NULL"
-            "   AND (class_id IS ? OR class_id = ?)",
-            (cid, body.class_id, body.class_id)))
-        conn.execute(
-            "UPDATE credentials SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL"
-            "   AND (class_id IS ? OR class_id = ?)",
-            (db.now(), cid, body.class_id, body.class_id))
-
-        token = tokens.issue(cid)
-        conn.execute(
-            "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
-            " VALUES (?,?,?,?,?)", (cid, body.class_id, token, "card", db.now()))
-        conn.commit()
-
-        state = access.plan_state(conn, sub["id"])
-        path = cards.build_card(cid, c["name_en"], token, state["sessions_total"],
-                                state["expires_on"],
-                                class_name=klass["name"], colour=klass["colour"])
-        return {"token": token, "card_url": f"/{path}?v={db.now()}",
-                "revoked": old["token"] if old else None}
+        r = access.issue_card(conn, cid, body.class_id)
+        if not r["ok"]:
+            raise HTTPException(r.get("status", 400), r["error"])
+        # Drawing the PNG is file I/O and presentation, so it stays here
+        # rather than in access.py.
+        path = cards.build_card(cid, r["client_name"], r["token"],
+                                r["sessions_total"], r["expires_on"],
+                                class_name=r["class_name"],
+                                colour=r["class_colour"])
+        # Stamped with the issue time: card_path() gives one stable filename
+        # per client per class, so a reissue overwrites a URL the browser has
+        # already cached and the old picture keeps being shown.
+        return {"token": r["token"], "card_url": f"/{path}?v={db.now()}",
+                "revoked": r["revoked"]}
     finally:
         conn.close()
 
 
 @router.delete("/api/clients/{cid}")
 def delete_client(cid: int, hard: bool = False):
+    """Archive, or remove entirely. The rules live in access.delete_client()."""
     conn = db.connect()
     try:
-        # So a booking whose session has already finished counts as history
-        # rather than as something still upcoming in the guard below.
-        access.settle_past_sessions(conn)
-        c = one(conn.execute("SELECT * FROM clients WHERE id=?", (cid,)))
-        if not c:
-            raise HTTPException(404, "no such client")
-        visits = conn.execute(
-            "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND status!='booked'",
-            (cid,)).fetchone()["n"]
-        if hard and visits:
-            raise HTTPException(400, f"{c['name_en']} has {visits} recorded sessions — archive instead")
-        if hard:
-            for q in ("DELETE FROM bookings WHERE client_id=?",
-                      "DELETE FROM credentials WHERE client_id=?",
-                      "DELETE FROM subscriptions WHERE client_id=?",
-                      "DELETE FROM access_events WHERE client_id=?",
-                      "DELETE FROM clients WHERE id=?"):
-                conn.execute(q, (cid,))
-            action = "delete"
-        else:
-            # A client with dates still ahead of them is not finished with the
-            # academy, and archiving used to delete those bookings without
-            # saying so. Refuse instead, and let reception decide what to do
-            # with the sessions first. The predicate is the same one
-            # get_client builds its `upcoming` list from, so the number named
-            # here is the number on the profile they are looking at.
-            upcoming = conn.execute(
-                "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id = b.session_id"
-                " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
-                (cid, db.now())).fetchone()["n"]
-            if upcoming:
-                raise HTTPException(
-                    400, f"{c['name_en']} has {upcoming} upcoming session"
-                         f"{'' if upcoming == 1 else 's'} — remove or reassign "
-                         f"{'it' if upcoming == 1 else 'them'} before archiving")
-            conn.execute("UPDATE clients SET active=0 WHERE id=?", (cid,))
-            conn.execute("UPDATE credentials SET revoked_at=? WHERE client_id=?"
-                         " AND revoked_at IS NULL", (db.now(), cid))
-            # The guard above ignores bookings whose session was cancelled, so
-            # those are the ones still left to release here.
-            conn.execute("DELETE FROM bookings WHERE client_id=? AND status='booked'", (cid,))
-            action = "archive"
-        conn.commit()
-        return {"ok": True, "action": action}
+        r = access.delete_client(conn, cid, hard=hard)
+        if not r["ok"]:
+            raise HTTPException(r.get("status", 400), r["error"])
+        return r
     finally:
         conn.close()
 

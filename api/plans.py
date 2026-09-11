@@ -9,7 +9,7 @@ from pydantic import BaseModel
 import access
 import db
 
-from .helpers import rows, one
+from .helpers import rows
 
 router = APIRouter()
 
@@ -98,32 +98,9 @@ def delete_plan(pid: int):
     """
     conn = db.connect()
     try:
-        sub = one(conn.execute("SELECT * FROM subscriptions WHERE id=?", (pid,)))
-        if not sub:
-            raise HTTPException(404, "no such plan")
-        counts = conn.execute(
-            "SELECT COUNT(*) n,"
-            "       SUM(CASE WHEN status='booked' THEN 1 ELSE 0 END) upcoming,"
-            "       SUM(CASE WHEN status!='booked' THEN 1 ELSE 0 END) attended"
-            "  FROM bookings WHERE subscription_id=?", (pid,)).fetchone()
-        conn.execute("DELETE FROM bookings WHERE subscription_id=?", (pid,))
-        conn.execute("DELETE FROM subscriptions WHERE id=?", (pid,))
-        # The card for this class proves a plan that no longer exists. Revoke
-        # it unless another plan in the same class is still live — credentials
-        # are revoked rather than deleted, so the log keeps pointing at it.
-        revoked = 0
-        if sub["class_id"]:
-            still = conn.execute(
-                "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
-                (sub["client_id"], sub["class_id"])).fetchone()
-            if not still:
-                revoked = conn.execute(
-                    "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
-                    "   AND revoked_at IS NULL",
-                    (db.now(), sub["client_id"], sub["class_id"])).rowcount
-        conn.commit()
-        return {"ok": True, "bookings": counts["n"] or 0,
-                "upcoming": counts["upcoming"] or 0,
-                "attended": counts["attended"] or 0, "cards_revoked": revoked}
+        r = access.delete_plan(conn, pid)
+        if not r["ok"]:
+            raise HTTPException(r.get("status", 400), r["error"])
+        return r
     finally:
         conn.close()
