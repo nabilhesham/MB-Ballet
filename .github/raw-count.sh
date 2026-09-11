@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 count=$(grep -ho '\.raw(' access.py api/*.py | wc -l | tr -d ' ')
-max=${1:-129}
+max=${1:-115}
 echo "repo.raw() call sites: $count (ceiling $max)"
 if [ "$count" -gt "$max" ]; then
   echo "FAIL: the escape hatch grew. A new query belongs in a port method." >&2

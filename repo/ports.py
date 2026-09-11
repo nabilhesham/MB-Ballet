@@ -184,6 +184,25 @@ class PlansPort(ABC):
         """
 
 
+class InstructorsPort(ABC):
+
+    @abstractmethod
+    def taught_totals_bulk(self, instructor_ids: list, start: int = None,
+                           end: int = None, status: str = "completed") -> dict:
+        """
+        `{instructor_id: {"sessions", "hours"}}` for sessions of that status,
+        optionally inside a half-open time range. One round trip.
+        """
+
+    @abstractmethod
+    def instructor_sessions(self, instructor_id: int, start: int, end: int,
+                            limit: int) -> list:
+        """
+        The instructor's sessions in a range, newest first, each with its
+        class named and how many people attended.
+        """
+
+
 class EventsPort(ABC):
 
     @abstractmethod

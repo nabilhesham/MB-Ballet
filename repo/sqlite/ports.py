@@ -10,7 +10,7 @@ tests check directly.
 import db
 
 from ..ports import (BookingsPort, ClassesPort, ClientsPort, EventsPort,
-                     PlansPort, SessionsPort)
+                     InstructorsPort, PlansPort, SessionsPort)
 
 
 def _marks(values):
@@ -256,6 +256,43 @@ class SqlitePlans(PlansPort):
             # soonest to expire -- the one needing attention.
             out.setdefault(r["client_id"], dict(r))
         return out
+
+
+class SqliteInstructors(InstructorsPort):
+
+    def taught_totals_bulk(self, instructor_ids, start=None, end=None,
+                           status="completed"):
+        out = {i: {"sessions": 0, "hours": 0.0} for i in instructor_ids}
+        if not instructor_ids:
+            return out
+        sql = ("SELECT instructor_id AS iid, COUNT(*) n,"
+               "       COALESCE(SUM(duration_hours),0) h FROM sessions"
+               f" WHERE instructor_id IN ({_marks(instructor_ids)})")
+        params = list(instructor_ids)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if start is not None:
+            sql += " AND starts_at >= ?"
+            params.append(start)
+        if end is not None:
+            sql += " AND starts_at < ?"
+            params.append(end)
+        sql += " GROUP BY instructor_id"
+        for r in self.conn.execute(sql, params).fetchall():
+            out[r["iid"]] = {"sessions": r["n"], "hours": round(r["h"] or 0, 2)}
+        return out
+
+    def instructor_sessions(self, instructor_id, start, end, limit):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT s.id, s.starts_at, s.duration_hours, s.status,"
+            "       c.name AS class_name, c.colour,"
+            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
+            "     AND b.status='present') AS attended"
+            "  FROM sessions s JOIN classes c ON c.id = s.class_id"
+            " WHERE s.instructor_id = ? AND s.starts_at >= ? AND s.starts_at < ?"
+            " ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
+            (instructor_id, start, end, limit)).fetchall()]
 
 
 class SqliteEvents(EventsPort):

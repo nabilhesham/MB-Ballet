@@ -37,7 +37,9 @@ hiddenimports = [
     # local modules, imported normally but listed so a rename cannot break
     # the build silently
     "server", "access", "cards", "config", "db", "tokens",
-    "api", "api.helpers", "api.clients", "api.plans", "api.classes",
+    "repo", "repo.base", "repo.ports", "repo.errors", "repo.filters",
+    "repo.sqlite", "repo.sqlite.filters", "repo.sqlite.ports",
+    "api", "api.clients", "api.plans", "api.classes",
     "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
 ]
 

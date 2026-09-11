@@ -13,7 +13,6 @@ import access
 import db
 import repo as data
 
-from .helpers import rows, one
 
 router = APIRouter()
 
@@ -47,15 +46,14 @@ def list_instructors(status: str = "active"):
     try:
         access.settle_past_sessions(repo)
         active = 0 if status == "archived" else 1
-        out = rows(repo.raw(
-            "SELECT * FROM instructors WHERE active=? ORDER BY name", (active,)))
+        out = repo.find("instructors", {"active": active}, sort=[("name", 1)])
+        # Two queries for the list rather than one per instructor.
+        totals = repo.taught_totals_bulk([i["id"] for i in out])
         for i in out:
-            t = repo.raw(
-                "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
-                " WHERE instructor_id=? AND status='completed'", (i["id"],)).fetchone()
-            i["sessions_taught"] = t["n"]
-            i["hours_taught"] = round(t["h"], 2)
-            i["earned"] = round(t["h"] * (i["hourly_rate"] or 0), 2)
+            t = totals[i["id"]]
+            i["sessions_taught"] = t["sessions"]
+            i["hours_taught"] = t["hours"]
+            i["earned"] = round(t["hours"] * (i["hourly_rate"] or 0), 2)
         return out
     finally:
         repo.close()
@@ -65,11 +63,9 @@ def list_instructors(status: str = "active"):
 def create_instructor(body: InstructorIn):
     repo = data.connect()
     try:
-        cur = repo.raw(
-            "INSERT INTO instructors (name, phone, specialty, hourly_rate)"
-            " VALUES (?,?,?,?)",
-            (body.name, body.phone, body.specialty, body.hourly_rate))
-        return {"id": cur.lastrowid}
+        return {"id": repo.insert("instructors", {
+            "name": body.name, "phone": body.phone,
+            "specialty": body.specialty, "hourly_rate": body.hourly_rate})}
     finally:
         repo.close()
 
@@ -78,10 +74,9 @@ def create_instructor(body: InstructorIn):
 def update_instructor(iid: int, body: InstructorIn):
     repo = data.connect()
     try:
-        repo.raw(
-            "UPDATE instructors SET name=?, phone=?, specialty=?, hourly_rate=?"
-            " WHERE id=?",
-            (body.name, body.phone, body.specialty, body.hourly_rate, iid))
+        repo.update("instructors", iid, {
+            "name": body.name, "phone": body.phone,
+            "specialty": body.specialty, "hourly_rate": body.hourly_rate})
         return {"ok": True}
     finally:
         repo.close()
@@ -100,7 +95,7 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        i = one(repo.raw("SELECT * FROM instructors WHERE id=?", (iid,)))
+        i = repo.get("instructors", iid)
         if not i:
             raise HTTPException(404, "no such instructor")
 
@@ -110,27 +105,15 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
             raise HTTPException(400, "the end of the range must not be before its start")
         start_ts, end_ts = access.date_range_ts(period_from, period_to)
 
-        i["sessions"] = rows(repo.raw(
-            "SELECT s.id, s.starts_at, s.duration_hours, s.status,"
-            "       c.name AS class_name, c.colour,"
-            "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id"
-            "     AND b.status='present') AS attended"
-            "  FROM sessions s JOIN classes c ON c.id = s.class_id"
-            " WHERE s.instructor_id = ? AND s.starts_at >= ? AND s.starts_at < ?"
-            " ORDER BY s.starts_at DESC LIMIT 200", (iid, start_ts, end_ts)))
+        i["sessions"] = repo.instructor_sessions(iid, start_ts, end_ts, 200)
 
-        t = repo.raw(
-            "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
-            " WHERE instructor_id=? AND status='completed'"
-            "   AND starts_at >= ? AND starts_at < ?", (iid, start_ts, end_ts)).fetchone()
+        t = repo.taught_totals_bulk([iid], start_ts, end_ts)[iid]
         # "Upcoming" is bounded by the picked range too, not just by now: a
         # past range has none (nothing in it is still ahead), and a future
         # range only counts what's still ahead within that window.
         up_start = max(start_ts, db.now())
-        up = repo.raw(
-            "SELECT COUNT(*) n, COALESCE(SUM(duration_hours),0) h FROM sessions"
-            " WHERE instructor_id=? AND status='scheduled' AND starts_at >= ? AND starts_at < ?",
-            (iid, up_start, end_ts)).fetchone()
+        up = repo.taught_totals_bulk([iid], up_start, end_ts,
+                                     status="scheduled")[iid]
         # Hours the salary sheet recorded, which is what payroll is actually
         # paid on. Sessions taught is the app's own count and the two are
         # deliberately shown side by side: a gap between them is either a
@@ -165,7 +148,7 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
 def adjust_hours(iid: int, body: HoursAdjustIn):
     repo = data.connect()
     try:
-        if not repo.raw("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
+        if not repo.exists("instructors", {"id": iid}):
             raise HTTPException(404, "no such instructor")
         if body.new_total < 0:
             raise HTTPException(400, "hours cannot be negative")
@@ -191,7 +174,7 @@ async def upload_photo(iid: int, file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
     repo = data.connect()
     try:
-        repo.raw("UPDATE instructors SET photo_path=? WHERE id=?", ("/" + path, iid))
+        repo.update("instructors", iid, {"photo_path": "/" + path})
         return {"photo_path": "/" + path}
     finally:
         repo.close()
@@ -201,9 +184,8 @@ async def upload_photo(iid: int, file: UploadFile = File(...)):
 def unarchive_instructor(iid: int):
     repo = data.connect()
     try:
-        if not repo.raw("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
+        if not repo.update("instructors", iid, {"active": 1}):
             raise HTTPException(404, "no such instructor")
-        repo.raw("UPDATE instructors SET active=1 WHERE id=?", (iid,))
         return {"ok": True}
     finally:
         repo.close()
@@ -216,13 +198,13 @@ def archive_instructor(iid: int):
         # The guard and the archive under one lock, so a session cannot be
         # booked into the gap between deciding there are none and archiving.
         with repo.begin():
-            n = repo.raw(
-                "SELECT COUNT(*) n FROM sessions WHERE instructor_id=? AND status='scheduled'"
-                "   AND starts_at >= ?", (iid, db.now())).fetchone()["n"]
+            n = repo.count("sessions", {
+                "instructor_id": iid, "status": "scheduled",
+                "starts_at": {"gte": db.now()}})
             if n:
                 raise HTTPException(
                     400, f"Still assigned to {n} upcoming session(s) — reassign first")
-            repo.raw("UPDATE instructors SET active=0 WHERE id=?", (iid,))
+            repo.update("instructors", iid, {"active": 0})
         return {"ok": True}
     finally:
         repo.close()

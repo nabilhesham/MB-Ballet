@@ -179,7 +179,7 @@ server.py         FastAPI app, paths, startup, cache policy, static mounts.
                   Thin — routes
                   live in api/, business rules live in access.py.
 api/              One router module per resource, wired into server.py with
-                  ordinary static imports (helpers.py, clients.py, plans.py,
+                  ordinary static imports (clients.py, plans.py,
                   classes.py, instructors.py, sessions.py, access_routes.py,
                   dashboard.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
