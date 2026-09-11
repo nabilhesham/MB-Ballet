@@ -58,7 +58,6 @@ def create_class(body: ClassIn):
             " instructor_id) VALUES (?,?,?,?,?,?)",
             (body.name, body.description, body.colour, body.duration_hours, body.level,
              body.instructor_id))
-        conn.commit()
         return {"id": cur.lastrowid}
     finally:
         conn.close()
@@ -68,21 +67,24 @@ def create_class(body: ClassIn):
 def update_class(clid: int, body: ClassIn):
     conn = db.connect()
     try:
-        conn.execute(
-            "UPDATE classes SET name=?, description=?, colour=?,"
-            " duration_hours=?, level=?, instructor_id=? WHERE id=?",
-            (body.name, body.description, body.colour,
-             body.duration_hours, body.level, body.instructor_id, clid))
-        # The class's instructor is a default that cascades: every session
-        # that hasn't happened yet is overwritten to match, whatever
-        # instructor it had before — not just the ones with none. Past and
-        # cancelled sessions are untouched; the "upcoming" predicate here is
-        # the same one list_classes' own `upcoming` count uses.
-        cascaded = conn.execute(
-            "UPDATE sessions SET instructor_id=? WHERE class_id=?"
-            " AND status='scheduled' AND starts_at > ?",
-            (body.instructor_id, clid, db.now())).rowcount
-        conn.commit()
+        # The class and its cascade are one change: a run that set the
+        # default and then failed to apply it would leave the sessions
+        # disagreeing with the class they belong to.
+        with db.tx(conn):
+            conn.execute(
+                "UPDATE classes SET name=?, description=?, colour=?,"
+                " duration_hours=?, level=?, instructor_id=? WHERE id=?",
+                (body.name, body.description, body.colour,
+                 body.duration_hours, body.level, body.instructor_id, clid))
+            # The class's instructor is a default that cascades: every session
+            # that hasn't happened yet is overwritten to match, whatever
+            # instructor it had before — not just the ones with none. Past and
+            # cancelled sessions are untouched; the "upcoming" predicate here is
+            # the same one list_classes' own `upcoming` count uses.
+            cascaded = conn.execute(
+                "UPDATE sessions SET instructor_id=? WHERE class_id=?"
+                " AND status='scheduled' AND starts_at > ?",
+                (body.instructor_id, clid, db.now())).rowcount
         return {"ok": True, "cascaded_sessions": cascaded}
     finally:
         conn.close()
@@ -135,7 +137,6 @@ def unarchive_class(clid: int):
         if not conn.execute("SELECT 1 FROM classes WHERE id=?", (clid,)).fetchone():
             raise HTTPException(404, "no such class")
         conn.execute("UPDATE classes SET active=1 WHERE id=?", (clid,))
-        conn.commit()
         return {"ok": True}
     finally:
         conn.close()

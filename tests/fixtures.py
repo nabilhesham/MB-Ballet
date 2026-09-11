@@ -121,136 +121,136 @@ def build_academy(conn) -> SimpleNamespace:
     Populate an initialised, empty database. Returns the ids by name so a
     test can say `a.dual` rather than re-querying for the subject it wants.
     """
-    today = date.today()
-    a = SimpleNamespace(conn=conn)
+    with db.tx(conn):
+        today = date.today()
+        a = SimpleNamespace(conn=conn)
 
-    # -------------------------------------------------- instructors
-    # Both carry a rate: pay is hours x rate at read time, so a zero rate
-    # makes the payroll assertions vacuous.
-    a.ana = _ins(conn, "instructors", name="Ana Ferrer", phone="01000000001",
-                 specialty="Ballet", hourly_rate=120.0, active=1)
-    a.bea = _ins(conn, "instructors", name="Bea Nasr", phone="01000000002",
-                 specialty="Flexibility", hourly_rate=100.0, active=1)
+        # -------------------------------------------------- instructors
+        # Both carry a rate: pay is hours x rate at read time, so a zero rate
+        # makes the payroll assertions vacuous.
+        a.ana = _ins(conn, "instructors", name="Ana Ferrer", phone="01000000001",
+                     specialty="Ballet", hourly_rate=120.0, active=1)
+        a.bea = _ins(conn, "instructors", name="Bea Nasr", phone="01000000002",
+                     specialty="Flexibility", hourly_rate=100.0, active=1)
 
-    # -------------------------------------------------- classes
-    a.ballet = _ins(conn, "classes", name="Ballet Level 8",
-                    description="Graded ballet", colour="#87438E",
-                    duration_hours=1.5, level="level 8",
-                    instructor_id=a.ana, active=1)
-    a.flex = _ins(conn, "classes", name="Evening Flexibility",
-                  description="Conditioning", colour="#EAAECA",
-                  duration_hours=1.0, level="primary",
-                  instructor_id=a.bea, active=1)
+        # -------------------------------------------------- classes
+        a.ballet = _ins(conn, "classes", name="Ballet Level 8",
+                        description="Graded ballet", colour="#87438E",
+                        duration_hours=1.5, level="level 8",
+                        instructor_id=a.ana, active=1)
+        a.flex = _ins(conn, "classes", name="Evening Flexibility",
+                      description="Conditioning", colour="#EAAECA",
+                      duration_hours=1.0, level="primary",
+                      instructor_id=a.bea, active=1)
 
-    # -------------------------------------------------- sessions
-    a.ballet_sessions = []
-    for i in range(BALLET_SESSIONS):
-        d = today - timedelta(days=BALLET_START_DAYS_AGO) + timedelta(days=3 * i)
-        starts = _ts(d, 18)
-        a.ballet_sessions.append(
-            add_session(conn, a.ballet, a.ana, starts, 1.5))
+        # -------------------------------------------------- sessions
+        a.ballet_sessions = []
+        for i in range(BALLET_SESSIONS):
+            d = today - timedelta(days=BALLET_START_DAYS_AGO) + timedelta(days=3 * i)
+            starts = _ts(d, 18)
+            a.ballet_sessions.append(
+                add_session(conn, a.ballet, a.ana, starts, 1.5))
 
-    a.flex_sessions = []
-    for i in range(FLEX_SESSIONS):
-        d = today - timedelta(days=FLEX_START_DAYS_AGO) + timedelta(days=7 * i)
-        starts = _ts(d, 17)
-        a.flex_sessions.append(
-            add_session(conn, a.flex, a.bea, starts, 1.0))
+        a.flex_sessions = []
+        for i in range(FLEX_SESSIONS):
+            d = today - timedelta(days=FLEX_START_DAYS_AGO) + timedelta(days=7 * i)
+            starts = _ts(d, 17)
+            a.flex_sessions.append(
+                add_session(conn, a.flex, a.bea, starts, 1.0))
 
-    # Neither recurring series may land on today, or a scan matches whichever
-    # of two sessions is nearer the clock and the suite passes or fails by
-    # the hour it runs at. Checked rather than trusted: the offsets above are
-    # only correct as long as nobody edits the intervals.
-    day = access.day_bounds()
-    for label, series in (("ballet", a.ballet_sessions), ("flex", a.flex_sessions)):
-        clash = [s for s in series if day[0] <= conn.execute(
-            "SELECT starts_at FROM sessions WHERE id=?", (s,)
-        ).fetchone()["starts_at"] < day[1]]
-        assert not clash, (
-            f"the {label} series put {len(clash)} session(s) on today; adjust "
-            f"{label.upper()}_START_DAYS_AGO so the interval never divides it")
+        # Neither recurring series may land on today, or a scan matches whichever
+        # of two sessions is nearer the clock and the suite passes or fails by
+        # the hour it runs at. Checked rather than trusted: the offsets above are
+        # only correct as long as nobody edits the intervals.
+        day = access.day_bounds()
+        for label, series in (("ballet", a.ballet_sessions), ("flex", a.flex_sessions)):
+            clash = [s for s in series if day[0] <= conn.execute(
+                "SELECT starts_at FROM sessions WHERE id=?", (s,)
+            ).fetchone()["starts_at"] < day[1]]
+            assert not clash, (
+                f"the {label} series put {len(clash)} session(s) on today; adjust "
+                f"{label.upper()}_START_DAYS_AGO so the interval never divides it")
 
-    # One ballet session later today, for the arriving-early path. Placed a
-    # few hours out but kept inside today, since "one check-in per day" is
-    # scoped to the session's own calendar day.
-    end_of_day = _ts(today, 23, 50)
-    a.today_ballet = add_session(conn, a.ballet, a.ana,
-                                 min(db.now() + 3 * 3600, end_of_day), 1.5,
-                                 status="scheduled")
+        # One ballet session later today, for the arriving-early path. Placed a
+        # few hours out but kept inside today, since "one check-in per day" is
+        # scoped to the session's own calendar day.
+        end_of_day = _ts(today, 23, 50)
+        a.today_ballet = add_session(conn, a.ballet, a.ana,
+                                     min(db.now() + 3 * 3600, end_of_day), 1.5,
+                                     status="scheduled")
 
-    # -------------------------------------------------- clients
-    def client(name, phone, **extra):
-        return _ins(conn, "clients", name_en=name, phone=phone,
-                    joined_on=extra.pop("joined_on", today.isoformat()),
-                    created_at=db.now(), active=1, **extra)
+        # -------------------------------------------------- clients
+        def client(name, phone, **extra):
+            return _ins(conn, "clients", name_en=name, phone=phone,
+                        joined_on=extra.pop("joined_on", today.isoformat()),
+                        created_at=db.now(), active=1, **extra)
 
-    # Takes both classes — the subject the one-card-per-class rule is for.
-    a.dual = client("Dana Halim", "01111111111", age=12.5, school="Manor House")
-    a.solo_ballet = client("Farah Adel", "01111111112", age=9.0)
-    a.solo_flex = client("Hana Sabry", "01111111113", age=4.8)
-    a.lapsed = client("Injy Tarek", "01111111114", age=15.0,
-                      joined_on=(today - timedelta(days=120)).isoformat())
-    a.planless = client("Jana Wael", "01111111115", age=7.0)
-    a.archived = client("Karim Nour", "01111111116", age=11.0)
-    conn.execute("UPDATE clients SET active=0 WHERE id=?", (a.archived,))
+        # Takes both classes — the subject the one-card-per-class rule is for.
+        a.dual = client("Dana Halim", "01111111111", age=12.5, school="Manor House")
+        a.solo_ballet = client("Farah Adel", "01111111112", age=9.0)
+        a.solo_flex = client("Hana Sabry", "01111111113", age=4.8)
+        a.lapsed = client("Injy Tarek", "01111111114", age=15.0,
+                          joined_on=(today - timedelta(days=120)).isoformat())
+        a.planless = client("Jana Wael", "01111111115", age=7.0)
+        a.archived = client("Karim Nour", "01111111116", age=11.0)
+        conn.execute("UPDATE clients SET active=0 WHERE id=?", (a.archived,))
 
-    # -------------------------------------------------- plans
-    def split(session_ids):
-        now = db.now()
-        past, future = [], []
-        for s in session_ids:
-            row = conn.execute("SELECT starts_at FROM sessions WHERE id=?",
-                               (s,)).fetchone()
-            (past if row["starts_at"] < now else future).append(s)
-        return past, future
+        # -------------------------------------------------- plans
+        def split(session_ids):
+            now = db.now()
+            past, future = [], []
+            for s in session_ids:
+                row = conn.execute("SELECT starts_at FROM sessions WHERE id=?",
+                                   (s,)).fetchone()
+                (past if row["starts_at"] < now else future).append(s)
+            return past, future
 
-    past_b, future_b = split(a.ballet_sessions)
-    past_f, future_f = split(a.flex_sessions)
+        past_b, future_b = split(a.ballet_sessions)
+        past_f, future_f = split(a.flex_sessions)
 
-    # 12 sessions: at or above access.FREEZE_MIN_SESSIONS, so freezable.
-    # Deliberately one slot short of fully assigned, so `unassigned` is
-    # non-zero and the attention list has something to find.
-    a.dual_ballet_plan = _plan(conn, a.dual, a.ballet, "12 sessions", 12,
-                               price=4100.0, paid_on=today.isoformat())
-    _fill(conn, a.dual, a.dual_ballet_plan,
-          past_b[-7:] + [a.today_ballet] + future_b[:3])
+        # 12 sessions: at or above access.FREEZE_MIN_SESSIONS, so freezable.
+        # Deliberately one slot short of fully assigned, so `unassigned` is
+        # non-zero and the attention list has something to find.
+        a.dual_ballet_plan = _plan(conn, a.dual, a.ballet, "12 sessions", 12,
+                                   price=4100.0, paid_on=today.isoformat())
+        _fill(conn, a.dual, a.dual_ballet_plan,
+              past_b[-7:] + [a.today_ballet] + future_b[:3])
 
-    # 8 sessions: below the freeze minimum, so can_freeze() must refuse it.
-    # No flex session runs today, which is what makes the flex card's refusal
-    # in test_the_card_decides_which_class a real assertion rather than an
-    # accident of the hour the suite happens to run at.
-    a.dual_flex_plan = _plan(conn, a.dual, a.flex, "8 sessions", 8, price=2000.0)
-    _fill(conn, a.dual, a.dual_flex_plan, (past_f + future_f)[:8])
+        # 8 sessions: below the freeze minimum, so can_freeze() must refuse it.
+        # No flex session runs today, which is what makes the flex card's refusal
+        # in test_the_card_decides_which_class a real assertion rather than an
+        # accident of the hour the suite happens to run at.
+        a.dual_flex_plan = _plan(conn, a.dual, a.flex, "8 sessions", 8, price=2000.0)
+        _fill(conn, a.dual, a.dual_flex_plan, (past_f + future_f)[:8])
 
-    a.solo_ballet_plan = _plan(conn, a.solo_ballet, a.ballet, "12 sessions", 12,
-                               price=4100.0)
-    _fill(conn, a.solo_ballet, a.solo_ballet_plan, (past_b + future_b)[:12])
+        a.solo_ballet_plan = _plan(conn, a.solo_ballet, a.ballet, "12 sessions", 12,
+                                   price=4100.0)
+        _fill(conn, a.solo_ballet, a.solo_ballet_plan, (past_b + future_b)[:12])
 
-    # Unpriced on purpose: the ballet roster writes "yes", not an amount, and
-    # a plan nobody wrote a price for must not report as zero revenue.
-    a.solo_flex_plan = _plan(conn, a.solo_flex, a.flex, "4 sessions", 4,
-                             price=None)
-    _fill(conn, a.solo_flex, a.solo_flex_plan, future_f[:4])
+        # Unpriced on purpose: the ballet roster writes "yes", not an amount, and
+        # a plan nobody wrote a price for must not report as zero revenue.
+        a.solo_flex_plan = _plan(conn, a.solo_flex, a.flex, "4 sessions", 4,
+                                 price=None)
+        _fill(conn, a.solo_flex, a.solo_flex_plan, future_f[:4])
 
-    a.lapsed_plan = _plan(conn, a.lapsed, a.ballet, "4 sessions", 4, price=900.0,
-                          starts_on=today - timedelta(days=120))
-    _fill(conn, a.lapsed, a.lapsed_plan, past_b[:4])
+        a.lapsed_plan = _plan(conn, a.lapsed, a.ballet, "4 sessions", 4, price=900.0,
+                              starts_on=today - timedelta(days=120))
+        _fill(conn, a.lapsed, a.lapsed_plan, past_b[:4])
 
-    # -------------------------------------------------- cards
-    # One per class, which is what makes "the card decides the class" mean
-    # anything for the dual client.
-    a.dual_ballet_card = _card(conn, a.dual, a.ballet)
-    a.dual_flex_card = _card(conn, a.dual, a.flex)
-    a.solo_ballet_card = _card(conn, a.solo_ballet, a.ballet)
+        # -------------------------------------------------- cards
+        # One per class, which is what makes "the card decides the class" mean
+        # anything for the dual client.
+        a.dual_ballet_card = _card(conn, a.dual, a.ballet)
+        a.dual_flex_card = _card(conn, a.dual, a.flex)
+        a.solo_ballet_card = _card(conn, a.solo_ballet, a.ballet)
 
-    # -------------------------------------------------- payroll
-    # The salary sheet's half of the picture: one row per instructor per day.
-    for i in range(10):
-        d = (today - timedelta(days=i + 1)).isoformat()
-        _ins(conn, "instructor_hours", instructor_id=a.ana, work_date=d,
-             hours=4.0, source="salary sheet", created_at=db.now())
-        _ins(conn, "instructor_hours", instructor_id=a.bea, work_date=d,
-             hours=3.0, source="salary sheet", created_at=db.now())
+        # -------------------------------------------------- payroll
+        # The salary sheet's half of the picture: one row per instructor per day.
+        for i in range(10):
+            d = (today - timedelta(days=i + 1)).isoformat()
+            _ins(conn, "instructor_hours", instructor_id=a.ana, work_date=d,
+                 hours=4.0, source="salary sheet", created_at=db.now())
+            _ins(conn, "instructor_hours", instructor_id=a.bea, work_date=d,
+                 hours=3.0, source="salary sheet", created_at=db.now())
 
-    conn.commit()
-    return a
+        return a

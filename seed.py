@@ -81,55 +81,55 @@ def seed_instructors(conn, payrolls, rosters, warn):
     is written down. Anyone named on a roster block but absent from payroll is
     still created — they teach here, their rate just is not known yet.
     """
-    ids = {}
-    for p in payrolls:
-        for pay in p.instructors:
-            key = pay.name.lower()
-            if key in ids:
-                continue
-            cur = conn.execute(
-                "INSERT INTO instructors (name, hourly_rate, specialty)"
-                " VALUES (?,?,?)", (pay.name, pay.hourly_rate, None))
-            ids[key] = cur.lastrowid
-
-    def match(name):
-        """
-        The salary sheet writes "karma dorra"; the roster block heading says
-        "With Captain Karma". Reception uses first names, so a unique first
-        name is enough to be the same person — an ambiguous one is not.
-        """
-        low = name.lower().strip()
-        if low in ids:
-            return ids[low]
-        first = low.split()[0]
-        hits = [k for k in ids if k.split()[0] == first]
-        return ids[hits[0]] if len(hits) == 1 else None
-
-    for r in rosters:
-        for g in r.groups:
-            if not g.instructor:
-                continue
-            iid = match(g.instructor)
-            if iid is None:
+    with db.tx(conn):
+        ids = {}
+        for p in payrolls:
+            for pay in p.instructors:
+                key = pay.name.lower()
+                if key in ids:
+                    continue
                 cur = conn.execute(
-                    "INSERT INTO instructors (name, hourly_rate) VALUES (?,?)",
-                    (g.instructor, 0))
-                iid = ids[g.instructor.lower()] = cur.lastrowid
-                warn(f"{g.instructor}: teaches {g.class_name} but is not on the "
-                     f"salary sheet — created with no hourly rate")
-            g.instructor_id = iid
+                    "INSERT INTO instructors (name, hourly_rate, specialty)"
+                    " VALUES (?,?,?)", (pay.name, pay.hourly_rate, None))
+                ids[key] = cur.lastrowid
 
-    for p in payrolls:
-        for pay in p.instructors:
-            iid = ids[pay.name.lower()]
-            for when, hours in sorted(pay.days.items()):
-                conn.execute(
-                    "INSERT OR IGNORE INTO instructor_hours (instructor_id,"
-                    " work_date, hours, source, created_at) VALUES (?,?,?,?,?)",
-                    (iid, when.isoformat(), hours,
-                     os.path.basename(p.path), db.now()))
-    conn.commit()
-    return ids
+        def match(name):
+            """
+            The salary sheet writes "karma dorra"; the roster block heading says
+            "With Captain Karma". Reception uses first names, so a unique first
+            name is enough to be the same person — an ambiguous one is not.
+            """
+            low = name.lower().strip()
+            if low in ids:
+                return ids[low]
+            first = low.split()[0]
+            hits = [k for k in ids if k.split()[0] == first]
+            return ids[hits[0]] if len(hits) == 1 else None
+
+        for r in rosters:
+            for g in r.groups:
+                if not g.instructor:
+                    continue
+                iid = match(g.instructor)
+                if iid is None:
+                    cur = conn.execute(
+                        "INSERT INTO instructors (name, hourly_rate) VALUES (?,?)",
+                        (g.instructor, 0))
+                    iid = ids[g.instructor.lower()] = cur.lastrowid
+                    warn(f"{g.instructor}: teaches {g.class_name} but is not on the "
+                         f"salary sheet — created with no hourly rate")
+                g.instructor_id = iid
+
+        for p in payrolls:
+            for pay in p.instructors:
+                iid = ids[pay.name.lower()]
+                for when, hours in sorted(pay.days.items()):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO instructor_hours (instructor_id,"
+                        " work_date, hours, source, created_at) VALUES (?,?,?,?,?)",
+                        (iid, when.isoformat(), hours,
+                         os.path.basename(p.path), db.now()))
+        return ids
 
 
 # ---------------------------------------------------------------- the timetable
@@ -143,62 +143,62 @@ def seed_classes_and_sessions(conn, rosters, warn):
     the class, so a substitute for one Wednesday stays a fact about that
     Wednesday.
     """
-    class_of, sessions_of = {}, {}
-    shade_used = {}
+    with db.tx(conn):
+        class_of, sessions_of = {}, {}
+        shade_used = {}
 
-    for r in rosters:
-        for g in r.groups:
-            palette = SHADES.get(g.family, [r.colour or "#87438E"])
-            n = shade_used.get(g.family, 0)
-            shade_used[g.family] = n + 1
-            desc = g.title.strip()
-            cur = conn.execute(
-                "INSERT INTO classes (name, description, colour, duration_hours,"
-                " level) VALUES (?,?,?,?,?)",
-                (g.class_name, desc, palette[n % len(palette)],
-                 g.duration_hours, g.level))
-            cid = class_of[id(g)] = cur.lastrowid
-
-            weekdays = g.grid_weekdays()
-            dates = [s.on for st in g.students for s in st.slots]
-            dates += [st.paid_date for st in g.students if st.paid_date]
-            if not dates and not weekdays:
-                sessions_of[cid] = {}
-                warn(f"{g.class_name}: nothing dated in the sheet — "
-                     f"no sessions generated")
-                continue
-
-            first = min(dates) if dates else date.today()
-            last = max(max(dates) if dates else date.today(),
-                       date.today() + timedelta(weeks=WEEKS_AHEAD))
-            if not weekdays and g.weekday is not None:
-                weekdays = [g.weekday]
-
-            by_date = {}
-            for wd in weekdays or []:
-                d = first - timedelta(days=(first.weekday() - wd) % 7)
-                while d <= last:
-                    by_date.setdefault(d, None)
-                    d += timedelta(weeks=1)
-            # A makeup class the sheet records on a day the group does not
-            # normally meet is still a session that happened. Adding it keeps
-            # the attendance mark attached to a real date.
-            for d in dates:
-                by_date.setdefault(d, None)
-
-            for d in sorted(by_date):
-                starts = int(datetime.combine(d, time(g.hour, g.minute)).timestamp())
-                ends = access.ends_at_of(starts, g.duration_hours)
-                status = "completed" if ends < db.now() else "scheduled"
+        for r in rosters:
+            for g in r.groups:
+                palette = SHADES.get(g.family, [r.colour or "#87438E"])
+                n = shade_used.get(g.family, 0)
+                shade_used[g.family] = n + 1
+                desc = g.title.strip()
                 cur = conn.execute(
-                    "INSERT INTO sessions (class_id, instructor_id, starts_at,"
-                    " duration_hours, ends_at, status) VALUES (?,?,?,?,?,?)",
-                    (cid, getattr(g, "instructor_id", None), starts,
-                     g.duration_hours, ends, status))
-                by_date[d] = (cur.lastrowid, starts)
-            sessions_of[cid] = by_date
-    conn.commit()
-    return class_of, sessions_of
+                    "INSERT INTO classes (name, description, colour, duration_hours,"
+                    " level) VALUES (?,?,?,?,?)",
+                    (g.class_name, desc, palette[n % len(palette)],
+                     g.duration_hours, g.level))
+                cid = class_of[id(g)] = cur.lastrowid
+
+                weekdays = g.grid_weekdays()
+                dates = [s.on for st in g.students for s in st.slots]
+                dates += [st.paid_date for st in g.students if st.paid_date]
+                if not dates and not weekdays:
+                    sessions_of[cid] = {}
+                    warn(f"{g.class_name}: nothing dated in the sheet — "
+                         f"no sessions generated")
+                    continue
+
+                first = min(dates) if dates else date.today()
+                last = max(max(dates) if dates else date.today(),
+                           date.today() + timedelta(weeks=WEEKS_AHEAD))
+                if not weekdays and g.weekday is not None:
+                    weekdays = [g.weekday]
+
+                by_date = {}
+                for wd in weekdays or []:
+                    d = first - timedelta(days=(first.weekday() - wd) % 7)
+                    while d <= last:
+                        by_date.setdefault(d, None)
+                        d += timedelta(weeks=1)
+                # A makeup class the sheet records on a day the group does not
+                # normally meet is still a session that happened. Adding it keeps
+                # the attendance mark attached to a real date.
+                for d in dates:
+                    by_date.setdefault(d, None)
+
+                for d in sorted(by_date):
+                    starts = int(datetime.combine(d, time(g.hour, g.minute)).timestamp())
+                    ends = access.ends_at_of(starts, g.duration_hours)
+                    status = "completed" if ends < db.now() else "scheduled"
+                    cur = conn.execute(
+                        "INSERT INTO sessions (class_id, instructor_id, starts_at,"
+                        " duration_hours, ends_at, status) VALUES (?,?,?,?,?,?)",
+                        (cid, getattr(g, "instructor_id", None), starts,
+                         g.duration_hours, ends, status))
+                    by_date[d] = (cur.lastrowid, starts)
+                sessions_of[cid] = by_date
+        return class_of, sessions_of
 
 
 # ---------------------------------------------------------------- the students
@@ -229,66 +229,66 @@ def _plan(student, family):
 
 
 def seed_clients(conn, rosters, class_of, sessions_of, warn):
-    clients, subs = {}, []
-    today = date.today()
+    with db.tx(conn):
+        clients, subs = {}, []
+        today = date.today()
 
-    for r in rosters:
-        for g in r.groups:
-            cid_class = class_of[id(g)]
-            grid = sessions_of.get(cid_class, {})
+        for r in rosters:
+            for g in r.groups:
+                cid_class = class_of[id(g)]
+                grid = sessions_of.get(cid_class, {})
 
-            for st in g.students:
-                key = _identity(st)
-                joined = st.paid_date or (st.slots[0].on if st.slots else today)
+                for st in g.students:
+                    key = _identity(st)
+                    joined = st.paid_date or (st.slots[0].on if st.slots else today)
 
-                if key in clients:
-                    client_id = clients[key]
-                    # Later blocks fill in what the first one left blank.
-                    conn.execute(
-                        "UPDATE clients SET age=COALESCE(age,?), school=COALESCE(school,?),"
-                        " dob=COALESCE(dob,?), phone=COALESCE(phone,?),"
-                        " joined_on=MIN(joined_on,?) WHERE id=?",
-                        (st.age, st.school, st.dob, st.phone, joined.isoformat(),
-                         client_id))
-                else:
+                    if key in clients:
+                        client_id = clients[key]
+                        # Later blocks fill in what the first one left blank.
+                        conn.execute(
+                            "UPDATE clients SET age=COALESCE(age,?), school=COALESCE(school,?),"
+                            " dob=COALESCE(dob,?), phone=COALESCE(phone,?),"
+                            " joined_on=MIN(joined_on,?) WHERE id=?",
+                            (st.age, st.school, st.dob, st.phone, joined.isoformat(),
+                             client_id))
+                    else:
+                        cur = conn.execute(
+                            "INSERT INTO clients (name_en, phone, age, dob, school,"
+                            " joined_on, notes, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (st.name, st.phone, st.age, st.dob, st.school,
+                             joined.isoformat(), st.note, db.now()))
+                        client_id = clients[key] = cur.lastrowid
+
+                    total, plan_name, months = _plan(st, g.family)
+                    attended = len(st.slots)
+                    if attended > total:
+                        warn(f"{st.name} ({g.class_name}): {attended} sessions marked "
+                             f"but the plan holds {total} — plan widened to fit")
+                        total = attended
+
+                    starts = st.paid_date or joined
+                    expires = starts + timedelta(days=30 * (months or 1))
                     cur = conn.execute(
-                        "INSERT INTO clients (name_en, phone, age, dob, school,"
-                        " joined_on, notes, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                        (st.name, st.phone, st.age, st.dob, st.school,
-                         joined.isoformat(), st.note, db.now()))
-                    client_id = clients[key] = cur.lastrowid
+                        "INSERT INTO subscriptions (client_id, class_id, plan,"
+                        " sessions_total, price, payment_note, months, days_pattern,"
+                        " starts_on, expires_on, paid_on, created_at)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (client_id, cid_class, plan_name, total, st.price,
+                         st.paid_raw, months, st.days, starts.isoformat(),
+                         expires.isoformat(),
+                         # The sheet's own PAID DATE column, kept as the answer to
+                         # "when was this paid" rather than only being spent on
+                         # starts_on. A blank cell stays blank: unpaid, not guessed.
+                         st.paid_date.isoformat() if st.paid_date else None,
+                         db.now()))
+                    sub_id = cur.lastrowid
+                    subs.append(sub_id)
 
-                total, plan_name, months = _plan(st, g.family)
-                attended = len(st.slots)
-                if attended > total:
-                    warn(f"{st.name} ({g.class_name}): {attended} sessions marked "
-                         f"but the plan holds {total} — plan widened to fit")
-                    total = attended
-
-                starts = st.paid_date or joined
-                expires = starts + timedelta(days=30 * (months or 1))
-                cur = conn.execute(
-                    "INSERT INTO subscriptions (client_id, class_id, plan,"
-                    " sessions_total, price, payment_note, months, days_pattern,"
-                    " starts_on, expires_on, paid_on, created_at)"
-                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (client_id, cid_class, plan_name, total, st.price,
-                     st.paid_raw, months, st.days, starts.isoformat(),
-                     expires.isoformat(),
-                     # The sheet's own PAID DATE column, kept as the answer to
-                     # "when was this paid" rather than only being spent on
-                     # starts_on. A blank cell stays blank: unpaid, not guessed.
-                     st.paid_date.isoformat() if st.paid_date else None,
-                     db.now()))
-                sub_id = cur.lastrowid
-                subs.append(sub_id)
-
-                used = _book_attendance(conn, client_id, sub_id, st, grid,
-                                        g.class_name, warn)
-                _book_forward(conn, client_id, sub_id, st, grid, total - used)
-                _fit_expiry(conn, sub_id, expires)
-        conn.commit()
-    return clients, subs
+                    used = _book_attendance(conn, client_id, sub_id, st, grid,
+                                            g.class_name, warn)
+                    _book_forward(conn, client_id, sub_id, st, grid, total - used)
+                    _fit_expiry(conn, sub_id, expires)
+        return clients, subs
 
 
 def _fit_expiry(conn, sub_id, expires):
@@ -365,26 +365,26 @@ def _book_forward(conn, client_id, sub_id, student, grid, remaining):
 # ---------------------------------------------------------------- the cards
 def seed_cards(conn, make_pngs=True):
     """One card per client per class they hold a plan in."""
-    import tokens
-    n = 0
-    for r in conn.execute(
-            "SELECT s.client_id, s.class_id, s.sessions_total, s.expires_on, c.name_en,"
-            "       cl.name AS class_name, cl.colour"
-            "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
-            "  JOIN classes cl ON cl.id=s.class_id"
-            " GROUP BY s.client_id, s.class_id").fetchall():
-        token = tokens.issue(r["client_id"])
-        conn.execute(
-            "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
-            " VALUES (?,?,?,?,?)",
-            (r["client_id"], r["class_id"], token, "card", db.now()))
-        if make_pngs:
-            cards.build_card(r["client_id"], r["name_en"], token, r["sessions_total"],
-                             r["expires_on"], class_name=r["class_name"],
-                             colour=r["colour"])
-        n += 1
-    conn.commit()
-    return n
+    with db.tx(conn):
+        import tokens
+        n = 0
+        for r in conn.execute(
+                "SELECT s.client_id, s.class_id, s.sessions_total, s.expires_on, c.name_en,"
+                "       cl.name AS class_name, cl.colour"
+                "  FROM subscriptions s JOIN clients c ON c.id=s.client_id"
+                "  JOIN classes cl ON cl.id=s.class_id"
+                " GROUP BY s.client_id, s.class_id").fetchall():
+            token = tokens.issue(r["client_id"])
+            conn.execute(
+                "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
+                " VALUES (?,?,?,?,?)",
+                (r["client_id"], r["class_id"], token, "card", db.now()))
+            if make_pngs:
+                cards.build_card(r["client_id"], r["name_en"], token, r["sessions_total"],
+                                 r["expires_on"], class_name=r["class_name"],
+                                 colour=r["colour"])
+            n += 1
+        return n
 
 
 # ---------------------------------------------------------------- entry point

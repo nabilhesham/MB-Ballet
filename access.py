@@ -27,13 +27,13 @@ FREEZE_MIN_SESSIONS = 12
 # ---------------------------------------------------------------- helpers
 def _log(conn, client_id, credential_id, session_id, decision, reason,
          source: str = "scan") -> int:
-    cur = conn.execute(
-        "INSERT INTO access_events (client_id, credential_id, session_id, scanned_at,"
-        " decision, reason, source) VALUES (?,?,?,?,?,?,?)",
-        (client_id, credential_id, session_id, db.now(), decision, reason, source),
-    )
-    conn.commit()
-    return cur.lastrowid
+    with db.tx(conn):
+        cur = conn.execute(
+            "INSERT INTO access_events (client_id, credential_id, session_id, scanned_at,"
+            " decision, reason, source) VALUES (?,?,?,?,?,?,?)",
+            (client_id, credential_id, session_id, db.now(), decision, reason, source),
+        )
+        return cur.lastrowid
 
 
 def _deny(message, detail=None, severity="stop", code=None, **base):
@@ -291,21 +291,21 @@ def settle_past_sessions(conn) -> int:
     should have its slots settled normally, and one still frozen is skipped
     entirely so a paused client never loses a session.
     """
-    lift_expired_freezes(conn)
-    now = db.now()
-    cur = conn.execute(
-        "UPDATE bookings SET status='absent'"
-        " WHERE status='booked'"
-        "   AND (subscription_id IS NULL OR subscription_id NOT IN ("
-        "        SELECT id FROM subscriptions WHERE frozen_on IS NOT NULL))"
-        "   AND session_id IN ("
-        "   SELECT id FROM sessions WHERE status != 'cancelled'"
-        "      AND ends_at < ?)", (now,))
-    conn.execute(
-        "UPDATE sessions SET status='completed'"
-        " WHERE status='scheduled' AND ends_at < ?", (now,))
-    conn.commit()
-    return cur.rowcount
+    with db.tx(conn):
+        lift_expired_freezes(conn)
+        now = db.now()
+        cur = conn.execute(
+            "UPDATE bookings SET status='absent'"
+            " WHERE status='booked'"
+            "   AND (subscription_id IS NULL OR subscription_id NOT IN ("
+            "        SELECT id FROM subscriptions WHERE frozen_on IS NOT NULL))"
+            "   AND session_id IN ("
+            "   SELECT id FROM sessions WHERE status != 'cancelled'"
+            "      AND ends_at < ?)", (now,))
+        conn.execute(
+            "UPDATE sessions SET status='completed'"
+            " WHERE status='scheduled' AND ends_at < ?", (now,))
+        return cur.rowcount
 
 
 # ---------------------------------------------------------------- scanning
@@ -555,28 +555,28 @@ def verify_by_client(conn, client_id: int) -> dict:
 
 def check_in(conn, event_id: int) -> dict:
     """Mark the booking present. Guarded so a double tap cannot double-spend."""
-    ev = conn.execute("SELECT * FROM access_events WHERE id=?", (event_id,)).fetchone()
-    if ev is None or ev["decision"] != "allow":
-        return {"ok": False, "error": "no such granted scan"}
-    if ev["confirmed_at"]:
-        return {"ok": False, "error": "already checked in"}
+    with db.tx(conn):
+        ev = conn.execute("SELECT * FROM access_events WHERE id=?", (event_id,)).fetchone()
+        if ev is None or ev["decision"] != "allow":
+            return {"ok": False, "error": "no such granted scan"}
+        if ev["confirmed_at"]:
+            return {"ok": False, "error": "already checked in"}
 
-    b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
-                     (ev["client_id"], ev["session_id"])).fetchone()
-    if b is None:
-        return {"ok": False, "error": "booking no longer exists"}
+        b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
+                         (ev["client_id"], ev["session_id"])).fetchone()
+        if b is None:
+            return {"ok": False, "error": "booking no longer exists"}
 
-    cur = conn.execute(
-        "UPDATE bookings SET status='present', checked_in_at=?"
-        " WHERE id=? AND status != 'present'", (db.now(), b["id"]))
-    if cur.rowcount == 0:
-        return {"ok": False, "error": "already marked present"}
+        cur = conn.execute(
+            "UPDATE bookings SET status='present', checked_in_at=?"
+            " WHERE id=? AND status != 'present'", (db.now(), b["id"]))
+        if cur.rowcount == 0:
+            return {"ok": False, "error": "already marked present"}
 
-    conn.execute("UPDATE access_events SET confirmed_at=?, session_spent=1 WHERE id=?",
-                 (db.now(), event_id))
-    conn.commit()
-    state = plan_state(conn, b["subscription_id"]) if b["subscription_id"] else {}
-    return {"ok": True, "sessions_remaining": state.get("remaining")}
+        conn.execute("UPDATE access_events SET confirmed_at=?, session_spent=1 WHERE id=?",
+                     (db.now(), event_id))
+        state = plan_state(conn, b["subscription_id"]) if b["subscription_id"] else {}
+        return {"ok": True, "sessions_remaining": state.get("remaining")}
 
 
 def swap_options(conn, client_id: int) -> dict:
@@ -635,120 +635,128 @@ def swap_and_check_in(conn, client_id: int, from_session: int, to_session: int,
     the date, then the same _log()/check_in() pair a scan goes through. That
     is what makes the 60-second Undo work here exactly as it does for a
     normal scan, and keeps the day's check-in count honest.
+
+    All three under one tx(). They each open their own, but tx() is
+    re-entrant, so the outermost block here is the one that commits. This
+    used to be three separate transactions for a single press of the confirm
+    button: a crash between the move and the check-in left the booking sitting
+    on a session the client was never marked present at, and no event logged
+    to say what had happened.
     """
-    moved = move_booking(conn, client_id, from_session, to_session,
-                         allow_other_class=True)
-    if not moved["ok"]:
-        return moved
-    event_id = _log(conn, client_id, credential_id, to_session, "allow",
-                    "manual swap", source="manual")
-    r = check_in(conn, event_id)
-    r["event_id"] = event_id
-    return r
+    with db.tx(conn):
+        moved = move_booking(conn, client_id, from_session, to_session,
+                             allow_other_class=True)
+        if not moved["ok"]:
+            return moved
+        event_id = _log(conn, client_id, credential_id, to_session, "allow",
+                        "manual swap", source="manual")
+        r = check_in(conn, event_id)
+        r["event_id"] = event_id
+        return r
 
 
 def undo(conn, event_id: int) -> dict:
-    ev = conn.execute("SELECT * FROM access_events WHERE id=?", (event_id,)).fetchone()
-    if not ev or not ev["session_spent"]:
-        return {"ok": False, "error": "nothing to undo"}
-    if db.now() - ev["confirmed_at"] > 120:
-        return {"ok": False, "error": "undo window closed — change it from the session page"}
-    conn.execute("UPDATE bookings SET status='booked', checked_in_at=NULL"
-                 " WHERE client_id=? AND session_id=?", (ev["client_id"], ev["session_id"]))
-    conn.execute("UPDATE access_events SET confirmed_at=NULL, session_spent=0 WHERE id=?",
-                 (event_id,))
-    conn.commit()
-    return {"ok": True}
+    with db.tx(conn):
+        ev = conn.execute("SELECT * FROM access_events WHERE id=?", (event_id,)).fetchone()
+        if not ev or not ev["session_spent"]:
+            return {"ok": False, "error": "nothing to undo"}
+        if db.now() - ev["confirmed_at"] > 120:
+            return {"ok": False, "error": "undo window closed — change it from the session page"}
+        conn.execute("UPDATE bookings SET status='booked', checked_in_at=NULL"
+                     " WHERE client_id=? AND session_id=?", (ev["client_id"], ev["session_id"]))
+        conn.execute("UPDATE access_events SET confirmed_at=NULL, session_spent=0 WHERE id=?",
+                     (event_id,))
+        return {"ok": True}
 
 
 # ---------------------------------------------------------------- attendance
 def set_status(conn, session_id: int, client_id: int, status: str) -> dict:
     """Present or absent. Both consume the slot; the difference is the record."""
-    if status not in ("present", "absent", "booked"):
-        return {"ok": False, "error": "status must be present or absent"}
-    b = conn.execute("SELECT * FROM bookings WHERE session_id=? AND client_id=?",
-                     (session_id, client_id)).fetchone()
-    if b is None:
-        return {"ok": False, "error": "this client is not booked into this session"}
-    conn.execute("UPDATE bookings SET status=?, checked_in_at=? WHERE id=?",
-                 (status, db.now() if status == "present" else None, b["id"]))
-    conn.commit()
-    return {"ok": True, "status": status}
+    with db.tx(conn):
+        if status not in ("present", "absent", "booked"):
+            return {"ok": False, "error": "status must be present or absent"}
+        b = conn.execute("SELECT * FROM bookings WHERE session_id=? AND client_id=?",
+                         (session_id, client_id)).fetchone()
+        if b is None:
+            return {"ok": False, "error": "this client is not booked into this session"}
+        conn.execute("UPDATE bookings SET status=?, checked_in_at=? WHERE id=?",
+                     (status, db.now() if status == "present" else None, b["id"]))
+        return {"ok": True, "status": status}
 
 
 def book(conn, client_id: int, session_id: int, subscription_id: int = None,
          allow_other_class: bool = False) -> dict:
-    if conn.execute("SELECT 1 FROM bookings WHERE client_id=? AND session_id=?",
-                    (client_id, session_id)).fetchone():
-        return {"ok": False, "error": "already booked into this session"}
-    s = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-    if s is None:
-        return {"ok": False, "error": "no such session"}
-    klass = conn.execute("SELECT name FROM classes WHERE id=?", (s["class_id"],)).fetchone()
-    cname = klass["name"] if klass else "this class"
+    with db.tx(conn):
+        if conn.execute("SELECT 1 FROM bookings WHERE client_id=? AND session_id=?",
+                        (client_id, session_id)).fetchone():
+            return {"ok": False, "error": "already booked into this session"}
+        s = conn.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
+        if s is None:
+            return {"ok": False, "error": "no such session"}
+        klass = conn.execute("SELECT name FROM classes WHERE id=?", (s["class_id"],)).fetchone()
+        cname = klass["name"] if klass else "this class"
 
-    if subscription_id is None:
-        # Spend the plan bought for this class, not whichever one runs longest.
-        sub = active_plan(conn, client_id, s["class_id"])
-        if sub is None:
-            # No plan for this class means no slot to spend, and a booking
-            # with no plan behind it is a session nobody paid for. This used
-            # to fall through and insert one with subscription_id NULL —
-            # which is how a client ended up in a class they were not
-            # enrolled in. A session can only be booked against the plan
-            # that pays for its class.
+        if subscription_id is None:
+            # Spend the plan bought for this class, not whichever one runs longest.
+            sub = active_plan(conn, client_id, s["class_id"])
+            if sub is None:
+                # No plan for this class means no slot to spend, and a booking
+                # with no plan behind it is a session nobody paid for. This used
+                # to fall through and insert one with subscription_id NULL —
+                # which is how a client ended up in a class they were not
+                # enrolled in. A session can only be booked against the plan
+                # that pays for its class.
+                return {"ok": False,
+                        "error": f"no active {cname} plan — add one for that class "
+                                 f"before booking them into this session"}
+            subscription_id = sub["id"]
+
+        # A booking spends one of the plan's paid slots, whether that plan was
+        # named here or just resolved above. A slot spent twice is a session
+        # nobody paid for, so this is checked no matter which caller asked.
+        sub_row = conn.execute(
+            "SELECT sessions_total, frozen_on, class_id FROM subscriptions WHERE id=?",
+            (subscription_id,)).fetchone()
+        if sub_row is None:
+            return {"ok": False, "error": "no such plan"}
+        if sub_row["class_id"] != s["class_id"] and not allow_other_class:
+            # Selling and topping up a plan stay class-locked. Only the
+            # after-the-fact corrections on the client profile pass
+            # allow_other_class, and they must name the plan explicitly — there
+            # is no plan in this session's class for active_plan() to find.
+            return {"ok": False, "error": f"that plan is not a {cname} plan"}
+        if sub_row["frozen_on"]:
+            # Freezing is what released this slot in the first place; it is
+            # not available again until the plan is unfrozen.
+            return {"ok": False, "error": "this plan is frozen"}
+        used = conn.execute(
+            "SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
+            (subscription_id,)).fetchone()["n"]
+        if used >= sub_row["sessions_total"]:
             return {"ok": False,
-                    "error": f"no active {cname} plan — add one for that class "
-                             f"before booking them into this session"}
-        subscription_id = sub["id"]
+                    "error": f"every session on their {cname} plan is already "
+                             f"assigned — no free slot to book this one against"}
 
-    # A booking spends one of the plan's paid slots, whether that plan was
-    # named here or just resolved above. A slot spent twice is a session
-    # nobody paid for, so this is checked no matter which caller asked.
-    sub_row = conn.execute(
-        "SELECT sessions_total, frozen_on, class_id FROM subscriptions WHERE id=?",
-        (subscription_id,)).fetchone()
-    if sub_row is None:
-        return {"ok": False, "error": "no such plan"}
-    if sub_row["class_id"] != s["class_id"] and not allow_other_class:
-        # Selling and topping up a plan stay class-locked. Only the
-        # after-the-fact corrections on the client profile pass
-        # allow_other_class, and they must name the plan explicitly — there
-        # is no plan in this session's class for active_plan() to find.
-        return {"ok": False, "error": f"that plan is not a {cname} plan"}
-    if sub_row["frozen_on"]:
-        # Freezing is what released this slot in the first place; it is
-        # not available again until the plan is unfrozen.
-        return {"ok": False, "error": "this plan is frozen"}
-    used = conn.execute(
-        "SELECT COUNT(*) n FROM bookings WHERE subscription_id=?",
-        (subscription_id,)).fetchone()["n"]
-    if used >= sub_row["sessions_total"]:
-        return {"ok": False,
-                "error": f"every session on their {cname} plan is already "
-                         f"assigned — no free slot to book this one against"}
-
-    conn.execute(
-        "INSERT INTO bookings (client_id, session_id, subscription_id, status, created_at)"
-        " VALUES (?,?,?,?,?)",
-        (client_id, session_id, subscription_id,
-         "absent" if session_end(s) < db.now() else "booked", db.now()))
-    if subscription_id is not None:
-        refresh_expiry(conn, subscription_id)
-    conn.commit()
-    return {"ok": True}
+        conn.execute(
+            "INSERT INTO bookings (client_id, session_id, subscription_id, status, created_at)"
+            " VALUES (?,?,?,?,?)",
+            (client_id, session_id, subscription_id,
+             "absent" if session_end(s) < db.now() else "booked", db.now()))
+        if subscription_id is not None:
+            refresh_expiry(conn, subscription_id)
+        return {"ok": True}
 
 
 def unbook(conn, client_id: int, session_id: int) -> dict:
-    b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
-                     (client_id, session_id)).fetchone()
-    if b is None:
-        return {"ok": False, "error": "not booked"}
-    conn.execute("DELETE FROM bookings WHERE id=?", (b["id"],))
-    if b["subscription_id"] is not None:
-        refresh_expiry(conn, b["subscription_id"])
-    conn.commit()
-    return {"ok": True}
+    with db.tx(conn):
+        b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
+                         (client_id, session_id)).fetchone()
+        if b is None:
+            return {"ok": False, "error": "not booked"}
+        conn.execute("DELETE FROM bookings WHERE id=?", (b["id"],))
+        if b["subscription_id"] is not None:
+            refresh_expiry(conn, b["subscription_id"])
+        return {"ok": True}
 
 
 def move_booking(conn, client_id: int, from_session: int, to_session: int,
@@ -772,33 +780,33 @@ def move_booking(conn, client_id: int, from_session: int, to_session: int,
     rather than a move that settle_past_sessions() could flip to absent
     before the status lands.
     """
-    b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
-                     (client_id, from_session)).fetchone()
-    if b is None:
-        return {"ok": False, "error": "not booked into that session"}
-    if conn.execute("SELECT 1 FROM bookings WHERE client_id=? AND session_id=?",
-                    (client_id, to_session)).fetchone():
-        return {"ok": False, "error": "already booked into the target session"}
+    with db.tx(conn):
+        b = conn.execute("SELECT * FROM bookings WHERE client_id=? AND session_id=?",
+                         (client_id, from_session)).fetchone()
+        if b is None:
+            return {"ok": False, "error": "not booked into that session"}
+        if conn.execute("SELECT 1 FROM bookings WHERE client_id=? AND session_id=?",
+                        (client_id, to_session)).fetchone():
+            return {"ok": False, "error": "already booked into the target session"}
 
-    src = conn.execute("SELECT class_id FROM sessions WHERE id=?", (from_session,)).fetchone()
-    dst = conn.execute("SELECT class_id FROM sessions WHERE id=?", (to_session,)).fetchone()
-    if dst is None:
-        return {"ok": False, "error": "no such session"}
-    if src["class_id"] != dst["class_id"] and not allow_other_class:
-        return {"ok": False, "error": "can only move within the same class"}
+        src = conn.execute("SELECT class_id FROM sessions WHERE id=?", (from_session,)).fetchone()
+        dst = conn.execute("SELECT class_id FROM sessions WHERE id=?", (to_session,)).fetchone()
+        if dst is None:
+            return {"ok": False, "error": "no such session"}
+        if src["class_id"] != dst["class_id"] and not allow_other_class:
+            return {"ok": False, "error": "can only move within the same class"}
 
-    if status is not None and status not in ("present", "absent", "booked"):
-        return {"ok": False, "error": "status must be present, absent or booked"}
-    new_status = status or "booked"
-    conn.execute("UPDATE bookings SET session_id=?, status=?, checked_in_at=? WHERE id=?",
-                 (to_session, new_status,
-                  db.now() if new_status == "present" else None, b["id"]))
-    # Moving a booking to a different date can move the plan's last session
-    # too — earlier or later — so it needs the same refresh book()/unbook() do.
-    if b["subscription_id"] is not None:
-        refresh_expiry(conn, b["subscription_id"])
-    conn.commit()
-    return {"ok": True}
+        if status is not None and status not in ("present", "absent", "booked"):
+            return {"ok": False, "error": "status must be present, absent or booked"}
+        new_status = status or "booked"
+        conn.execute("UPDATE bookings SET session_id=?, status=?, checked_in_at=? WHERE id=?",
+                     (to_session, new_status,
+                      db.now() if new_status == "present" else None, b["id"]))
+        # Moving a booking to a different date can move the plan's last session
+        # too — earlier or later — so it needs the same refresh book()/unbook() do.
+        if b["subscription_id"] is not None:
+            refresh_expiry(conn, b["subscription_id"])
+        return {"ok": True}
 
 
 def session_roster(conn, session_id: int) -> list:
@@ -811,12 +819,12 @@ def session_roster(conn, session_id: int) -> list:
 
 def cancel_session(conn, session_id: int) -> dict:
     """A class the studio is not running. Every slot goes back to the clients."""
-    n = conn.execute(
-        "UPDATE bookings SET status='booked', checked_in_at=NULL WHERE session_id=?",
-        (session_id,)).rowcount
-    conn.execute("UPDATE sessions SET status='cancelled' WHERE id=?", (session_id,))
-    conn.commit()
-    return {"ok": True, "released": n}
+    with db.tx(conn):
+        n = conn.execute(
+            "UPDATE bookings SET status='booked', checked_in_at=NULL WHERE session_id=?",
+            (session_id,)).rowcount
+        conn.execute("UPDATE sessions SET status='cancelled' WHERE id=?", (session_id,))
+        return {"ok": True, "released": n}
 
 
 def _assignment_error(conn, client_id, session_ids, class_id, class_label):
@@ -883,45 +891,45 @@ def add_plan(conn, client_id: int, class_id: int, plan: str, sessions_total: int
     `status` on a refusal is the HTTP code the route should use, so the
     endpoint stays a translation rather than a second set of rules.
     """
-    if sessions_total < 1:
-        return {"ok": False, "status": 400, "error": "a plan needs at least one session"}
-    if len(session_ids) != sessions_total:
-        return {"ok": False, "status": 400,
-                "error": f"assign all {sessions_total} sessions "
-                         f"({len(session_ids)} chosen)"}
-    if len(set(session_ids)) != len(session_ids):
-        return {"ok": False, "status": 400, "error": "the same session was chosen twice"}
+    with db.tx(conn):
+        if sessions_total < 1:
+            return {"ok": False, "status": 400, "error": "a plan needs at least one session"}
+        if len(session_ids) != sessions_total:
+            return {"ok": False, "status": 400,
+                    "error": f"assign all {sessions_total} sessions "
+                             f"({len(session_ids)} chosen)"}
+        if len(set(session_ids)) != len(session_ids):
+            return {"ok": False, "status": 400, "error": "the same session was chosen twice"}
 
-    klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
-    if not klass:
-        return {"ok": False, "status": 404, "error": "no such class"}
+        klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        if not klass:
+            return {"ok": False, "status": 404, "error": "no such class"}
 
-    bad = _assignment_error(conn, client_id, session_ids, class_id,
-                            f"{klass['name']} sessions")
-    if bad:
-        return {"ok": False, "status": 400, "error": bad}
+        bad = _assignment_error(conn, client_id, session_ids, class_id,
+                                f"{klass['name']} sessions")
+        if bad:
+            return {"ok": False, "status": 400, "error": bad}
 
-    # Only this class's previous plan is retired. The client's other class
-    # keeps running.
-    conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
-                 (client_id, class_id))
+        # Only this class's previous plan is retired. The client's other class
+        # keeps running.
+        conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
+                     (client_id, class_id))
 
-    starts = starts_on or date.today().isoformat()
-    # Validity follows the sessions the plan actually pays for: it runs
-    # through the last of them. Reception can still type a date instead -- a
-    # courtesy extension -- and that is what expires_on carries when set.
-    expires = expires_on or last_of_sessions(conn, session_ids) or starts
-    cur = conn.execute(
-        "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
-        " starts_on, expires_on, paid_on, notes, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (client_id, class_id, plan, sessions_total, price, starts, expires,
-         paid_on or None, (notes or "").strip() or None, db.now()))
-    sub_id = cur.lastrowid
-    _book_slots(conn, client_id, sub_id, session_ids)
-    conn.commit()
-    return {"ok": True, "id": sub_id, "booked": len(session_ids),
-            "class_id": class_id, "class_name": klass["name"]}
+        starts = starts_on or date.today().isoformat()
+        # Validity follows the sessions the plan actually pays for: it runs
+        # through the last of them. Reception can still type a date instead -- a
+        # courtesy extension -- and that is what expires_on carries when set.
+        expires = expires_on or last_of_sessions(conn, session_ids) or starts
+        cur = conn.execute(
+            "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
+            " starts_on, expires_on, paid_on, notes, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (client_id, class_id, plan, sessions_total, price, starts, expires,
+             paid_on or None, (notes or "").strip() or None, db.now()))
+        sub_id = cur.lastrowid
+        _book_slots(conn, client_id, sub_id, session_ids)
+        return {"ok": True, "id": sub_id, "booked": len(session_ids),
+                "class_id": class_id, "class_name": klass["name"]}
 
 
 def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
@@ -974,110 +982,110 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
     there, so it is revoked unless another live plan holds that class up —
     issuing the new class's card is the caller's next step.
     """
-    sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
-    if sub is None:
-        return {"ok": False, "error": "no such plan"}
-    if sub["frozen_on"]:
-        return {"ok": False, "error": "unfreeze this plan before editing it"}
-    if sessions_total is not None and sessions_total < 1:
-        return {"ok": False, "error": "a plan needs at least one session"}
-    if sessions_total is not None and session_ids is None:
-        return {"ok": False, "error": "changing the number of sessions means reassigning them"}
+    with db.tx(conn):
+        sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        if sub is None:
+            return {"ok": False, "error": "no such plan"}
+        if sub["frozen_on"]:
+            return {"ok": False, "error": "unfreeze this plan before editing it"}
+        if sessions_total is not None and sessions_total < 1:
+            return {"ok": False, "error": "a plan needs at least one session"}
+        if sessions_total is not None and session_ids is None:
+            return {"ok": False, "error": "changing the number of sessions means reassigning them"}
 
-    moving = class_id is not None and class_id != sub["class_id"]
-    if moving:
-        klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
-        if klass is None:
-            return {"ok": False, "error": "no such class"}
-        if session_ids is None:
-            return {"ok": False, "error": "changing the class means reassigning the sessions"}
-        held = conn.execute(
-            "SELECT COUNT(*) n FROM subscriptions"
-            " WHERE client_id=? AND class_id=? AND active=1 AND id!=?",
-            (sub["client_id"], class_id, sub_id)).fetchone()["n"]
-        if held:
-            return {"ok": False,
-                    "error": f"this client already has a live {klass['name']} plan"
-                             " — renew that one instead"}
+        moving = class_id is not None and class_id != sub["class_id"]
+        if moving:
+            klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+            if klass is None:
+                return {"ok": False, "error": "no such class"}
+            if session_ids is None:
+                return {"ok": False, "error": "changing the class means reassigning the sessions"}
+            held = conn.execute(
+                "SELECT COUNT(*) n FROM subscriptions"
+                " WHERE client_id=? AND class_id=? AND active=1 AND id!=?",
+                (sub["client_id"], class_id, sub_id)).fetchone()["n"]
+            if held:
+                return {"ok": False,
+                        "error": f"this client already has a live {klass['name']} plan"
+                                 " — renew that one instead"}
 
-    current = conn.execute(
-        "SELECT session_id, status FROM bookings WHERE subscription_id=?",
-        (sub_id,)).fetchall()
-    current_ids = {b["session_id"] for b in current}
-    attended_ids = {b["session_id"] for b in current if b["status"] != "booked"}
+        current = conn.execute(
+            "SELECT session_id, status FROM bookings WHERE subscription_id=?",
+            (sub_id,)).fetchall()
+        current_ids = {b["session_id"] for b in current}
+        attended_ids = {b["session_id"] for b in current if b["status"] != "booked"}
 
-    total = sessions_total if sessions_total is not None else sub["sessions_total"]
-    target_class = class_id if moving else sub["class_id"]
+        total = sessions_total if sessions_total is not None else sub["sessions_total"]
+        target_class = class_id if moving else sub["class_id"]
 
-    if session_ids is not None:
-        if len(set(session_ids)) != len(session_ids):
-            return {"ok": False, "error": "the same session was chosen twice"}
-        if len(session_ids) != total:
-            return {"ok": False,
-                    "error": f"assign all {total} sessions ({len(session_ids)} chosen)"}
-        wanted = set(session_ids)
-        if not attended_ids <= wanted:
-            return {"ok": False, "error": "an already-attended session cannot be removed"}
+        if session_ids is not None:
+            if len(set(session_ids)) != len(session_ids):
+                return {"ok": False, "error": "the same session was chosen twice"}
+            if len(session_ids) != total:
+                return {"ok": False,
+                        "error": f"assign all {total} sessions ({len(session_ids)} chosen)"}
+            wanted = set(session_ids)
+            if not attended_ids <= wanted:
+                return {"ok": False, "error": "an already-attended session cannot be removed"}
 
-        new_ids = wanted - current_ids
-        if new_ids:
-            bad = _assignment_error(conn, sub["client_id"], sorted(new_ids),
-                                    target_class, "this plan's class")
-            if bad:
-                return {"ok": False, "error": bad}
+            new_ids = wanted - current_ids
+            if new_ids:
+                bad = _assignment_error(conn, sub["client_id"], sorted(new_ids),
+                                        target_class, "this plan's class")
+                if bad:
+                    return {"ok": False, "error": bad}
 
-        to_drop = current_ids - wanted
-        if to_drop:
-            marks = ",".join("?" * len(to_drop))
-            conn.execute(
-                f"DELETE FROM bookings WHERE subscription_id=? AND session_id IN ({marks})",
-                (sub_id, *to_drop))
-        _book_slots(conn, sub["client_id"], sub_id, sorted(new_ids))
+            to_drop = current_ids - wanted
+            if to_drop:
+                marks = ",".join("?" * len(to_drop))
+                conn.execute(
+                    f"DELETE FROM bookings WHERE subscription_id=? AND session_id IN ({marks})",
+                    (sub_id, *to_drop))
+            _book_slots(conn, sub["client_id"], sub_id, sorted(new_ids))
 
-    fields = {}
-    if moving:
-        fields["class_id"] = class_id
-    if plan is not None:
-        fields["plan"] = plan
-    if sessions_total is not None:
-        fields["sessions_total"] = sessions_total
-    if clear_paid_on:
-        fields["paid_on"] = None
-    elif paid_on is not None:
-        fields["paid_on"] = paid_on
-    if notes is not None:
-        # "" is a real value here — it clears the note — so this checks for
-        # None rather than falsiness, unlike paid_on which needs its own flag
-        # because the route drops None before we ever see it.
-        fields["notes"] = notes.strip() or None
-    if fields:
-        sets = ", ".join(f"{k}=?" for k in fields)
-        conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?",
-                     (*fields.values(), sub_id))
+        fields = {}
+        if moving:
+            fields["class_id"] = class_id
+        if plan is not None:
+            fields["plan"] = plan
+        if sessions_total is not None:
+            fields["sessions_total"] = sessions_total
+        if clear_paid_on:
+            fields["paid_on"] = None
+        elif paid_on is not None:
+            fields["paid_on"] = paid_on
+        if notes is not None:
+            # "" is a real value here — it clears the note — so this checks for
+            # None rather than falsiness, unlike paid_on which needs its own flag
+            # because the route drops None before we ever see it.
+            fields["notes"] = notes.strip() or None
+        if fields:
+            sets = ", ".join(f"{k}=?" for k in fields)
+            conn.execute(f"UPDATE subscriptions SET {sets} WHERE id=?",
+                         (*fields.values(), sub_id))
 
-    if expires_on:
-        conn.execute("UPDATE subscriptions SET expires_on=? WHERE id=?",
-                     (expires_on, sub_id))
-    else:
-        refresh_expiry(conn, sub_id)
+        if expires_on:
+            conn.execute("UPDATE subscriptions SET expires_on=? WHERE id=?",
+                         (expires_on, sub_id))
+        else:
+            refresh_expiry(conn, sub_id)
 
-    revoked = 0
-    if moving:
-        # The old class's card proved this plan. Revoke it unless another live
-        # plan still stands behind that class — credentials are revoked, never
-        # deleted, so the log keeps pointing at the one that was used.
-        still = conn.execute(
-            "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
-            (sub["client_id"], sub["class_id"])).fetchone()
-        if not still:
-            revoked = conn.execute(
-                "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
-                "   AND revoked_at IS NULL",
-                (db.now(), sub["client_id"], sub["class_id"])).rowcount
+        revoked = 0
+        if moving:
+            # The old class's card proved this plan. Revoke it unless another live
+            # plan still stands behind that class — credentials are revoked, never
+            # deleted, so the log keeps pointing at the one that was used.
+            still = conn.execute(
+                "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
+                (sub["client_id"], sub["class_id"])).fetchone()
+            if not still:
+                revoked = conn.execute(
+                    "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
+                    "   AND revoked_at IS NULL",
+                    (db.now(), sub["client_id"], sub["class_id"])).rowcount
 
-    conn.commit()
-    return {"ok": True, "moved": moving, "cards_revoked": revoked,
-            **plan_state(conn, sub_id)}
+        return {"ok": True, "moved": moving, "cards_revoked": revoked,
+                **plan_state(conn, sub_id)}
 
 
 def issue_card(conn, client_id: int, class_id: int) -> dict:
@@ -1099,46 +1107,46 @@ def issue_card(conn, client_id: int, class_id: int) -> dict:
     Returns what the card needs printing on it. Drawing the PNG stays in the
     route: it is file I/O and a matter of presentation, not a business rule.
     """
-    if not class_id:
-        return {"ok": False, "status": 400,
-                "error": "a card belongs to a class — say which"}
-    client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
-    if not client:
-        return {"ok": False, "status": 404, "error": "no such client"}
-    klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
-    if not klass:
-        return {"ok": False, "status": 404, "error": "no such class"}
+    with db.tx(conn):
+        if not class_id:
+            return {"ok": False, "status": 400,
+                    "error": "a card belongs to a class — say which"}
+        client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            return {"ok": False, "status": 404, "error": "no such client"}
+        klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        if not klass:
+            return {"ok": False, "status": 404, "error": "no such class"}
 
-    sub = active_plan(conn, client_id, class_id)
-    if not sub:
-        return {"ok": False, "status": 400,
-                "error": f"{client['name_en']} has no active {klass['name']} plan — "
-                         f"add one before issuing this card"}
+        sub = active_plan(conn, client_id, class_id)
+        if not sub:
+            return {"ok": False, "status": 400,
+                    "error": f"{client['name_en']} has no active {klass['name']} plan — "
+                             f"add one before issuing this card"}
 
-    # `class_id IS ?` rather than `= ?`: a card issued before cards had a
-    # class carries NULL, and NULL = NULL is not true in SQL.
-    old = conn.execute(
-        "SELECT token FROM credentials WHERE client_id=? AND revoked_at IS NULL"
-        "   AND (class_id IS ? OR class_id = ?)",
-        (client_id, class_id, class_id)).fetchone()
-    conn.execute(
-        "UPDATE credentials SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL"
-        "   AND (class_id IS ? OR class_id = ?)",
-        (db.now(), client_id, class_id, class_id))
+        # `class_id IS ?` rather than `= ?`: a card issued before cards had a
+        # class carries NULL, and NULL = NULL is not true in SQL.
+        old = conn.execute(
+            "SELECT token FROM credentials WHERE client_id=? AND revoked_at IS NULL"
+            "   AND (class_id IS ? OR class_id = ?)",
+            (client_id, class_id, class_id)).fetchone()
+        conn.execute(
+            "UPDATE credentials SET revoked_at=? WHERE client_id=? AND revoked_at IS NULL"
+            "   AND (class_id IS ? OR class_id = ?)",
+            (db.now(), client_id, class_id, class_id))
 
-    token = tokens.issue(client_id)
-    conn.execute(
-        "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
-        " VALUES (?,?,?,?,?)", (client_id, class_id, token, "card", db.now()))
-    conn.commit()
+        token = tokens.issue(client_id)
+        conn.execute(
+            "INSERT INTO credentials (client_id, class_id, token, kind, issued_at)"
+            " VALUES (?,?,?,?,?)", (client_id, class_id, token, "card", db.now()))
 
-    state = plan_state(conn, sub["id"])
-    return {"ok": True, "token": token,
-            "revoked": old["token"] if old else None,
-            "client_name": client["name_en"],
-            "class_name": klass["name"], "class_colour": klass["colour"],
-            "sessions_total": state["sessions_total"],
-            "expires_on": state["expires_on"]}
+        state = plan_state(conn, sub["id"])
+        return {"ok": True, "token": token,
+                "revoked": old["token"] if old else None,
+                "client_name": client["name_en"],
+                "class_name": klass["name"], "class_colour": klass["colour"],
+                "sessions_total": state["sessions_total"],
+                "expires_on": state["expires_on"]}
 
 
 def delete_plan(conn, sub_id: int) -> dict:
@@ -1153,34 +1161,34 @@ def delete_plan(conn, sub_id: int) -> dict:
     No refresh_expiry() here, unlike the other bulk booking deletes: the plan
     whose expiry would be recomputed is itself gone.
     """
-    sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
-    if not sub:
-        return {"ok": False, "status": 404, "error": "no such plan"}
+    with db.tx(conn):
+        sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        if not sub:
+            return {"ok": False, "status": 404, "error": "no such plan"}
 
-    counts = conn.execute(
-        "SELECT COUNT(*) n,"
-        "       SUM(CASE WHEN status='booked' THEN 1 ELSE 0 END) upcoming,"
-        "       SUM(CASE WHEN status!='booked' THEN 1 ELSE 0 END) attended"
-        "  FROM bookings WHERE subscription_id=?", (sub_id,)).fetchone()
-    conn.execute("DELETE FROM bookings WHERE subscription_id=?", (sub_id,))
-    conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
+        counts = conn.execute(
+            "SELECT COUNT(*) n,"
+            "       SUM(CASE WHEN status='booked' THEN 1 ELSE 0 END) upcoming,"
+            "       SUM(CASE WHEN status!='booked' THEN 1 ELSE 0 END) attended"
+            "  FROM bookings WHERE subscription_id=?", (sub_id,)).fetchone()
+        conn.execute("DELETE FROM bookings WHERE subscription_id=?", (sub_id,))
+        conn.execute("DELETE FROM subscriptions WHERE id=?", (sub_id,))
 
-    # The card for this class now proves a plan that does not exist. Revoke it
-    # unless another plan in the same class still stands behind it.
-    revoked = 0
-    if sub["class_id"]:
-        still = conn.execute(
-            "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
-            (sub["client_id"], sub["class_id"])).fetchone()
-        if not still:
-            revoked = conn.execute(
-                "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
-                "   AND revoked_at IS NULL",
-                (db.now(), sub["client_id"], sub["class_id"])).rowcount
-    conn.commit()
-    return {"ok": True, "bookings": counts["n"] or 0,
-            "upcoming": counts["upcoming"] or 0,
-            "attended": counts["attended"] or 0, "cards_revoked": revoked}
+        # The card for this class now proves a plan that does not exist. Revoke it
+        # unless another plan in the same class still stands behind it.
+        revoked = 0
+        if sub["class_id"]:
+            still = conn.execute(
+                "SELECT 1 FROM subscriptions WHERE client_id=? AND class_id=? AND active=1",
+                (sub["client_id"], sub["class_id"])).fetchone()
+            if not still:
+                revoked = conn.execute(
+                    "UPDATE credentials SET revoked_at=? WHERE client_id=? AND class_id=?"
+                    "   AND revoked_at IS NULL",
+                    (db.now(), sub["client_id"], sub["class_id"])).rowcount
+        return {"ok": True, "bookings": counts["n"] or 0,
+                "upcoming": counts["upcoming"] or 0,
+                "attended": counts["attended"] or 0, "cards_revoked": revoked}
 
 
 def delete_client(conn, client_id: int, hard: bool = False) -> dict:
@@ -1202,51 +1210,50 @@ def delete_client(conn, client_id: int, hard: bool = False) -> dict:
     keys, and is refused outright once any attendance exists -- losing the
     record of who attended what is worse than a cluttered list.
     """
-    # So a booking whose session has already finished counts as history
-    # rather than as something still upcoming in the guard below.
-    settle_past_sessions(conn)
+    with db.tx(conn):
+        # So a booking whose session has already finished counts as history
+        # rather than as something still upcoming in the guard below.
+        settle_past_sessions(conn)
 
-    client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
-    if not client:
-        return {"ok": False, "status": 404, "error": "no such client"}
+        client = conn.execute("SELECT * FROM clients WHERE id=?", (client_id,)).fetchone()
+        if not client:
+            return {"ok": False, "status": 404, "error": "no such client"}
 
-    if hard:
-        visits = conn.execute(
-            "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND status!='booked'",
-            (client_id,)).fetchone()["n"]
-        if visits:
+        if hard:
+            visits = conn.execute(
+                "SELECT COUNT(*) n FROM bookings WHERE client_id=? AND status!='booked'",
+                (client_id,)).fetchone()["n"]
+            if visits:
+                return {"ok": False, "status": 400,
+                        "error": f"{client['name_en']} has {visits} recorded sessions "
+                                 f"— archive instead"}
+            for q in ("DELETE FROM bookings WHERE client_id=?",
+                      "DELETE FROM credentials WHERE client_id=?",
+                      "DELETE FROM subscriptions WHERE client_id=?",
+                      "DELETE FROM access_events WHERE client_id=?",
+                      "DELETE FROM clients WHERE id=?"):
+                conn.execute(q, (client_id,))
+            return {"ok": True, "action": "delete"}
+
+        upcoming = conn.execute(
+            "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id = b.session_id"
+            " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
+            (client_id, db.now())).fetchone()["n"]
+        if upcoming:
             return {"ok": False, "status": 400,
-                    "error": f"{client['name_en']} has {visits} recorded sessions "
-                             f"— archive instead"}
-        for q in ("DELETE FROM bookings WHERE client_id=?",
-                  "DELETE FROM credentials WHERE client_id=?",
-                  "DELETE FROM subscriptions WHERE client_id=?",
-                  "DELETE FROM access_events WHERE client_id=?",
-                  "DELETE FROM clients WHERE id=?"):
-            conn.execute(q, (client_id,))
-        conn.commit()
-        return {"ok": True, "action": "delete"}
+                    "error": f"{client['name_en']} has {upcoming} upcoming session"
+                             f"{'' if upcoming == 1 else 's'} — remove or reassign "
+                             f"{'it' if upcoming == 1 else 'them'} before archiving"}
 
-    upcoming = conn.execute(
-        "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'",
-        (client_id, db.now())).fetchone()["n"]
-    if upcoming:
-        return {"ok": False, "status": 400,
-                "error": f"{client['name_en']} has {upcoming} upcoming session"
-                         f"{'' if upcoming == 1 else 's'} — remove or reassign "
-                         f"{'it' if upcoming == 1 else 'them'} before archiving"}
-
-    conn.execute("UPDATE clients SET active=0 WHERE id=?", (client_id,))
-    # Archiving revokes the card, so a restored client needs a new one issued.
-    conn.execute("UPDATE credentials SET revoked_at=? WHERE client_id=?"
-                 " AND revoked_at IS NULL", (db.now(), client_id))
-    # The guard above ignores bookings whose session was cancelled, so those
-    # are the ones still left to release here.
-    conn.execute("DELETE FROM bookings WHERE client_id=? AND status='booked'",
-                 (client_id,))
-    conn.commit()
-    return {"ok": True, "action": "archive"}
+        conn.execute("UPDATE clients SET active=0 WHERE id=?", (client_id,))
+        # Archiving revokes the card, so a restored client needs a new one issued.
+        conn.execute("UPDATE credentials SET revoked_at=? WHERE client_id=?"
+                     " AND revoked_at IS NULL", (db.now(), client_id))
+        # The guard above ignores bookings whose session was cancelled, so those
+        # are the ones still left to release here.
+        conn.execute("DELETE FROM bookings WHERE client_id=? AND status='booked'",
+                     (client_id,))
+        return {"ok": True, "action": "archive"}
 
 
 def delete_sessions(conn, session_ids, force: bool = False) -> dict:
@@ -1271,35 +1278,35 @@ def delete_sessions(conn, session_ids, force: bool = False) -> dict:
     access_events.session_id is nulled rather than cascaded: the row is the
     record that someone scanned, which stays true after the session is gone.
     """
-    deleted, released, blocked = 0, 0, []
-    for sid in session_ids:
-        row = conn.execute(
-            "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
-            "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)).fetchone()
-        if not row:
-            continue
-        held = conn.execute(
-            "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
-            (sid,)).fetchone()["n"]
-        if held and not force:
-            blocked.append({**dict(row), "attendance": held})
-            continue
+    with db.tx(conn):
+        deleted, released, blocked = 0, 0, []
+        for sid in session_ids:
+            row = conn.execute(
+                "SELECT s.id, s.starts_at, c.name AS class_name FROM sessions s"
+                "  JOIN classes c ON c.id = s.class_id WHERE s.id=?", (sid,)).fetchone()
+            if not row:
+                continue
+            held = conn.execute(
+                "SELECT COUNT(*) n FROM bookings WHERE session_id=? AND status!='booked'",
+                (sid,)).fetchone()["n"]
+            if held and not force:
+                blocked.append({**dict(row), "attendance": held})
+                continue
 
-        n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
-                         (sid,)).fetchone()["n"]
-        subs = {r["subscription_id"] for r in conn.execute(
-            "SELECT DISTINCT subscription_id FROM bookings"
-            " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
-        conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
-        conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
-        conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
-        for sub_id in subs:
-            refresh_expiry(conn, sub_id)
-        deleted += 1
-        released += n
+            n = conn.execute("SELECT COUNT(*) n FROM bookings WHERE session_id=?",
+                             (sid,)).fetchone()["n"]
+            subs = {r["subscription_id"] for r in conn.execute(
+                "SELECT DISTINCT subscription_id FROM bookings"
+                " WHERE session_id=? AND subscription_id IS NOT NULL", (sid,)).fetchall()}
+            conn.execute("DELETE FROM bookings WHERE session_id=?", (sid,))
+            conn.execute("UPDATE access_events SET session_id=NULL WHERE session_id=?", (sid,))
+            conn.execute("DELETE FROM sessions WHERE id=?", (sid,))
+            for sub_id in subs:
+                refresh_expiry(conn, sub_id)
+            deleted += 1
+            released += n
 
-    conn.commit()
-    return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
+        return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
 
 
 def delete_class(conn, class_id: int, hard: bool = False) -> dict:
@@ -1319,54 +1326,53 @@ def delete_class(conn, class_id: int, hard: bool = False) -> dict:
     Both branches delete bookings directly rather than through unbook(), so
     every plan that funded one needs refresh_expiry() by hand.
     """
-    klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
-    if not klass:
-        return {"ok": False, "status": 404, "error": "no such class"}
+    with db.tx(conn):
+        klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+        if not klass:
+            return {"ok": False, "status": 404, "error": "no such class"}
 
-    if hard:
-        held = conn.execute(
-            "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
-            " WHERE s.class_id=? AND b.status!='booked'", (class_id,)).fetchone()["n"]
-        if held:
-            return {"ok": False, "status": 400,
-                    "error": f"{klass['name']} has {held} attendance records "
-                             f"— archive instead"}
-        subs = {r["subscription_id"] for r in conn.execute(
-            "SELECT DISTINCT subscription_id FROM bookings"
-            " WHERE session_id IN (SELECT id FROM sessions WHERE class_id=?)"
-            "   AND subscription_id IS NOT NULL", (class_id,)).fetchall()}
-        conn.execute("DELETE FROM bookings WHERE session_id IN"
-                     " (SELECT id FROM sessions WHERE class_id=?)", (class_id,))
-        conn.execute("DELETE FROM sessions WHERE class_id=?", (class_id,))
-        conn.execute("DELETE FROM classes WHERE id=?", (class_id,))
-        for sub_id in subs:
-            refresh_expiry(conn, sub_id)
-        conn.commit()
-        return {"ok": True, "action": "delete",
-                "released_sessions": None, "released_bookings": None}
+        if hard:
+            held = conn.execute(
+                "SELECT COUNT(*) n FROM bookings b JOIN sessions s ON s.id=b.session_id"
+                " WHERE s.class_id=? AND b.status!='booked'", (class_id,)).fetchone()["n"]
+            if held:
+                return {"ok": False, "status": 400,
+                        "error": f"{klass['name']} has {held} attendance records "
+                                 f"— archive instead"}
+            subs = {r["subscription_id"] for r in conn.execute(
+                "SELECT DISTINCT subscription_id FROM bookings"
+                " WHERE session_id IN (SELECT id FROM sessions WHERE class_id=?)"
+                "   AND subscription_id IS NOT NULL", (class_id,)).fetchall()}
+            conn.execute("DELETE FROM bookings WHERE session_id IN"
+                         " (SELECT id FROM sessions WHERE class_id=?)", (class_id,))
+            conn.execute("DELETE FROM sessions WHERE class_id=?", (class_id,))
+            conn.execute("DELETE FROM classes WHERE id=?", (class_id,))
+            for sub_id in subs:
+                refresh_expiry(conn, sub_id)
+            return {"ok": True, "action": "delete",
+                    "released_sessions": None, "released_bookings": None}
 
-    upcoming = [r["id"] for r in conn.execute(
-        "SELECT id FROM sessions WHERE class_id=? AND status='scheduled'"
-        " AND starts_at > ?", (class_id, db.now())).fetchall()]
-    released_bookings = 0
-    if upcoming:
-        marks = ",".join("?" * len(upcoming))
-        subs = {r["subscription_id"] for r in conn.execute(
-            f"SELECT DISTINCT subscription_id FROM bookings"
-            f" WHERE session_id IN ({marks}) AND subscription_id IS NOT NULL",
-            upcoming).fetchall()}
-        released_bookings = conn.execute(
-            f"SELECT COUNT(*) n FROM bookings WHERE session_id IN ({marks})",
-            upcoming).fetchone()["n"]
-        conn.execute(f"DELETE FROM bookings WHERE session_id IN ({marks})", upcoming)
-        conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", upcoming)
-        for sub_id in subs:
-            refresh_expiry(conn, sub_id)
-    conn.execute("UPDATE classes SET active=0 WHERE id=?", (class_id,))
-    conn.commit()
-    return {"ok": True, "action": "archive",
-            "released_sessions": len(upcoming),
-            "released_bookings": released_bookings}
+        upcoming = [r["id"] for r in conn.execute(
+            "SELECT id FROM sessions WHERE class_id=? AND status='scheduled'"
+            " AND starts_at > ?", (class_id, db.now())).fetchall()]
+        released_bookings = 0
+        if upcoming:
+            marks = ",".join("?" * len(upcoming))
+            subs = {r["subscription_id"] for r in conn.execute(
+                f"SELECT DISTINCT subscription_id FROM bookings"
+                f" WHERE session_id IN ({marks}) AND subscription_id IS NOT NULL",
+                upcoming).fetchall()}
+            released_bookings = conn.execute(
+                f"SELECT COUNT(*) n FROM bookings WHERE session_id IN ({marks})",
+                upcoming).fetchone()["n"]
+            conn.execute(f"DELETE FROM bookings WHERE session_id IN ({marks})", upcoming)
+            conn.execute(f"DELETE FROM sessions WHERE id IN ({marks})", upcoming)
+            for sub_id in subs:
+                refresh_expiry(conn, sub_id)
+        conn.execute("UPDATE classes SET active=0 WHERE id=?", (class_id,))
+        return {"ok": True, "action": "archive",
+                "released_sessions": len(upcoming),
+                "released_bookings": released_bookings}
 
 
 def expected_today(conn) -> dict:
@@ -1506,14 +1512,14 @@ def adjust_taught_hours(conn, instructor_id: int, day: str,
     duration or a salary-sheet row, so the correction stays its own auditable
     fact and what the timetable and the sheet actually said stays visible.
     """
-    current = taught_hours(conn, instructor_id, day, day)
-    delta = round(new_total - current["hours"], 2)
-    conn.execute(
-        "INSERT INTO instructor_hour_adjustments (instructor_id, adjustment_date, delta_hours,"
-        " note, created_at) VALUES (?,?,?,?,?)",
-        (instructor_id, day, delta, note, db.now()))
-    conn.commit()
-    return taught_hours(conn, instructor_id, day, day)
+    with db.tx(conn):
+        current = taught_hours(conn, instructor_id, day, day)
+        delta = round(new_total - current["hours"], 2)
+        conn.execute(
+            "INSERT INTO instructor_hour_adjustments (instructor_id, adjustment_date, delta_hours,"
+            " note, created_at) VALUES (?,?,?,?,?)",
+            (instructor_id, day, delta, note, db.now()))
+        return taught_hours(conn, instructor_id, day, day)
 
 
 def month_intake(conn, month: str = None, month_to: str = None) -> dict:
@@ -1653,51 +1659,51 @@ def freeze_plan(conn, sub_id: int, until: str = None, reason: str = None,
     Pause a plan. `until` may be None, meaning it stays frozen until lifted.
     Returns how many booked sessions were released.
     """
-    sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
-    if sub is None:
-        return {"ok": False, "error": "no such plan"}
-    if not sub["active"]:
-        return {"ok": False, "error": "this plan is not active"}
-    allowed, why = can_freeze(sub)
-    if not allowed:
-        return {"ok": False, "error": why}
+    with db.tx(conn):
+        sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        if sub is None:
+            return {"ok": False, "error": "no such plan"}
+        if not sub["active"]:
+            return {"ok": False, "error": "this plan is not active"}
+        allowed, why = can_freeze(sub)
+        if not allowed:
+            return {"ok": False, "error": why}
 
-    start = from_date or date.today().isoformat()
-    if until and until <= start:
-        return {"ok": False, "error": "the end of the freeze must be after it starts"}
+        start = from_date or date.today().isoformat()
+        if until and until <= start:
+            return {"ok": False, "error": "the end of the freeze must be after it starts"}
 
-    # Release future bookings inside the freeze. Anything already marked
-    # present or absent is history and stays untouched.
-    #
-    # Deliberately does NOT call refresh_expiry() after this delete, unlike
-    # book()/unbook()/move_booking(): the expiry needs to stay put at whatever
-    # it already was so unfreeze_plan()'s day-shift has a real date to shift
-    # from, not one that just collapsed back to an earlier remaining session.
-    cutoff_from = int(datetime.combine(date.fromisoformat(start), _t.min).timestamp())
-    params = [sub_id, cutoff_from]
-    window = ""
-    if until:
-        window = " AND s.starts_at < ?"
-        params.append(int(datetime.combine(date.fromisoformat(until), _t.min).timestamp()))
+        # Release future bookings inside the freeze. Anything already marked
+        # present or absent is history and stays untouched.
+        #
+        # Deliberately does NOT call refresh_expiry() after this delete, unlike
+        # book()/unbook()/move_booking(): the expiry needs to stay put at whatever
+        # it already was so unfreeze_plan()'s day-shift has a real date to shift
+        # from, not one that just collapsed back to an earlier remaining session.
+        cutoff_from = int(datetime.combine(date.fromisoformat(start), _t.min).timestamp())
+        params = [sub_id, cutoff_from]
+        window = ""
+        if until:
+            window = " AND s.starts_at < ?"
+            params.append(int(datetime.combine(date.fromisoformat(until), _t.min).timestamp()))
 
-    doomed = conn.execute(
-        "SELECT b.id FROM bookings b JOIN sessions s ON s.id = b.session_id"
-        " WHERE b.subscription_id = ? AND b.status = 'booked'"
-        f"   AND s.starts_at >= ?{window}", params).fetchall()
-    released = len(doomed)
-    if released:
+        doomed = conn.execute(
+            "SELECT b.id FROM bookings b JOIN sessions s ON s.id = b.session_id"
+            " WHERE b.subscription_id = ? AND b.status = 'booked'"
+            f"   AND s.starts_at >= ?{window}", params).fetchall()
+        released = len(doomed)
+        if released:
+            conn.execute(
+                f"DELETE FROM bookings WHERE id IN ({','.join('?' * released)})",
+                [r["id"] for r in doomed])
+
+        conn.execute("UPDATE subscriptions SET frozen_on=?, frozen_until=? WHERE id=?",
+                     (start, until, sub_id))
         conn.execute(
-            f"DELETE FROM bookings WHERE id IN ({','.join('?' * released)})",
-            [r["id"] for r in doomed])
-
-    conn.execute("UPDATE subscriptions SET frozen_on=?, frozen_until=? WHERE id=?",
-                 (start, until, sub_id))
-    conn.execute(
-        "INSERT INTO freezes (subscription_id, from_date, until_date, released, reason,"
-        " created_at) VALUES (?,?,?,?,?,?)",
-        (sub_id, start, until, released, reason, db.now()))
-    conn.commit()
-    return {"ok": True, "released": released, "frozen_on": start, "frozen_until": until}
+            "INSERT INTO freezes (subscription_id, from_date, until_date, released, reason,"
+            " created_at) VALUES (?,?,?,?,?,?)",
+            (sub_id, start, until, released, reason, db.now()))
+        return {"ok": True, "released": released, "frozen_on": start, "frozen_until": until}
 
 
 def unfreeze_plan(conn, sub_id: int, on_date: str = None) -> dict:
@@ -1706,29 +1712,29 @@ def unfreeze_plan(conn, sub_id: int, on_date: str = None) -> dict:
     released slots are already unassigned, so the client profile will show them
     as needing dates.
     """
-    sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
-    if sub is None:
-        return {"ok": False, "error": "no such plan"}
-    if not sub["frozen_on"]:
-        return {"ok": False, "error": "this plan is not frozen"}
+    with db.tx(conn):
+        sub = conn.execute("SELECT * FROM subscriptions WHERE id=?", (sub_id,)).fetchone()
+        if sub is None:
+            return {"ok": False, "error": "no such plan"}
+        if not sub["frozen_on"]:
+            return {"ok": False, "error": "this plan is not frozen"}
 
-    ended = on_date or date.today().isoformat()
-    if ended < sub["frozen_on"]:
-        ended = sub["frozen_on"]
-    days = _days_between(sub["frozen_on"], ended)
+        ended = on_date or date.today().isoformat()
+        if ended < sub["frozen_on"]:
+            ended = sub["frozen_on"]
+        days = _days_between(sub["frozen_on"], ended)
 
-    conn.execute(
-        "UPDATE subscriptions SET frozen_on=NULL, frozen_until=NULL,"
-        " frozen_days = frozen_days + ?, expires_on = ? WHERE id=?",
-        (days, _shift_date(sub["expires_on"], days), sub_id))
-    conn.execute(
-        "UPDATE freezes SET ended_on=?, days_added=? WHERE subscription_id=? AND ended_on IS NULL",
-        (ended, days, sub_id))
-    conn.commit()
+        conn.execute(
+            "UPDATE subscriptions SET frozen_on=NULL, frozen_until=NULL,"
+            " frozen_days = frozen_days + ?, expires_on = ? WHERE id=?",
+            (days, _shift_date(sub["expires_on"], days), sub_id))
+        conn.execute(
+            "UPDATE freezes SET ended_on=?, days_added=? WHERE subscription_id=? AND ended_on IS NULL",
+            (ended, days, sub_id))
 
-    state = plan_state(conn, sub_id)
-    return {"ok": True, "days": days, "expires_on": state["expires_on"],
-            "unassigned": state["unassigned"]}
+        state = plan_state(conn, sub_id)
+        return {"ok": True, "days": days, "expires_on": state["expires_on"],
+                "unassigned": state["unassigned"]}
 
 
 def lift_expired_freezes(conn) -> int:

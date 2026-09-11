@@ -110,7 +110,6 @@ def create_client(body: ClientIn):
             " VALUES (?,?,?,?,?,?,?)",
             (body.name_en, body.phone, body.age, body.school,
              body.joined_on or date.today().isoformat(), body.notes, db.now()))
-        conn.commit()
         return {"id": cur.lastrowid}
     finally:
         conn.close()
@@ -215,7 +214,6 @@ def update_client(cid: int, body: ClientIn):
             " WHERE id=?",
             (body.name_en, body.phone, body.age, body.school, body.joined_on,
              body.notes, cid))
-        conn.commit()
         return {"ok": True}
     finally:
         conn.close()
@@ -242,7 +240,6 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
     conn = db.connect()
     try:
         conn.execute("UPDATE clients SET photo_path=? WHERE id=?", ("/" + path, cid))
-        conn.commit()
         return {"photo_path": "/" + path}
     finally:
         conn.close()
@@ -315,7 +312,6 @@ def unarchive_client(cid: int):
         if not conn.execute("SELECT 1 FROM clients WHERE id=?", (cid,)).fetchone():
             raise HTTPException(404, "no such client")
         conn.execute("UPDATE clients SET active=1 WHERE id=?", (cid,))
-        conn.commit()
         return {"ok": True}
     finally:
         conn.close()

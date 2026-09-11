@@ -2,6 +2,7 @@
 
 import sqlite3
 import time
+from contextlib import contextmanager
 
 import config
 
@@ -236,8 +237,15 @@ def connect(path: str = None) -> sqlite3.Connection:
     Read through config rather than from a module constant: the constant was
     bound at import time, which is before server.py had loaded .env, so no
     environment variable could ever have changed it.
+
+    `isolation_level=None` turns off sqlite3's own transaction management.
+    It used to open one implicitly at the first DML statement and close it at
+    the next commit(), which meant transaction boundaries were wherever a
+    commit happened to be rather than where anyone decided they should be.
+    Every write now names its own boundary with tx(); anything outside one
+    autocommits, which is what a single read wants anyway.
     """
-    conn = sqlite3.connect(path or config.sqlite_path())
+    conn = sqlite3.connect(path or config.sqlite_path(), isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -245,12 +253,59 @@ def connect(path: str = None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def tx(conn):
+    """
+    One transaction. Commits on the way out, rolls back if anything raises.
+
+        with db.tx(conn):
+            conn.execute(...)
+            conn.execute(...)
+
+    **Re-entrant.** The outermost block owns the transaction and the inner
+    ones are no-ops, because the calls genuinely nest: swap_and_check_in()
+    calls move_booking() and check_in(), and settle_past_sessions() calls
+    lift_expired_freezes(), which calls unfreeze_plan() once per due row.
+    Each of those used to commit on its own, so one user action was three
+    transactions and a sweep was one per row. Nesting is detected with
+    sqlite3's own `in_transaction` rather than a depth counter, since a
+    Connection cannot carry attributes.
+
+    There are no savepoints: an inner block that raises rolls the whole
+    outermost transaction back. That is the behaviour this app wants —
+    nothing here half-succeeds on purpose.
+
+    **BEGIN IMMEDIATE, not BEGIN.** It takes the write lock at the top of the
+    block rather than at the first write, so a read-then-write sequence is
+    serialised against another writer. book() counts a plan's bookings and
+    then inserts one; under a deferred transaction that count is taken
+    without the lock, and two concurrent sales could each see room for the
+    last slot.
+
+    Rollback used to happen only because closing a connection discards an
+    open transaction — it worked, but by accident rather than because
+    anything asked for it, and it is the reason a failed multi-statement
+    write left no trace of having been attempted.
+    """
+    if conn.in_transaction:
+        yield conn                      # inner block: the outermost one owns it
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    conn.execute("COMMIT")
+
+
 def init(path: str = None) -> None:
     conn = connect(path)
     try:
+        # executescript commits whatever is open before it runs, so this is
+        # deliberately not inside a tx() — the schema is its own unit.
         conn.executescript(SCHEMA)
         migrate(conn)
-        conn.commit()
     finally:
         # sqlite3's connection context manager commits but does not close, so
         # `with connect(...) as conn:` leaked a handle on every call.
@@ -279,7 +334,6 @@ def set_setting(conn, key: str, value: str) -> None:
     conn.execute(
         "INSERT INTO settings (key, value) VALUES (?,?)"
         " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
-    conn.commit()
 
 
 def migrate(conn) -> None:
@@ -315,7 +369,6 @@ def migrate(conn) -> None:
         for name, decl in columns:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
-    conn.commit()
 
     # Fill in any session whose end is not recorded. Deliberately not guarded
     # by a one-shot marker like the expiry backfill below: it is targeted at
@@ -326,7 +379,6 @@ def migrate(conn) -> None:
     conn.execute(
         "UPDATE sessions SET ends_at = CAST(starts_at + duration_hours * 3600 AS INTEGER)"
         " WHERE ends_at IS NULL")
-    conn.commit()
 
     # One-shot. expires_on used to be a floor that plan_state() raised at
     # read time to the last session a plan covers; it is now the value
@@ -346,7 +398,6 @@ def migrate(conn) -> None:
             "  SELECT MAX(date(s.starts_at, 'unixepoch', 'localtime'))"
             "    FROM bookings b JOIN sessions s ON s.id = b.session_id"
             "   WHERE b.subscription_id = subscriptions.id)")
-        conn.commit()
         set_setting(conn, "expiry_backfilled", "1")
 
 

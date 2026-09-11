@@ -68,7 +68,6 @@ def create_instructor(body: InstructorIn):
             "INSERT INTO instructors (name, phone, specialty, hourly_rate)"
             " VALUES (?,?,?,?)",
             (body.name, body.phone, body.specialty, body.hourly_rate))
-        conn.commit()
         return {"id": cur.lastrowid}
     finally:
         conn.close()
@@ -82,7 +81,6 @@ def update_instructor(iid: int, body: InstructorIn):
             "UPDATE instructors SET name=?, phone=?, specialty=?, hourly_rate=?"
             " WHERE id=?",
             (body.name, body.phone, body.specialty, body.hourly_rate, iid))
-        conn.commit()
         return {"ok": True}
     finally:
         conn.close()
@@ -193,7 +191,6 @@ async def upload_photo(iid: int, file: UploadFile = File(...)):
     conn = db.connect()
     try:
         conn.execute("UPDATE instructors SET photo_path=? WHERE id=?", ("/" + path, iid))
-        conn.commit()
         return {"photo_path": "/" + path}
     finally:
         conn.close()
@@ -206,7 +203,6 @@ def unarchive_instructor(iid: int):
         if not conn.execute("SELECT 1 FROM instructors WHERE id=?", (iid,)).fetchone():
             raise HTTPException(404, "no such instructor")
         conn.execute("UPDATE instructors SET active=1 WHERE id=?", (iid,))
-        conn.commit()
         return {"ok": True}
     finally:
         conn.close()
@@ -216,13 +212,16 @@ def unarchive_instructor(iid: int):
 def archive_instructor(iid: int):
     conn = db.connect()
     try:
-        n = conn.execute(
-            "SELECT COUNT(*) n FROM sessions WHERE instructor_id=? AND status='scheduled'"
-            "   AND starts_at >= ?", (iid, db.now())).fetchone()["n"]
-        if n:
-            raise HTTPException(400, f"Still assigned to {n} upcoming session(s) — reassign first")
-        conn.execute("UPDATE instructors SET active=0 WHERE id=?", (iid,))
-        conn.commit()
+        # The guard and the archive under one lock, so a session cannot be
+        # booked into the gap between deciding there are none and archiving.
+        with db.tx(conn):
+            n = conn.execute(
+                "SELECT COUNT(*) n FROM sessions WHERE instructor_id=? AND status='scheduled'"
+                "   AND starts_at >= ?", (iid, db.now())).fetchone()["n"]
+            if n:
+                raise HTTPException(
+                    400, f"Still assigned to {n} upcoming session(s) — reassign first")
+            conn.execute("UPDATE instructors SET active=0 WHERE id=?", (iid,))
         return {"ok": True}
     finally:
         conn.close()
