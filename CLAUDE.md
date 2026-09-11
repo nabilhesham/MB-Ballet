@@ -570,13 +570,22 @@ why the class page shows "students with a booking" rather than a roster.
 `session_ids`, and the picker keeps Save disabled until they match. A plan with
 unassigned slots is a promise nobody has written down.
 
-**A plan's slots can be filled from three weeks back, not just forward.**
-Reception writes a plan down after the client has already started coming, so
-the dates they actually attended have to be reachable. `lib/planSessions.js`
-holds that window and the four pickers that assign a plan's slots
-(`PlanPicker`, `EditPlan`, `AddSessionToPlan`, `AssignRemaining`) all fetch
-through it — moving an existing booking is deliberately not one of them. It
-also drops cancelled sessions, which `/api/sessions` does not filter. All
+**Every screen that picks a session for a client offers the same window:
+three weeks back plus everything ahead.** Reception writes a plan down, or
+corrects an attendance, after the client has already been coming, so the
+dates they actually attended have to be reachable. `lib/planSessions.js`
+holds that window and **all six** places fetch through it — the four plan
+pickers (`PlanPicker`, `EditPlan`, `AddSessionToPlan`, `AssignRemaining`)
+via `fetchPlanSessions()` for one class, and the two cross-class corrections
+(`EditAttendance`, `MoveBooking`) via `fetchAnyClassSessions()`. It also
+drops cancelled sessions, which `/api/sessions` does not filter.
+
+They used to disagree: three weeks in the plan pickers, one week in the
+attendance correction, and no past at all in the move and in "add session to
+plan". The same receptionist doing the same job on the same client got a
+different list depending on which button she pressed, and the two that
+started at today could not record "she came on Saturday instead" — the
+commonest correction there is. All
 three write paths (`add_plan`, `edit_plan`, `book`) already book a finished
 session straight to `absent`, so the list marks past rows and says why, and
 "auto-fill earliest" skips them: creating absences is a decision to make one
@@ -616,6 +625,20 @@ wherever it now sits; a Flexibility card still cannot spend Ballet credit, so
 one card per class keeps meaning something. Bookings with no plan behind them
 (older rows, `subscription_id` NULL) fall back to matching on the session's
 class.
+
+**The Sessions list shows the whole timetable, and must keep doing so.** It
+is the one screen a session can be deleted from, so anything it cannot show
+is a session nobody can remove. It used to fetch a hardcoded nine-week
+window (`-21d`/`+42d`) while the calendar asked for whatever month you
+turned to, and `/api/sessions` with no range quietly meant a *default*
+window rather than no window at all. A session outside those nine weeks
+therefore existed, showed in the calendar, and held its slot against
+`slot_conflict()` — while the list gave no way to find or delete it, so
+scheduling over it was refused by something invisible. Repeat weekly writes
+twelve weeks at a time, so half of every batch landed out of reach the
+moment it was created. `/api/sessions` with no `start`/`end` now means no
+date bound, and the Sessions view asks for exactly that. Do not put a window
+back on that screen without giving it a way to reach past the window.
 
 **Deleting sessions in bulk keeps the same rule one-at-a-time deletion
 has.** `POST /api/sessions/bulk-delete` refuses any session carrying

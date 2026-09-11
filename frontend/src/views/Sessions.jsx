@@ -52,7 +52,13 @@ function sessionColumns(selected, toggle) {
 
 export default function Sessions() {
   const now = Math.floor(Date.now() / 1000);
-  const { data: list, loading, error, reload } = useApi(`/sessions?start=${now - 21 * 86400}&end=${now + 42 * 86400}`);
+  // Every session, not a window. This list is the one place a session can be
+  // deleted, so anything it cannot show is a session nobody can remove — and
+  // the calendar was still showing those, and slot_conflict() was still
+  // refusing to schedule over them. Repeat weekly writes twelve weeks at a
+  // time, so half of every batch used to land outside the old nine-week
+  // window the moment it was created.
+  const { data: list, loading, error, reload } = useApi('/sessions');
   const { open } = useModal();
   const confirm = useConfirm();
   const toast = useToast();
@@ -119,7 +125,13 @@ export default function Sessions() {
   return (
     <>
       <div className="head">
-        <div><h1>Sessions</h1><div className="sub">{upcoming.length} upcoming</div></div>
+        <div>
+          <h1>Sessions</h1>
+          <div className="sub">
+            {upcoming.length} upcoming · {past.length} past — the whole timetable,
+            the same sessions the calendar shows
+          </div>
+        </div>
         <div className="row">
           <button onClick={openRepeat}>Repeat weekly</button>
           <button className="pri" onClick={openSchedule}>Add session</button>
@@ -150,7 +162,7 @@ export default function Sessions() {
       </div>
 
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <h2>Past three weeks</h2>
+        <h2>Past</h2>
         {past.length > 0 && (
           <button className="sm" onClick={() => selectAll(past)}>Select all past</button>
         )}

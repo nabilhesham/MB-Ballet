@@ -79,13 +79,21 @@ class MoveIn(BaseModel):
 # ---------------------------------------------------------------- routes
 @router.get("/api/sessions")
 def list_sessions(start: int = 0, end: int = 0, class_id: int = 0, available_for: int = 0):
+    """
+    The timetable, optionally windowed.
+
+    Leaving `start` and `end` off means **no date bound at all** — every
+    session there is. It used to mean a default window of last week plus four,
+    which nothing ever asked for and which made "no range" quietly mean "some
+    range": the Sessions screen carried its own hardcoded window instead, the
+    calendar asked for whatever month you turned to, and the two disagreed
+    about what existed. A session outside the list's range still showed in the
+    calendar and still held its slot against `slot_conflict()`, so scheduling
+    over it was refused by something the list gave no way to find or delete.
+    """
     conn = db.connect()
     try:
         access.settle_past_sessions(conn)
-        if not start:
-            start = db.now() - 7 * 86400
-        if not end:
-            end = start + 28 * 86400
         sql = (
             "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name,"
             "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
@@ -93,8 +101,14 @@ def list_sessions(start: int = 0, end: int = 0, class_id: int = 0, available_for
             "     AND b.status='present') AS attended"
             "  FROM sessions s JOIN classes c ON c.id=s.class_id"
             "  LEFT JOIN instructors i ON i.id=s.instructor_id"
-            " WHERE s.starts_at BETWEEN ? AND ?")
-        params = [start, end]
+            " WHERE 1=1")
+        params = []
+        if start:
+            sql += " AND s.starts_at >= ?"
+            params.append(start)
+        if end:
+            sql += " AND s.starts_at <= ?"
+            params.append(end)
         if class_id:
             sql += " AND s.class_id = ?"
             params.append(class_id)
