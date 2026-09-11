@@ -38,10 +38,15 @@ except Exception:
 
 
 def app_dir() -> str:
-    """The folder holding the .exe, which is where data must live."""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
+    """
+    The folder holding the .exe, which is where data must live.
+
+    Kept as a thin wrapper so this module's own error handling can run
+    before config is imported at all — but there is one definition of the
+    rule, in config.py, rather than a copy here and another in server.py.
+    """
+    import config
+    return config.app_dir()
 
 
 def port_in_use(host: str, port: int) -> bool:
@@ -128,7 +133,10 @@ def banner(port: int) -> None:
 
 
 def main() -> int:
-    os.chdir(app_dir())
+    # chdir plus .env, before server.py is imported and before anything
+    # asks which database backend to construct.
+    import config
+    config.load_env()
 
     # Already running? Not an error — just show it to them again.
     if port_in_use(HOST, PORT):

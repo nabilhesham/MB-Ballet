@@ -39,12 +39,22 @@ def backend(request):
 
 
 @pytest.fixture
-def conn(backend, tmp_path):
+def conn(backend, tmp_path, monkeypatch):
+    """
+    A throwaway database, pointed at through config rather than by passing a
+    path around.
+
+    That matters: route handlers call a bare `db.connect()`, so the only way
+    to test one without it reaching for the real academy.db is for config to
+    be the thing that answers "which database?". Before config.py existed
+    this fixture could reach access.py but not the api/ layer at all.
+    """
     if backend != "sqlite":                  # pragma: no cover - until phase 4
         pytest.skip(f"no {backend} backend yet")
-    path = str(tmp_path / "academy.db")
-    db.init(path)
-    c = db.connect(path)
+    monkeypatch.setenv("MB_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("MB_SQLITE_PATH", str(tmp_path / "academy.db"))
+    db.init()
+    c = db.connect()
     yield c
     c.close()
 

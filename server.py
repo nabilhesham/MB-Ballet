@@ -11,15 +11,20 @@ paths, the FastAPI app, the startup event, and the static mounts.
 
 import asyncio
 import os
-import sys
 
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-import access
-import db
+# Before `import db`, which used to bind its path at import time, and
+# before anything reads an environment variable. load_env() also does the
+# chdir into the folder holding academy.db, .env, photos and cards.
+import config
+config.load_env()
+
+import access  # noqa: E402
+import db  # noqa: E402
 
 from api.clients import router as clients_router
 from api.plans import router as plans_router
@@ -37,13 +42,8 @@ from api.dashboard import router as dashboard_router
 # but the database, photos, cards and .env must live next to the .exe or the
 # academy loses its records every time the program closes.
 # --------------------------------------------------------------------------
-if getattr(sys, "frozen", False):
-    APP_DIR = os.path.dirname(sys.executable)
-    BUNDLE_DIR = sys._MEIPASS
-else:
-    APP_DIR = BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-os.chdir(APP_DIR)
+APP_DIR = config.app_dir()
+BUNDLE_DIR = config.bundle_dir()
 STATIC_DIR = os.path.join(BUNDLE_DIR, "static")
 
 # These must exist before the StaticFiles mounts below, which run at import
@@ -70,21 +70,14 @@ app.include_router(dashboard_router)
 
 @app.on_event("startup")
 def _startup():
-    if not os.environ.get("ENTRY_SECRET") and os.path.exists(".env"):
-        for line in open(".env"):
-            if "=" in line and not line.strip().startswith("#"):
-                k, v = line.strip().split("=", 1)
-                os.environ.setdefault(k, v)
-
+    # .env is already loaded, at import. Only provisioning is left.
     if not os.environ.get("ENTRY_SECRET"):
         import secrets
-        key = secrets.token_urlsafe(32)
-        with open(".env", "w") as f:
-            f.write(f"ENTRY_SECRET={key}\n")
-        os.environ["ENTRY_SECRET"] = key
+        config.set_env_value("ENTRY_SECRET", secrets.token_urlsafe(32))
         print("  A new security key was created and saved to .env.")
         print("  Keep a backup of that file — losing it invalidates every card.\n")
 
+    print(f"  Database: {config.describe()}")
     db.init()
     os.makedirs("photos", exist_ok=True)
     os.makedirs("cards", exist_ok=True)

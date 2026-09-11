@@ -2,3 +2,5 @@
 # not in requirements.txt — academy.spec excludes pytest from the packaged
 # build, and the shipped .exe must not carry a test framework.
 pytest
+# FastAPI's TestClient needs an HTTP client to drive the app in-process.
+httpx

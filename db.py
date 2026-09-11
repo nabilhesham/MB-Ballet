@@ -3,7 +3,7 @@
 import sqlite3
 import time
 
-DB_PATH = "academy.db"
+import config
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS instructors (
@@ -229,8 +229,15 @@ CREATE INDEX IF NOT EXISTS ix_sub_starts  ON subscriptions(starts_on);
 """
 
 
-def connect(path: str = DB_PATH) -> sqlite3.Connection:
-    conn = sqlite3.connect(path)
+def connect(path: str = None) -> sqlite3.Connection:
+    """
+    Open the database. The path comes from config when not given.
+
+    Read through config rather than from a module constant: the constant was
+    bound at import time, which is before server.py had loaded .env, so no
+    environment variable could ever have changed it.
+    """
+    conn = sqlite3.connect(path or config.sqlite_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -238,10 +245,16 @@ def connect(path: str = DB_PATH) -> sqlite3.Connection:
     return conn
 
 
-def init(path: str = DB_PATH) -> None:
-    with connect(path) as conn:
+def init(path: str = None) -> None:
+    conn = connect(path)
+    try:
         conn.executescript(SCHEMA)
         migrate(conn)
+        conn.commit()
+    finally:
+        # sqlite3's connection context manager commits but does not close, so
+        # `with connect(...) as conn:` leaked a handle on every call.
+        conn.close()
 
 
 def now() -> int:
