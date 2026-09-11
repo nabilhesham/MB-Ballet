@@ -251,71 +251,16 @@ async def upload_photo(cid: int, file: UploadFile = File(...)):
 
 @router.post("/api/clients/{cid}/plan")
 def add_plan(cid: int, body: PlanIn):
-    """
-    Sell a plan for one class.
-
-    Four rules are enforced here rather than trusted to the UI:
-      - every slot is assigned to a real session up front, because a plan with
-        unassigned slots is a promise nobody has written down;
-      - every one of those sessions belongs to the plan's class, so a Ballet
-        plan cannot quietly pay for a Flexibility session;
-      - only the previous plan *for this class* is replaced, so a client taking
-        two classes keeps the other one running;
-      - a plan runs through the last session it pays for, unless reception
-        types an end date of its own.
-    """
-    if body.sessions_total < 1:
-        raise HTTPException(400, "a plan needs at least one session")
-    if len(body.session_ids) != body.sessions_total:
-        raise HTTPException(
-            400, f"assign all {body.sessions_total} sessions "
-                 f"({len(body.session_ids)} chosen)")
-    if len(set(body.session_ids)) != len(body.session_ids):
-        raise HTTPException(400, "the same session was chosen twice")
-
+    """Sell a plan for one class. The rules live in access.add_plan()."""
     conn = db.connect()
     try:
-        klass = one(conn.execute("SELECT * FROM classes WHERE id=?", (body.class_id,)))
-        if not klass:
-            raise HTTPException(404, "no such class")
-
-        marks = ",".join("?" * len(body.session_ids))
-        wrong = conn.execute(
-            f"SELECT COUNT(*) n FROM sessions WHERE id IN ({marks}) AND class_id != ?",
-            (*body.session_ids, body.class_id)).fetchone()["n"]
-        if wrong:
-            raise HTTPException(
-                400, f"{wrong} of the chosen sessions are not {klass['name']} sessions")
-
-        clash = conn.execute(
-            f"SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id IN ({marks})",
-            (cid, *body.session_ids)).fetchone()["n"]
-        if clash:
-            raise HTTPException(400, "already booked into one of those sessions")
-
-        conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
-                     (cid, body.class_id))
-        starts = body.starts_on or date.today().isoformat()
-        # Validity follows the sessions the plan actually pays for: it runs
-        # through the last of them. Reception can still type a date instead
-        # — a courtesy extension — and that's what expires_on carries when set.
-        expires = body.expires_on or access.last_of_sessions(conn, body.session_ids) or starts
-        cur = conn.execute(
-            "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
-            " starts_on, expires_on, paid_on, notes, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (cid, body.class_id, body.plan, body.sessions_total, body.price, starts,
-             expires, body.paid_on or None, (body.notes or "").strip() or None, db.now()))
-        sub_id = cur.lastrowid
-        for sid in body.session_ids:
-            s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
-            status = "absent" if s and access.session_end(s) < db.now() else "booked"
-            conn.execute(
-                "INSERT INTO bookings (client_id, session_id, subscription_id, status,"
-                " created_at) VALUES (?,?,?,?,?)", (cid, sid, sub_id, status, db.now()))
-        conn.commit()
-        return {"id": sub_id, "booked": len(body.session_ids),
-                "class_id": body.class_id, "class_name": klass["name"]}
+        r = access.add_plan(
+            conn, cid, body.class_id, body.plan, body.sessions_total,
+            body.session_ids, price=body.price, starts_on=body.starts_on,
+            expires_on=body.expires_on, paid_on=body.paid_on, notes=body.notes)
+        if not r["ok"]:
+            raise HTTPException(r.get("status", 400), r["error"])
+        return r
     finally:
         conn.close()
 

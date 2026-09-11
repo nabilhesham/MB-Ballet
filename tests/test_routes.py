@@ -186,3 +186,109 @@ def test_the_wrong_class_card_is_refused_over_http(client):
     r = client.post("/api/access/verify",
                     json={"token": client.academy.dual_flex_card})
     assert r.json()["granted"] is False
+
+
+# ---------------------------------------------------------------- selling
+
+def sell(client, **over):
+    a = client.academy
+    cid = over.pop("cid", a.planless)          # popped before the body is built
+    body = {"class_id": a.ballet, "plan": "4 sessions", "sessions_total": 4,
+            "price": 900.0, "session_ids": a.ballet_sessions[-4:]}
+    body.update(over)
+    return client.post(f"/api/clients/{cid}/plan", json=body)
+
+
+def test_selling_a_plan_books_every_slot(client):
+    r = sell(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["booked"] == 4
+    assert body["class_name"] == "Ballet Level 8"
+
+    state = access.plan_state(client.academy.conn, body["id"])
+    assert state["assigned"] == 4
+    assert state["unassigned"] == 0, "a plan with unassigned slots is a promise nobody wrote down"
+
+
+def test_a_plan_runs_through_the_last_session_it_pays_for(client):
+    a = client.academy
+    chosen = a.ballet_sessions[-4:]
+    body = sell(client).json()
+    last = a.conn.execute(
+        "SELECT MAX(starts_at) t FROM sessions WHERE id IN (?,?,?,?)",
+        tuple(chosen)).fetchone()["t"]
+    from datetime import date as _d
+    assert access.plan_state(a.conn, body["id"])["expires_on"] == \
+        _d.fromtimestamp(last).isoformat()
+
+
+def test_a_typed_end_date_overrides_the_last_session(client):
+    body = sell(client, expires_on="2099-01-01").json()
+    assert access.plan_state(client.academy.conn, body["id"])["expires_on"] == "2099-01-01"
+
+
+def test_fewer_sessions_than_slots_is_refused(client):
+    r = sell(client, sessions_total=4, session_ids=client.academy.ballet_sessions[-2:])
+    assert r.status_code == 400
+    assert "assign all 4" in r.json()["detail"]
+
+
+def test_the_same_session_twice_is_refused(client):
+    dup = client.academy.ballet_sessions[-1]
+    r = sell(client, session_ids=[dup, dup, dup, dup])
+    assert r.status_code == 400
+    assert "twice" in r.json()["detail"]
+
+
+def test_a_session_from_another_class_is_refused(client):
+    """A Ballet plan must not quietly pay for a Flexibility session."""
+    a = client.academy
+    r = sell(client, session_ids=a.ballet_sessions[-3:] + a.flex_sessions[-1:])
+    assert r.status_code == 400
+    assert "not Ballet Level 8 sessions" in r.json()["detail"]
+
+
+def test_a_session_the_client_already_holds_is_refused(client):
+    a = client.academy
+    # Dana already has bookings on her own plan's sessions.
+    r = sell(client, cid=a.dual, class_id=a.ballet,
+             session_ids=a.ballet_sessions[:4])
+    assert r.status_code == 400
+    assert "already booked" in r.json()["detail"]
+
+
+def test_an_unknown_class_is_a_404(client):
+    r = sell(client, class_id=9999)
+    assert r.status_code == 404
+
+
+def test_selling_replaces_only_that_classs_previous_plan(client):
+    """A client taking two classes keeps the other one running."""
+    a = client.academy
+    r = sell(client, cid=a.dual, class_id=a.ballet,
+             session_ids=a.ballet_sessions[-4:])
+    assert r.status_code == 200, r.text
+
+    old = a.conn.execute("SELECT active FROM subscriptions WHERE id=?",
+                         (a.dual_ballet_plan,)).fetchone()["active"]
+    flex = a.conn.execute("SELECT active FROM subscriptions WHERE id=?",
+                          (a.dual_flex_plan,)).fetchone()["active"]
+    assert old == 0, "the previous ballet plan is retired"
+    assert flex == 1, "the flexibility plan is untouched"
+
+
+def test_a_past_session_is_booked_straight_to_absent(client):
+    """
+    Reception writes a plan down after the client started coming, so those
+    dates really did pass without them being marked present.
+    """
+    a = client.academy
+    past = [s for s in a.ballet_sessions
+            if a.conn.execute("SELECT ends_at FROM sessions WHERE id=?",
+                              (s,)).fetchone()["ends_at"] < __import__("db").now()]
+    r = sell(client, sessions_total=2, session_ids=past[:2])
+    assert r.status_code == 200, r.text
+    state = access.plan_state(a.conn, r.json()["id"])
+    assert state["absent"] == 2
+    assert state["remaining"] == 0

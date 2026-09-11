@@ -819,6 +819,111 @@ def cancel_session(conn, session_id: int) -> dict:
     return {"ok": True, "released": n}
 
 
+def _assignment_error(conn, client_id, session_ids, class_id, class_label):
+    """
+    Why this set of sessions cannot be assigned to this client, or None.
+
+    The class rule and the double-booking rule, asked once. add_plan() and
+    edit_plan() both enforce them — selling a plan and correcting one are the
+    same question about which sessions a plan may pay for — and two copies of
+    it would eventually disagree.
+    """
+    marks = ",".join("?" * len(session_ids))
+    wrong = conn.execute(
+        f"SELECT COUNT(*) n FROM sessions WHERE id IN ({marks}) AND class_id != ?",
+        (*session_ids, class_id)).fetchone()["n"]
+    if wrong:
+        return f"{wrong} of the chosen sessions are not {class_label}"
+    clash = conn.execute(
+        f"SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id IN ({marks})",
+        (client_id, *session_ids)).fetchone()["n"]
+    if clash:
+        return "already booked into one of those sessions"
+    return None
+
+
+def _book_slots(conn, client_id, sub_id, session_ids):
+    """
+    One booking per slot.
+
+    A session that has already finished is booked straight to absent: the
+    plan is being written down after the client started coming, and those
+    dates really did pass without them being marked present.
+    """
+    for sid in session_ids:
+        s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
+        status = "absent" if s and session_end(s) < db.now() else "booked"
+        conn.execute(
+            "INSERT INTO bookings (client_id, session_id, subscription_id, status,"
+            " created_at) VALUES (?,?,?,?,?)",
+            (client_id, sid, sub_id, status, db.now()))
+
+
+def add_plan(conn, client_id: int, class_id: int, plan: str, sessions_total: int,
+             session_ids: list, price: float = None, starts_on: str = None,
+             expires_on: str = None, paid_on: str = None, notes: str = None) -> dict:
+    """
+    Sell a plan for one class.
+
+    Four rules, enforced here rather than trusted to the UI:
+      - every slot is assigned to a real session up front, because a plan with
+        unassigned slots is a promise nobody has written down;
+      - every one of those sessions belongs to the plan's class, so a Ballet
+        plan cannot quietly pay for a Flexibility session;
+      - only the previous plan *for this class* is replaced, so a client taking
+        two classes keeps the other one running;
+      - a plan runs through the last session it pays for, unless reception
+        types an end date of its own.
+
+    Lives beside edit_plan() rather than in the route that calls it. The two
+    enforce the same four rules over the same tables, and keeping selling in
+    api/clients.py while correcting lived here is what let their validation
+    drift apart in the first place.
+
+    `status` on a refusal is the HTTP code the route should use, so the
+    endpoint stays a translation rather than a second set of rules.
+    """
+    if sessions_total < 1:
+        return {"ok": False, "status": 400, "error": "a plan needs at least one session"}
+    if len(session_ids) != sessions_total:
+        return {"ok": False, "status": 400,
+                "error": f"assign all {sessions_total} sessions "
+                         f"({len(session_ids)} chosen)"}
+    if len(set(session_ids)) != len(session_ids):
+        return {"ok": False, "status": 400, "error": "the same session was chosen twice"}
+
+    klass = conn.execute("SELECT * FROM classes WHERE id=?", (class_id,)).fetchone()
+    if not klass:
+        return {"ok": False, "status": 404, "error": "no such class"}
+
+    bad = _assignment_error(conn, client_id, session_ids, class_id,
+                            f"{klass['name']} sessions")
+    if bad:
+        return {"ok": False, "status": 400, "error": bad}
+
+    # Only this class's previous plan is retired. The client's other class
+    # keeps running.
+    conn.execute("UPDATE subscriptions SET active=0 WHERE client_id=? AND class_id=?",
+                 (client_id, class_id))
+
+    starts = starts_on or date.today().isoformat()
+    # Validity follows the sessions the plan actually pays for: it runs
+    # through the last of them. Reception can still type a date instead -- a
+    # courtesy extension -- and that is what expires_on carries when set.
+    expires = expires_on or last_of_sessions(conn, session_ids) or starts
+    cur = conn.execute(
+        "INSERT INTO subscriptions (client_id, class_id, plan, sessions_total, price,"
+        " starts_on, expires_on, paid_on, notes, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (client_id, class_id, plan, sessions_total, price, starts, expires,
+         paid_on or None, (notes or "").strip() or None, db.now()))
+    sub_id = cur.lastrowid
+    _book_slots(conn, client_id, sub_id, session_ids)
+    conn.commit()
+    return {"ok": True, "id": sub_id, "booked": len(session_ids),
+            "class_id": class_id, "class_name": klass["name"]}
+
+
 def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
              expires_on: str = None, session_ids: list = None,
              paid_on: str = None, clear_paid_on: bool = False,
@@ -916,18 +1021,10 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
 
         new_ids = wanted - current_ids
         if new_ids:
-            marks = ",".join("?" * len(new_ids))
-            wrong = conn.execute(
-                f"SELECT COUNT(*) n FROM sessions WHERE id IN ({marks}) AND class_id != ?",
-                (*new_ids, target_class)).fetchone()["n"]
-            if wrong:
-                return {"ok": False,
-                        "error": f"{wrong} of the chosen sessions are not this plan's class"}
-            clash = conn.execute(
-                f"SELECT COUNT(*) n FROM bookings WHERE client_id=? AND session_id IN ({marks})",
-                (sub["client_id"], *new_ids)).fetchone()["n"]
-            if clash:
-                return {"ok": False, "error": "already booked into one of those sessions"}
+            bad = _assignment_error(conn, sub["client_id"], sorted(new_ids),
+                                    target_class, "this plan's class")
+            if bad:
+                return {"ok": False, "error": bad}
 
         to_drop = current_ids - wanted
         if to_drop:
@@ -935,13 +1032,7 @@ def edit_plan(conn, sub_id: int, plan: str = None, sessions_total: int = None,
             conn.execute(
                 f"DELETE FROM bookings WHERE subscription_id=? AND session_id IN ({marks})",
                 (sub_id, *to_drop))
-        for sid in new_ids:
-            s = conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
-            status = "absent" if s and session_end(s) < db.now() else "booked"
-            conn.execute(
-                "INSERT INTO bookings (client_id, session_id, subscription_id, status,"
-                " created_at) VALUES (?,?,?,?,?)",
-                (sub["client_id"], sid, sub_id, status, db.now()))
+        _book_slots(conn, sub["client_id"], sub_id, sorted(new_ids))
 
     fields = {}
     if moving:
