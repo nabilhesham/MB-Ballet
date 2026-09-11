@@ -59,7 +59,27 @@ def day_bounds(ts: int = None):
 
 
 def session_end(row) -> int:
-    return int(row["starts_at"] + row["duration_hours"] * 3600)
+    """
+    When an already-fetched session row finishes.
+
+    Derived from the row rather than read from `ends_at` on purpose: this is
+    handed rows built by hand in places that have no such column, and the two
+    are the same number by construction — migrate() repairs any row where
+    they are not.
+    """
+    return ends_at_of(row["starts_at"], row["duration_hours"])
+
+
+def ends_at_of(starts_at: int, duration_hours: float) -> int:
+    """
+    When a session starting then and lasting that long finishes.
+
+    The single writer of `sessions.ends_at`. Every path that sets `starts_at`
+    or `duration_hours` must set the column from this — create_session,
+    edit_session, repeat_sessions and seed.py are the four — so the stored
+    value can never disagree with the two it is derived from.
+    """
+    return int(starts_at + duration_hours * 3600)
 
 
 def slot_conflict(conn, starts_at: int, duration_hours: float, exclude_id: int = None):
@@ -84,11 +104,11 @@ def slot_conflict(conn, starts_at: int, duration_hours: float, exclude_id: int =
     (seed.py does not call this — see CLAUDE.md), so the database can still
     hold overlaps the UI would now refuse to create.
     """
-    ends_at = starts_at + duration_hours * 3600
+    ends_at = ends_at_of(starts_at, duration_hours)
     sql = ("SELECT s.id, s.starts_at, s.duration_hours, c.name AS class_name"
            "  FROM sessions s JOIN classes c ON c.id = s.class_id"
            " WHERE s.status != 'cancelled'"
-           "   AND s.starts_at < ? AND s.starts_at + s.duration_hours * 3600 > ?")
+           "   AND s.starts_at < ? AND s.ends_at > ?")
     params = [ends_at, starts_at]
     if exclude_id is not None:
         sql += " AND s.id != ?"
@@ -280,10 +300,10 @@ def settle_past_sessions(conn) -> int:
         "        SELECT id FROM subscriptions WHERE frozen_on IS NOT NULL))"
         "   AND session_id IN ("
         "   SELECT id FROM sessions WHERE status != 'cancelled'"
-        "      AND starts_at + duration_hours*3600 < ?)", (now,))
+        "      AND ends_at < ?)", (now,))
     conn.execute(
         "UPDATE sessions SET status='completed'"
-        " WHERE status='scheduled' AND starts_at + duration_hours*3600 < ?", (now,))
+        " WHERE status='scheduled' AND ends_at < ?", (now,))
     conn.commit()
     return cur.rowcount
 

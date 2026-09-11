@@ -188,13 +188,13 @@ def seed_classes_and_sessions(conn, rosters, warn):
 
             for d in sorted(by_date):
                 starts = int(datetime.combine(d, time(g.hour, g.minute)).timestamp())
-                status = ("completed" if starts + g.duration_hours * 3600 < db.now()
-                          else "scheduled")
+                ends = access.ends_at_of(starts, g.duration_hours)
+                status = "completed" if ends < db.now() else "scheduled"
                 cur = conn.execute(
                     "INSERT INTO sessions (class_id, instructor_id, starts_at,"
-                    " duration_hours, status) VALUES (?,?,?,?,?)",
+                    " duration_hours, ends_at, status) VALUES (?,?,?,?,?,?)",
                     (cid, getattr(g, "instructor_id", None), starts,
-                     g.duration_hours, status))
+                     g.duration_hours, ends, status))
                 by_date[d] = (cur.lastrowid, starts)
             sessions_of[cid] = by_date
     conn.commit()

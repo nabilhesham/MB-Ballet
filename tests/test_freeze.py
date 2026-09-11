@@ -12,6 +12,7 @@ from datetime import date, timedelta
 
 import access
 import db
+from fixtures import add_session
 
 
 def test_freezing_releases_future_bookings(academy):
@@ -47,10 +48,8 @@ def test_the_sweep_leaves_a_frozen_clients_session_alone(academy):
     plan = academy.dual_ballet_plan
     access.freeze_plan(conn, plan)
 
-    past = conn.execute(
-        "INSERT INTO sessions (class_id,instructor_id,starts_at,duration_hours,status)"
-        " VALUES (?,?,?,1.5,'scheduled')",
-        (academy.ballet, academy.ana, db.now() - 4 * 3600)).lastrowid
+    past = add_session(conn, academy.ballet, academy.ana,
+                       db.now() - 4 * 3600, 1.5, status="scheduled")
     conn.execute(
         "INSERT INTO bookings (client_id,session_id,subscription_id,status,created_at)"
         " VALUES (?,?,?,'booked',?)", (academy.dual, past, plan, db.now()))

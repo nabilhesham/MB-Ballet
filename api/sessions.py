@@ -124,9 +124,10 @@ def create_session(body: SessionIn):
         if clash:
             raise HTTPException(400, access.slot_taken_message(clash))
         cur = conn.execute(
-            "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours, notes)"
-            " VALUES (?,?,?,?,?)",
-            (body.class_id, instructor_id, body.starts_at, hours, body.notes))
+            "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours,"
+            " ends_at, notes) VALUES (?,?,?,?,?,?)",
+            (body.class_id, instructor_id, body.starts_at, hours,
+             access.ends_at_of(body.starts_at, hours), body.notes))
         conn.commit()
         return {"id": cur.lastrowid}
     finally:
@@ -166,9 +167,10 @@ def repeat_sessions(body: RepeatIn):
                     skipped.append(access.slot_taken_message(clash))
                     continue
                 conn.execute(
-                    "INSERT INTO sessions (class_id, instructor_id, starts_at, duration_hours)"
-                    " VALUES (?,?,?,?)",
-                    (body.class_id, instructor_id, ts, hours))
+                    "INSERT INTO sessions (class_id, instructor_id, starts_at,"
+                    " duration_hours, ends_at) VALUES (?,?,?,?,?)",
+                    (body.class_id, instructor_id, ts, hours,
+                     access.ends_at_of(ts, hours)))
                 made += 1
         conn.commit()
         return {"created": made, "skipped": skipped}
@@ -223,6 +225,11 @@ def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
                 exclude_id=sid)
             if clash:
                 raise HTTPException(400, access.slot_taken_message(clash))
+            # Moving or stretching a session moves its end. ends_at is
+            # stored, not derived, so it has to travel with them.
+            fields["ends_at"] = access.ends_at_of(
+                fields.get("starts_at", cur["starts_at"]),
+                fields.get("duration_hours", cur["duration_hours"]))
         sets = ", ".join(f"{k}=?" for k in fields)
         conn.execute(f"UPDATE sessions SET {sets} WHERE id=?", (*fields.values(), sid))
         conn.commit()

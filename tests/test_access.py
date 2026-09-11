@@ -10,6 +10,7 @@ from datetime import date, timedelta
 
 import access
 import db
+from fixtures import add_session
 
 
 def test_a_client_holds_one_card_per_class(academy):
@@ -94,10 +95,8 @@ def test_only_present_and_absent_are_accepted(academy):
 
 def test_an_unattended_past_session_is_swept_to_absent(academy):
     conn = academy.conn
-    past = conn.execute(
-        "INSERT INTO sessions (class_id,instructor_id,starts_at,duration_hours,status)"
-        " VALUES (?,?,?,1.5,'scheduled')",
-        (academy.ballet, academy.ana, db.now() - 4 * 3600)).lastrowid
+    past = add_session(conn, academy.ballet, academy.ana,
+                       db.now() - 4 * 3600, 1.5, status="scheduled")
     conn.execute(
         "INSERT INTO bookings (client_id,session_id,subscription_id,status,created_at)"
         " VALUES (?,?,NULL,'booked',?)", (academy.planless, past, db.now()))
@@ -112,10 +111,8 @@ def test_an_unattended_past_session_is_swept_to_absent(academy):
 
 def test_the_sweep_also_completes_the_session(academy):
     conn = academy.conn
-    past = conn.execute(
-        "INSERT INTO sessions (class_id,instructor_id,starts_at,duration_hours,status)"
-        " VALUES (?,?,?,1.5,'scheduled')",
-        (academy.ballet, academy.ana, db.now() - 4 * 3600)).lastrowid
+    past = add_session(conn, academy.ballet, academy.ana,
+                       db.now() - 4 * 3600, 1.5, status="scheduled")
     conn.commit()
     access.settle_past_sessions(conn)
     assert conn.execute("SELECT status FROM sessions WHERE id=?",

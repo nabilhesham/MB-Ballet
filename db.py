@@ -41,6 +41,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     instructor_id  INTEGER REFERENCES instructors(id),
     starts_at      INTEGER NOT NULL,          -- unix seconds
     duration_hours REAL NOT NULL DEFAULT 1.5,
+    -- starts_at + duration_hours*3600, written rather than derived.
+    --
+    -- "Has this session ended?" is asked on nearly every request:
+    -- settle_past_sessions() runs at the top of about a dozen read
+    -- endpoints, and slot_conflict() guards every create, edit, repeat and
+    -- un-cancel. Computed in the WHERE clause it is a full table scan,
+    -- because a predicate wrapping a column cannot use an index. Stored, it
+    -- is a range scan on ix_sess_ends.
+    --
+    -- access.ends_at_of() is its only writer. Any new path that sets
+    -- starts_at or duration_hours must set this too -- see
+    -- tests/test_scheduling.py, which asserts no row ever disagrees.
+    ends_at        INTEGER,
     status         TEXT NOT NULL DEFAULT 'scheduled',  -- scheduled|completed|cancelled
     notes          TEXT
 );
@@ -204,6 +217,7 @@ CREATE INDEX IF NOT EXISTS ix_cred_token  ON credentials(token);
 
 CREATE INDEX IF NOT EXISTS ix_ev_time     ON access_events(scanned_at);
 CREATE INDEX IF NOT EXISTS ix_sess_start  ON sessions(starts_at);
+CREATE INDEX IF NOT EXISTS ix_sess_ends   ON sessions(ends_at);
 CREATE INDEX IF NOT EXISTS ix_sub_client  ON subscriptions(client_id, class_id, active);
 CREATE INDEX IF NOT EXISTS ix_bk_client   ON bookings(client_id);
 CREATE INDEX IF NOT EXISTS ix_bk_session  ON bookings(session_id);
@@ -271,6 +285,7 @@ def migrate(conn) -> None:
                     ("dob", "TEXT")],
         "instructors": [("hourly_rate", "REAL NOT NULL DEFAULT 0"), ("photo_path", "TEXT")],
         "classes": [("level", "TEXT"), ("instructor_id", "INTEGER")],
+        "sessions": [("ends_at", "INTEGER")],
         "credentials": [("class_id", "INTEGER")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
@@ -287,6 +302,17 @@ def migrate(conn) -> None:
         for name, decl in columns:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+    conn.commit()
+
+    # Fill in any session whose end is not recorded. Deliberately not guarded
+    # by a one-shot marker like the expiry backfill below: it is targeted at
+    # exactly the rows that are wrong, costs nothing when there are none, and
+    # so doubles as a repair for any write path that forgets to set it. A
+    # NULL here is invisible to slot_conflict() and to the absent sweep,
+    # which is a silent wrong answer rather than a loud one.
+    conn.execute(
+        "UPDATE sessions SET ends_at = CAST(starts_at + duration_hours * 3600 AS INTEGER)"
+        " WHERE ends_at IS NULL")
     conn.commit()
 
     # One-shot. expires_on used to be a floor that plan_state() raised at

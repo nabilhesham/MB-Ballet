@@ -52,6 +52,21 @@ def _ins(conn, table: str, **cols) -> int:
     ).lastrowid
 
 
+def add_session(conn, class_id, instructor_id, starts_at, hours=1.5, status=None):
+    """
+    Create a session with its `ends_at` set.
+
+    The one way tests make a session. `ends_at` is stored rather than derived
+    (see db.py), and a row missing it is invisible to slot_conflict() and to
+    the absent sweep — a silent wrong answer. Going through here means a test
+    cannot create one by hand and get that wrong.
+    """
+    ends = access.ends_at_of(starts_at, hours)
+    return _ins(conn, "sessions", class_id=class_id, instructor_id=instructor_id,
+                starts_at=starts_at, duration_hours=hours, ends_at=ends,
+                status=status or ("completed" if ends < db.now() else "scheduled"))
+
+
 def _card(conn, client_id: int, class_id: int) -> str:
     token = tokens.issue(client_id)
     _ins(conn, "credentials", client_id=client_id, class_id=class_id,
@@ -132,19 +147,15 @@ def build_academy(conn) -> SimpleNamespace:
     for i in range(BALLET_SESSIONS):
         d = today - timedelta(days=BALLET_START_DAYS_AGO) + timedelta(days=3 * i)
         starts = _ts(d, 18)
-        a.ballet_sessions.append(_ins(
-            conn, "sessions", class_id=a.ballet, instructor_id=a.ana,
-            starts_at=starts, duration_hours=1.5,
-            status="completed" if starts + 1.5 * 3600 < db.now() else "scheduled"))
+        a.ballet_sessions.append(
+            add_session(conn, a.ballet, a.ana, starts, 1.5))
 
     a.flex_sessions = []
     for i in range(FLEX_SESSIONS):
         d = today - timedelta(days=FLEX_START_DAYS_AGO) + timedelta(days=7 * i)
         starts = _ts(d, 17)
-        a.flex_sessions.append(_ins(
-            conn, "sessions", class_id=a.flex, instructor_id=a.bea,
-            starts_at=starts, duration_hours=1.0,
-            status="completed" if starts + 3600 < db.now() else "scheduled"))
+        a.flex_sessions.append(
+            add_session(conn, a.flex, a.bea, starts, 1.0))
 
     # Neither recurring series may land on today, or a scan matches whichever
     # of two sessions is nearer the clock and the suite passes or fails by
@@ -163,10 +174,9 @@ def build_academy(conn) -> SimpleNamespace:
     # few hours out but kept inside today, since "one check-in per day" is
     # scoped to the session's own calendar day.
     end_of_day = _ts(today, 23, 50)
-    a.today_ballet = _ins(conn, "sessions", class_id=a.ballet,
-                          instructor_id=a.ana,
-                          starts_at=min(db.now() + 3 * 3600, end_of_day),
-                          duration_hours=1.5, status="scheduled")
+    a.today_ballet = add_session(conn, a.ballet, a.ana,
+                                 min(db.now() + 3 * 3600, end_of_day), 1.5,
+                                 status="scheduled")
 
     # -------------------------------------------------- clients
     def client(name, phone, **extra):
