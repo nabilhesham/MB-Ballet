@@ -39,7 +39,17 @@ hiddenimports = [
     "server", "access", "cards", "config", "db", "tokens",
     "repo", "repo.base", "repo.ports", "repo.errors", "repo.filters",
     "repo.sqlite", "repo.sqlite.filters", "repo.sqlite.ports",
-    "repo.mongo",
+    # The Mongo backend is imported lazily by repo/__init__.py, so a build
+    # without pymongo still produces a working SQLite-only exe. Listed here
+    # so that a build *with* it bundles the whole package rather than the
+    # one module PyInstaller can see from a lazy import.
+    "repo.mongo", "repo.mongo.client", "repo.mongo.filters",
+    "repo.mongo.ids", "repo.mongo.ports", "repo.mongo.schema",
+    # pymongo and bson load pieces by string name and ship C extensions, so
+    # static analysis misses them -- the same reason uvicorn's are listed
+    # above. dnspython is only needed for mongodb+srv:// URIs.
+    "pymongo", "pymongo._cmessage", "bson", "bson._cbson",
+    "dns", "dns.resolver",
     "api", "api.clients", "api.plans", "api.classes",
     "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
 ]
