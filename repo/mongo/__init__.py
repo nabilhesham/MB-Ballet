@@ -67,10 +67,14 @@ class MongoRepo(MongoAccess, MongoSessions, MongoBookings, MongoClasses,
                 if session.in_transaction:
                     session.abort_transaction()
                 raise
+            else:
+                self._commit(session)
             finally:
-                pass
-            self._commit(session)
-            self.session = None
+                # Always, including the failure path. Leaving a closed
+                # session on the repo means the next begin() tries to reuse
+                # it and pymongo raises InvalidOperation -- so one failed
+                # transaction would poison every write after it.
+                self.session = None
 
     @staticmethod
     def _commit(session):

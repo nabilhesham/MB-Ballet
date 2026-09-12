@@ -6,7 +6,7 @@ the only judgement is that field names are checked against a whitelist
 rather than interpolated freely, since they reach the SQL as text.
 """
 
-from ..filters import FilterError, validate
+from ..filters import check_field, validate
 
 _OPS = {"eq": "=", "ne": "!=", "lt": "<", "lte": "<=", "gt": ">", "gte": ">=",
         "like": "LIKE"}
@@ -16,13 +16,11 @@ def _column(name: str) -> str:
     """
     Guard a field name before it is interpolated.
 
-    Values are always bound as parameters, but a column name cannot be —
-    so the names are restricted to what a column can actually be called.
-    Every field in this app's schema is lowercase ASCII with underscores.
+    Values always bind as parameters; a column name cannot, so the names are
+    restricted to what a column can actually be called. The rule itself lives
+    in repo/filters.py so both backends refuse the same things.
     """
-    if not name.replace("_", "").isalnum():
-        raise FilterError(f"{name!r} is not a column name")
-    return name
+    return check_field(name)
 
 
 def compile_where(flt: dict):

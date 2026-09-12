@@ -35,6 +35,20 @@ class FilterError(ValueError):
     """The filter is not expressible. Raised by both backends identically."""
 
 
+def check_field(name: str) -> str:
+    """
+    Guard a field name.
+
+    Checked here rather than in the SQLite compiler, even though only SQL
+    interpolates it into a statement. A filter either works on both backends
+    or is refused by both — an interface where one silently accepts what the
+    other rejects is not one interface.
+    """
+    if not name.replace("_", "").isalnum():
+        raise FilterError(f"{name!r} is not a field name")
+    return name
+
+
 def validate(flt: dict) -> dict:
     """Check a filter before either backend sees it, so both refuse alike."""
     if flt is None:
@@ -50,6 +64,7 @@ def validate(flt: dict) -> dict:
             continue
         if field.startswith("$"):
             raise FilterError(f"unknown top-level operator {field!r}")
+        check_field(field)
         if isinstance(cond, dict):
             for op in cond:
                 if op not in OPERATORS:

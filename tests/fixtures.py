@@ -69,6 +69,26 @@ def later_today(hours: float = 2) -> int:
     return min(db.now() + int(hours * 3600), end_of_day)
 
 
+def session_doc(class_id, instructor_id, starts_at, hours=1.5, status=None):
+    """The document for one session, with its `ends_at` set."""
+    ends = access.ends_at_of(starts_at, hours)
+    return {"class_id": class_id, "instructor_id": instructor_id,
+            "starts_at": starts_at, "duration_hours": hours, "ends_at": ends,
+            "status": status or ("completed" if ends < db.now() else "scheduled")}
+
+
+def add_sessions(repo, specs) -> list:
+    """
+    Create many sessions in one write.
+
+    One insert per session is ~100ms against a networked backend, and this
+    fixture makes thirty-odd of them — which is most of a minute per test
+    before a single assertion runs. The production code batches for the same
+    reason (see Repo.insert_many); the fixture had no business not doing so.
+    """
+    return repo.insert_many("sessions", [session_doc(*spec) for spec in specs])
+
+
 def add_session(repo, class_id, instructor_id, starts_at, hours=1.5, status=None):
     """
     Create a session with its `ends_at` set.
@@ -78,10 +98,8 @@ def add_session(repo, class_id, instructor_id, starts_at, hours=1.5, status=None
     the absent sweep — a silent wrong answer. Going through here means a test
     cannot create one by hand and get that wrong.
     """
-    ends = access.ends_at_of(starts_at, hours)
-    return _ins(repo, "sessions", class_id=class_id, instructor_id=instructor_id,
-                starts_at=starts_at, duration_hours=hours, ends_at=ends,
-                status=status or ("completed" if ends < db.now() else "scheduled"))
+    return repo.insert("sessions",
+                       session_doc(class_id, instructor_id, starts_at, hours, status))
 
 
 def _card(repo, client_id: int, class_id: int) -> str:
@@ -116,17 +134,24 @@ def _fill(repo, client_id, sub_id, session_ids):
     needs to own the only row it can touch.
     """
     now = db.now()
-    last = None
-    for i, sid in enumerate(session_ids):
-        s = repo.get("sessions", sid)
+    ids = list(session_ids)
+    if not ids:
+        return
+    # One read and one write for the whole plan, not two per slot.
+    sessions = {x["id"]: x for x in repo.find("sessions", {"id": {"in": ids}})}
+    docs, last = [], None
+    for i, sid in enumerate(ids):
+        s = sessions[sid]
         ended = s["ends_at"] < now
         # Alternate present/absent so counts of each are non-trivial.
         status = ("present" if i % 3 else "absent") if ended else "booked"
-        _ins(repo, "bookings", client_id=client_id, session_id=sid,
-             subscription_id=sub_id, status=status,
-             checked_in_at=(s["starts_at"] if status == "present" else None),
-             created_at=now)
+        docs.append({"client_id": client_id, "session_id": sid,
+                     "subscription_id": sub_id, "status": status,
+                     "checked_in_at": (s["starts_at"] if status == "present"
+                                       else None),
+                     "created_at": now})
         last = max(last or s["starts_at"], s["starts_at"])
+    repo.insert_many("bookings", docs)
     if last is not None:
         repo.update("subscriptions", sub_id,
                     {"expires_on": date.fromtimestamp(last).isoformat()})
@@ -139,40 +164,41 @@ def build_academy(repo) -> SimpleNamespace:
     """
     with repo.begin():
         today = date.today()
-        a = SimpleNamespace(repo=repo, conn=repo.conn)
+        # `conn` is the raw sqlite3 connection, and only the SQLite backend
+        # has one. Present for the tests that are explicitly about SQLite;
+        # None everywhere else.
+        a = SimpleNamespace(repo=repo, conn=getattr(repo, "conn", None))
 
         # -------------------------------------------------- instructors
         # Both carry a rate: pay is hours x rate at read time, so a zero rate
         # makes the payroll assertions vacuous.
-        a.ana = _ins(repo, "instructors", name="Ana Ferrer", phone="01000000001",
-                     specialty="Ballet", hourly_rate=120.0, active=1)
-        a.bea = _ins(repo, "instructors", name="Bea Nasr", phone="01000000002",
-                     specialty="Flexibility", hourly_rate=100.0, active=1)
+        a.ana, a.bea = repo.insert_many("instructors", [
+            {"name": "Ana Ferrer", "phone": "01000000001",
+             "specialty": "Ballet", "hourly_rate": 120.0, "active": 1},
+            {"name": "Bea Nasr", "phone": "01000000002",
+             "specialty": "Flexibility", "hourly_rate": 100.0, "active": 1}])
 
         # -------------------------------------------------- classes
-        a.ballet = _ins(repo, "classes", name="Ballet Level 8",
-                        description="Graded ballet", colour="#87438E",
-                        duration_hours=1.5, level="level 8",
-                        instructor_id=a.ana, active=1)
-        a.flex = _ins(repo, "classes", name="Evening Flexibility",
-                      description="Conditioning", colour="#EAAECA",
-                      duration_hours=1.0, level="primary",
-                      instructor_id=a.bea, active=1)
+        a.ballet, a.flex = repo.insert_many("classes", [
+            {"name": "Ballet Level 8", "description": "Graded ballet",
+             "colour": "#87438E", "duration_hours": 1.5, "level": "level 8",
+             "instructor_id": a.ana, "active": 1},
+            {"name": "Evening Flexibility", "description": "Conditioning",
+             "colour": "#EAAECA", "duration_hours": 1.0, "level": "primary",
+             "instructor_id": a.bea, "active": 1}])
 
         # -------------------------------------------------- sessions
-        a.ballet_sessions = []
-        for i in range(BALLET_SESSIONS):
-            d = today - timedelta(days=BALLET_START_DAYS_AGO) + timedelta(days=3 * i)
-            starts = _ts(d, 18)
-            a.ballet_sessions.append(
-                add_session(repo, a.ballet, a.ana, starts, 1.5))
+        a.ballet_sessions = add_sessions(repo, [
+            (a.ballet, a.ana,
+             _ts(today - timedelta(days=BALLET_START_DAYS_AGO)
+                 + timedelta(days=3 * i), 18), 1.5, None)
+            for i in range(BALLET_SESSIONS)])
 
-        a.flex_sessions = []
-        for i in range(FLEX_SESSIONS):
-            d = today - timedelta(days=FLEX_START_DAYS_AGO) + timedelta(days=7 * i)
-            starts = _ts(d, 17)
-            a.flex_sessions.append(
-                add_session(repo, a.flex, a.bea, starts, 1.0))
+        a.flex_sessions = add_sessions(repo, [
+            (a.flex, a.bea,
+             _ts(today - timedelta(days=FLEX_START_DAYS_AGO)
+                 + timedelta(days=7 * i), 17), 1.0, None)
+            for i in range(FLEX_SESSIONS)])
 
         # Neither recurring series may land on today, or a scan matches whichever
         # of two sessions is nearer the clock and the suite passes or fails by
@@ -180,8 +206,9 @@ def build_academy(repo) -> SimpleNamespace:
         # only correct as long as nobody edits the intervals.
         day = access.day_bounds()
         for label, series in (("ballet", a.ballet_sessions), ("flex", a.flex_sessions)):
-            clash = [s for s in series
-                     if day[0] <= repo.get("sessions", s)["starts_at"] < day[1]]
+            starts = {x["id"]: x["starts_at"] for x in
+                      repo.find("sessions", {"id": {"in": series}})}
+            clash = [s for s in series if day[0] <= starts[s] < day[1]]
             assert not clash, (
                 f"the {label} series put {len(clash)} session(s) on today; adjust "
                 f"{label.upper()}_START_DAYS_AGO so the interval never divides it")
@@ -193,28 +220,32 @@ def build_academy(repo) -> SimpleNamespace:
                                      status="scheduled")
 
         # -------------------------------------------------- clients
-        def client(name, phone, **extra):
-            return _ins(repo, "clients", name_en=name, phone=phone,
-                        joined_on=extra.pop("joined_on", today.isoformat()),
-                        created_at=db.now(), active=1, **extra)
+        def client_doc(name, phone, **extra):
+            return {"name_en": name, "phone": phone,
+                    "joined_on": extra.pop("joined_on", today.isoformat()),
+                    "created_at": db.now(), "active": 1, **extra}
 
-        # Takes both classes — the subject the one-card-per-class rule is for.
-        a.dual = client("Dana Halim", "01111111111", age=12.5, school="Manor House")
-        a.solo_ballet = client("Farah Adel", "01111111112", age=9.0)
-        a.solo_flex = client("Hana Sabry", "01111111113", age=4.8)
-        a.lapsed = client("Injy Tarek", "01111111114", age=15.0,
-                          joined_on=(today - timedelta(days=120)).isoformat())
-        a.planless = client("Jana Wael", "01111111115", age=7.0)
-        a.archived = client("Karim Nour", "01111111116", age=11.0)
+        # Dana takes both classes — the subject the one-card-per-class rule
+        # is for. Karim is archived.
+        (a.dual, a.solo_ballet, a.solo_flex, a.lapsed, a.planless,
+         a.archived) = repo.insert_many("clients", [
+            client_doc("Dana Halim", "01111111111", age=12.5,
+                       school="Manor House"),
+            client_doc("Farah Adel", "01111111112", age=9.0),
+            client_doc("Hana Sabry", "01111111113", age=4.8),
+            client_doc("Injy Tarek", "01111111114", age=15.0,
+                       joined_on=(today - timedelta(days=120)).isoformat()),
+            client_doc("Jana Wael", "01111111115", age=7.0),
+            client_doc("Karim Nour", "01111111116", age=11.0)])
         repo.update("clients", a.archived, {"active": 0})
 
         # -------------------------------------------------- plans
         def split(session_ids):
             now = db.now()
-            past, future = [], []
-            for s in session_ids:
-                row = repo.get("sessions", s)
-                (past if row["starts_at"] < now else future).append(s)
+            starts = {x["id"]: x["starts_at"] for x in
+                      repo.find("sessions", {"id": {"in": list(session_ids)}})}
+            past = [s for s in session_ids if starts[s] < now]
+            future = [s for s in session_ids if starts[s] >= now]
             return past, future
 
         past_b, future_b = split(a.ballet_sessions)
@@ -258,11 +289,10 @@ def build_academy(repo) -> SimpleNamespace:
 
         # -------------------------------------------------- payroll
         # The salary sheet's half of the picture: one row per instructor per day.
-        for i in range(10):
-            d = (today - timedelta(days=i + 1)).isoformat()
-            _ins(repo, "instructor_hours", instructor_id=a.ana, work_date=d,
-                 hours=4.0, source="salary sheet", created_at=db.now())
-            _ins(repo, "instructor_hours", instructor_id=a.bea, work_date=d,
-                 hours=3.0, source="salary sheet", created_at=db.now())
+        repo.insert_many("instructor_hours", [
+            {"instructor_id": who,
+             "work_date": (today - timedelta(days=i + 1)).isoformat(),
+             "hours": hours, "source": "salary sheet", "created_at": db.now()}
+            for i in range(10) for who, hours in ((a.ana, 4.0), (a.bea, 3.0))])
 
         return a

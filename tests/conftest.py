@@ -17,6 +17,12 @@ import pytest
 # any project import below.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Read .env the same way the app does, so MB_TEST_MONGO_URI can live there
+# rather than being exported by hand before every run. Done before the
+# ENTRY_SECRET default below, so a real secret in the file still wins.
+import config                                 # noqa: E402
+config.load_env()
+
 # tokens.py refuses to import a secret it cannot find, and the real one lives
 # in a .env that is not in git. Set before `import tokens` anywhere.
 os.environ.setdefault("ENTRY_SECRET", "test-secret-not-a-real-key")
@@ -37,6 +43,20 @@ TEST_MONGO_URI = "MB_TEST_MONGO_URI"
 TEST_DB_PREFIX = "mbtest_"
 
 
+def pytest_collection_modifyitems(items):
+    """
+    Skip the SQLite-only tests on any other backend.
+
+    The marker was registered and tagged but nothing acted on it, so
+    `PRAGMA table_info` ran against MongoDB. A marker with no hook behind it
+    is a comment.
+    """
+    for item in items:
+        if item.get_closest_marker("sqlite_only") and "[mongo]" in item.name:
+            item.add_marker(pytest.mark.skip(
+                reason="describes the SQLite backend itself"))
+
+
 @pytest.fixture(params=BACKENDS)
 def backend(request):
     if request.param == "mongo" and not os.environ.get(TEST_MONGO_URI):
@@ -49,10 +69,13 @@ def backend(request):
 @pytest.fixture(scope="session")
 def mongo_database():
     """
-    One database for the whole session, cleared between tests.
+    One database for the whole session, with its indexes built once.
 
-    Not one per test: creating and dropping a database on Atlas costs a
-    round trip each way and there are hundreds of tests.
+    Not one per test, and emphatically not drop_all() per test: dropping
+    twelve collections and rebuilding every index costs about thirteen
+    seconds a test over the network, which is three quarters of an hour for
+    this suite. The indexes are structure and do not change between tests;
+    only the documents do. See mongo_clean().
     """
     uri = os.environ.get(TEST_MONGO_URI)
     if not uri:
@@ -61,13 +84,35 @@ def mongo_database():
         return
     import uuid
     name = f"{TEST_DB_PREFIX}{uuid.uuid4().hex[:12]}"
+
+    # The same process-wide client the app uses. Building one per test is
+    # a TLS handshake and a round of topology discovery each time, which is
+    # the anti-pattern repo/mongo/client.py exists to avoid -- and closing
+    # it mid-suite cancels operations still in flight.
+    from repo.mongo import schema
+    from repo.mongo.client import get_client, reset
+    client = get_client(uri)
+    schema.ensure_indexes(client[name])
     yield name
-    from pymongo import MongoClient
-    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
     try:
         client.drop_database(name)
     finally:
-        client.close()
+        reset()
+
+
+def mongo_clean(uri, name):
+    """
+    Empty every collection and put the id counters back to zero.
+
+    Resetting the counters matters beyond tidiness: the parity tests compare
+    documents field for field, which only works because both backends hand
+    out 1, 2, 3… from an empty database.
+    """
+    from repo.mongo import ids, schema
+    from repo.mongo.client import get_client
+    database = get_client(uri)[name]
+    for coll in list(schema.FIELDS) + [ids.COUNTERS]:
+        database[coll].delete_many({})
 
 
 @pytest.fixture
@@ -90,12 +135,12 @@ def repo(backend, tmp_path, monkeypatch, mongo_database):
         monkeypatch.setenv("MB_MONGO_DB", mongo_database)
         monkeypatch.setenv("MB_MONGO_ALLOW_DROP", "1")
 
-    r = data.connect()
     if backend == "mongo":
-        # Each test starts from nothing, and ids start from 1 again --
-        # which is what lets the parity tests compare documents directly.
-        r.drop_all()
-    r.init_schema()
+        # Documents only. The indexes were built once, for the session.
+        mongo_clean(os.environ[TEST_MONGO_URI], mongo_database)
+    r = data.connect()
+    if backend == "sqlite":
+        r.init_schema()
     yield r
     r.close()
 
