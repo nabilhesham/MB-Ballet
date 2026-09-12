@@ -201,6 +201,9 @@ static/fonts/     The card's typefaces (DejaVu Serif/Serif-Bold/SansMono)
                   plus their licence. Committed on purpose — cards.py sets
                   the card from these rather than from whatever the machine
                   has installed, so one card looks the same everywhere.
+static/logo.png   The academy mark, on the printed card and the kiosk's idle
+                  screen. **Transparent background** — keep it that way; see
+                  the note in the card section below.
 static/style.css  Design tokens and components. Shared by the React admin,
                   reception.html and scanner-test.html — all three load it
                   by the same `/static/style.css` URL, so it is never bundled
@@ -1146,6 +1149,18 @@ a face where 0 and O cannot be confused is worth the break in the family. The
 two figures under the QR are letter-spaced the way that number is — same
 treatment, not the same font or colour — so the card's figures read as
 belonging together.
+
+**The logo must stay a transparent PNG.** `build_card()` composites it with
+its own alpha so the card's paper shows through, and the kiosk's idle screen
+shows the same file. `static/logo.png` shipped as opaque RGB, so what the
+card actually printed was a white rectangle on off-white paper, edged top and
+bottom by the thin black scan lines in the original file. The background was
+knocked out on the asset by flood-filling the *colourless* pixels inward from
+the border — every part of the artwork is saturated (the purple spreads 75
+points across its channels), everything that is not is a pure neutral, and
+the flood is what spares the white "MB Ballet Academy" lettering inside the
+purple panel, which a blanket knockout would have punched through to the
+paper. Replace the logo only with a PNG that already has alpha.
 
 Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
 the filename so two cards coexist. `cards.card_path()` derives that name and is
