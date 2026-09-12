@@ -34,6 +34,10 @@ class SqliteRepo(SqliteAccess, SqliteSessions, SqliteBookings,
     def begin(self):
         return db.tx(self.conn)
 
+    @property
+    def in_transaction(self):
+        return self.conn.in_transaction
+
     # ---------------------------------------------------------- helpers
 
     def _select(self, coll, flt, sort=None, limit=None, fields=None, count=False):

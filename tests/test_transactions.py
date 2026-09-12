@@ -30,7 +30,7 @@ def test_a_block_that_finishes_is_committed(repo):
     with repo.begin():
         add(repo, "Kept")
     assert clients(repo) == 1
-    assert not repo.conn.in_transaction
+    assert not repo.in_transaction
 
 
 def test_a_block_that_raises_is_rolled_back(repo):
@@ -39,7 +39,7 @@ def test_a_block_that_raises_is_rolled_back(repo):
             add(repo, "Doomed")
             raise ValueError("something went wrong halfway")
     assert clients(repo) == 0
-    assert not repo.conn.in_transaction
+    assert not repo.in_transaction
 
 
 def test_every_write_in_a_failed_block_goes_back(repo):
@@ -57,7 +57,7 @@ def test_a_write_outside_a_block_autocommits(repo):
     """A single statement needs no ceremony; isolation_level=None commits it."""
     add(repo, "Loner")
     assert clients(repo) == 1
-    assert not repo.conn.in_transaction
+    assert not repo.in_transaction
 
 
 # ---------------------------------------------------------------- nesting
@@ -72,7 +72,7 @@ def test_an_inner_block_does_not_commit_early(repo):
             add(repo, "Inner")
         # Still inside the outer block: nothing is visible to a second
         # connection yet, and the transaction is still open.
-        assert repo.conn.in_transaction
+        assert repo.in_transaction
     assert clients(repo) == 1
 
 
@@ -97,7 +97,7 @@ def test_nesting_survives_three_levels(repo):
             with repo.begin():
                 add(repo, "Deep")
     assert clients(repo) == 1
-    assert not repo.conn.in_transaction
+    assert not repo.in_transaction
 
 
 def test_the_connection_is_reusable_after_a_rollback(repo):
@@ -112,12 +112,17 @@ def test_the_connection_is_reusable_after_a_rollback(repo):
 
 # ------------------------------------------------------- the write lock
 
+@pytest.mark.sqlite_only
 def test_a_block_takes_the_write_lock_at_the_top(repo):
     """
     BEGIN IMMEDIATE, not BEGIN. A deferred transaction takes the lock at the
     first write, so book()'s count-then-insert would take its count without
     holding it and two concurrent sales could each see room for the last
     slot.
+
+    SQLite-only: this is about a second connection being locked out of one
+    file. MongoDB's answer to the same problem is document-level and is
+    covered by test_parity's rollback check instead.
     """
     other = db.connect()
     # Don't sit through connect()'s 3s busy_timeout just to be told no.
@@ -236,6 +241,6 @@ def test_refresh_expiry_is_committed_by_whoever_opened_the_block(academy):
 
     access.unbook(repo, a.dual, latest)
 
-    assert not repo.conn.in_transaction, "unbook closed its own block"
+    assert not repo.in_transaction, "unbook closed its own block"
     after = access.plan_state(repo, a.dual_ballet_plan)["expires_on"]
     assert after < before, f"{before} -> {after}"

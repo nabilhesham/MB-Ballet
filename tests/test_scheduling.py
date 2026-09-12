@@ -187,10 +187,15 @@ def test_no_session_ever_disagrees_with_its_stored_end(academy):
     assert wrong == []
 
 
+@pytest.mark.sqlite_only
 def test_migrate_repairs_a_session_whose_end_is_missing(empty):
     """
     The backfill is targeted at NULL rows rather than run once behind a
     marker, so it also repairs anything a future write path forgets.
+
+    SQLite-only: db.migrate() is the ALTER TABLE path. MongoDB's equivalent
+    is the read-time normalisation in repo/mongo/schema.py, which cannot
+    leave a field missing in the first place.
     """
     repo = empty.repo
     sid = add(empty, empty.ballet, at(1, 18), 1.5)

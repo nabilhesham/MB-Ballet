@@ -70,6 +70,19 @@ class Repo(ABC):
         half-succeeds on purpose.
         """
 
+    @property
+    @abstractmethod
+    def in_transaction(self) -> bool:
+        """
+        Whether a transaction is currently open.
+
+        Part of the transaction contract rather than a debugging aid: it is
+        how re-entrancy is detected on both backends, and it is the only way
+        a caller can tell an inner block from an outer one. Exposed so tests
+        can assert on it without reaching past the interface for a sqlite3
+        connection that the other backend does not have.
+        """
+
     def __enter__(self):
         return self
 

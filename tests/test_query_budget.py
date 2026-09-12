@@ -19,6 +19,19 @@ import db
 from fixtures import _ins
 
 
+def _repo_classes():
+    """Every concrete Repo implementation that can be loaded."""
+    from repo.sqlite import SqliteRepo
+    classes = [SqliteRepo]
+    try:
+        from repo.mongo import MongoRepo
+    except ImportError:          # pragma: no cover - no pymongo installed
+        pass
+    else:
+        classes.append(MongoRepo)
+    return classes
+
+
 class Counted:
     """
     Counts repository operations — the unit that costs a round trip.
@@ -58,15 +71,19 @@ class Counted:
         self.calls = []
 
     def __enter__(self):
-        from repo.sqlite import SqliteRepo
-        for name in self.COUNTED:
-            original = getattr(SqliteRepo, name)
+        # Both backends, not just SQLite. Patching one class meant the
+        # counter saw nothing on the other and every assertion passed
+        # vacuously -- the same way this helper's first version did by
+        # watching the wrong connection.
+        for cls in _repo_classes():
+            for name in self.COUNTED:
+                original = getattr(cls, name)
 
-            def wrapper(inner_self, *a, _o=original, _n=name, **kw):
-                self.calls.append(_n)
-                return _o(inner_self, *a, **kw)
+                def wrapper(inner_self, *a, _o=original, _n=name, **kw):
+                    self.calls.append(_n)
+                    return _o(inner_self, *a, **kw)
 
-            self.monkeypatch.setattr(SqliteRepo, name, wrapper)
+                self.monkeypatch.setattr(cls, name, wrapper)
         return self
 
     def __exit__(self, *exc):
@@ -84,18 +101,27 @@ class Counted:
 
 
 def more_clients(repo, academy, n):
-    """n extra active clients, each with a live plan and a booking."""
+    """
+    n extra active clients, each with a live plan and a booking.
+
+    Three writes rather than 3n. The point of this helper is to make the
+    *page* do more work, not the setup — and 120 sequential inserts inside
+    one transaction is a slow, needlessly heavy way to arrange that against
+    a networked backend.
+    """
     with repo.begin():
-        for i in range(n):
-            cid = _ins(repo, "clients", name_en=f"Extra {i}",
-                       joined_on="2026-01-01", created_at=db.now(), active=1)
-            sub = _ins(repo, "subscriptions", client_id=cid, class_id=academy.ballet,
-                       plan="4 sessions", sessions_total=4, price=100.0,
-                       starts_on="2026-01-01", expires_on="2099-01-01",
-                       active=1, created_at=db.now())
-            _ins(repo, "bookings", client_id=cid,
-                 session_id=academy.ballet_sessions[0], subscription_id=sub,
-                 status="present", created_at=db.now())
+        clients = repo.insert_many("clients", [
+            {"name_en": f"Extra {i}", "joined_on": "2026-01-01",
+             "created_at": db.now(), "active": 1} for i in range(n)])
+        plans = repo.insert_many("subscriptions", [
+            {"client_id": cid, "class_id": academy.ballet, "plan": "4 sessions",
+             "sessions_total": 4, "price": 100.0, "starts_on": "2026-01-01",
+             "expires_on": "2099-01-01", "active": 1, "created_at": db.now()}
+            for cid in clients])
+        repo.insert_many("bookings", [
+            {"client_id": cid, "session_id": academy.ballet_sessions[0],
+             "subscription_id": sub, "status": "present", "created_at": db.now()}
+            for cid, sub in zip(clients, plans)])
 
 
 @pytest.fixture

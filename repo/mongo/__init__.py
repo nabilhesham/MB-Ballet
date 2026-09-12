@@ -48,6 +48,10 @@ class MongoRepo(MongoAccess, MongoSessions, MongoBookings, MongoClasses,
             self.session.end_session()
             self.session = None
 
+    @property
+    def in_transaction(self):
+        return self.session is not None and self.session.in_transaction
+
     @contextmanager
     def begin(self):
         """
