@@ -1224,6 +1224,17 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 - [ ] No migration from the pre-bookings schema. Three tables were replaced at
       once, so an old `academy.db` must be re-seeded rather than upgraded.
 - [ ] Nightly SQLite backup + a *tested* restore.
+- [ ] The MongoDB backend has never run on the reception laptop, only
+      against Atlas from a developer machine. `MB_DB_BACKEND` stays
+      `sqlite` there until someone has a reason to change it and has
+      thought about what happens when the internet drops.
+- [ ] `migrate_to_mongo.py` has been run against a synthetic database, not
+      against the academy's real one. Do that on a *copy*, and check a
+      previously printed card still scans before trusting it.
+- [ ] The Mongo half of the suite takes about eight minutes against Atlas,
+      almost all of it round-trip latency at ~100ms a call. It is opt-in
+      (`MB_TEST_MONGO_URI`) for that reason. A local replica set would be
+      faster if this starts getting run often.
 - [ ] Auto-start on boot, and disable laptop sleep / lid-close suspend.
 - [ ] Key rotation: single secret. Changing it kills every printed card at once.
       Needs an accepted-keys list with an overlap window.

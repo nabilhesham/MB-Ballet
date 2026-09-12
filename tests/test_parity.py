@@ -33,6 +33,27 @@ VOLATILE = ("token", "card_url", "created_at", "issued_at", "scanned_at",
 
 
 @pytest.fixture
+def frozen_clock(monkeypatch):
+    """
+    One `db.now()` for the whole test, shared by both backends.
+
+    Without this, five of these tests failed on differences of one or two
+    seconds — `1789194822` against `1789194823`. Not a divergence: the two
+    academies are built one after the other, SQLite in milliseconds and
+    MongoDB in about five seconds, so anything derived from "now" at build
+    time (the session running later today, and everything computed from it)
+    legitimately differs.
+
+    Scrubbing those fields would have been the wrong fix: `starts_at` is
+    exactly the kind of value these tests exist to compare. Pinning the
+    clock keeps them comparable while leaving them meaningful.
+    """
+    fixed = db.now()
+    monkeypatch.setattr(db, "now", lambda: fixed)
+    return fixed
+
+
+@pytest.fixture
 def both(tmp_path, monkeypatch):
     """One repository per backend, each over its own empty database."""
     uri = os.environ.get("MB_TEST_MONGO_URI")
@@ -93,7 +114,7 @@ def on_both(both, fn, what):
 
 
 @pytest.fixture
-def built(both):
+def built(both, frozen_clock):
     """The same academy constructed on each backend."""
     academies = [build_academy(r) for r in both]
     # The fixture only uses repository primitives, so the ids it hands back
@@ -304,7 +325,7 @@ def test_archiving_a_class_agrees(built):
 
 # ---------------------------------------------------------------- the traps
 
-def test_a_range_comparison_does_not_match_null_on_either_backend(both):
+def test_a_range_comparison_does_not_match_null_on_either_backend(both, frozen_clock):
     """
     The single most likely silent divergence. BSON sorts null before every
     string, so `{"frozen_until": {"$lte": today}}` matches a null on Mongo
@@ -327,7 +348,7 @@ def test_a_range_comparison_does_not_match_null_on_either_backend(both):
     assert results == [0, 0], f"a null frozen_until was matched: {results}"
 
 
-def test_an_all_null_document_round_trips_identically(both):
+def test_an_all_null_document_round_trips_identically(both, frozen_clock):
     """Missing and null are the same thing on SQLite and not on Mongo."""
     def probe(r):
         cid = r.insert("clients", {"name_en": "Sparse", "created_at": db.now()})
@@ -335,7 +356,7 @@ def test_an_all_null_document_round_trips_identically(both):
     same(*[probe(r) for r in both], "a document with everything left out")
 
 
-def test_insert_ignore_agrees_on_a_duplicate(both):
+def test_insert_ignore_agrees_on_a_duplicate(both, frozen_clock):
     def probe(r):
         cid = r.insert("clients", {"name_en": "X", "created_at": db.now(),
                                    "active": 1})
@@ -359,7 +380,7 @@ def test_an_aggregate_over_nothing_is_zero_not_none(both):
          "taught_totals of nothing")
 
 
-def test_a_rollback_agrees(both):
+def test_a_rollback_agrees(both, frozen_clock):
     def probe(r):
         try:
             with r.begin():
