@@ -43,11 +43,34 @@ printf "  Building a standalone program file. This takes a few minutes.\n\n"
 
 [ -f "academy.spec" ] || die "academy.spec is missing. Run this from the program folder."
 
+# The app needs Python 3.10 or newer: it uses `int | None` annotations, which
+# 3.9 evaluates at runtime and rejects. START.bat has always enforced this;
+# the build scripts did not, so building on a Mac whose `python3` is the
+# system 3.9 produced a binary that died at import with a TypeError about
+# `|` — a build that succeeds and a program that cannot start.
+MIN_MAJOR=3
+MIN_MINOR=10
+
+python_ok() {
+  "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= ('"$MIN_MAJOR"', '"$MIN_MINOR"') else 1)' 2>/dev/null
+}
+
 PY=""
-for c in python3 python; do
-  command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
+FOUND=""
+# Newest first, and the bare names last: on macOS `python3` is often the
+# system 3.9 while a usable one sits beside it under its full name.
+for c in python3.14 python3.13 python3.12 python3.11 python3.10 python3 python; do
+  command -v "$c" >/dev/null 2>&1 || continue
+  v=$("$c" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null) || continue
+  FOUND="$FOUND $c ($v)"
+  if python_ok "$c"; then PY="$c"; break; fi
 done
-[ -n "$PY" ] || die "Python 3 is needed to BUILD this — the finished program won't need it. Install Python, then run this again."
+if [ -z "$PY" ]; then
+  if [ -n "$FOUND" ]; then
+    die "Python $MIN_MAJOR.$MIN_MINOR or newer is needed to build this. Found:$FOUND. Install a newer one from python.org and run this again."
+  fi
+  die "Python 3 is needed to BUILD this — the finished program won't need it. Install it from python.org, then run this again."
+fi
 ok "Python $("$PY" -c 'import sys; print(sys.version.split()[0])')"
 
 step "[1/4] Installing the build tool…"

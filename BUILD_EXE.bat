@@ -40,6 +40,21 @@ if not defined PY (
     exit /b 1
 )
 
+REM The app needs 3.10 or newer -- it uses "int | None" annotations, which
+REM 3.9 evaluates at runtime and rejects. START.bat has always enforced this
+REM and the build scripts did not, so a build on an older Python succeeded
+REM and produced an exe that died at import. Version is compared as plain
+REM text for the reason at the top of START.bat: a parenthesised comparison
+REM inside an if-block is parsed before it runs and breaks the block.
+call :check_version
+if errorlevel 1 (
+    echo   Python 3.10 or newer is needed to build this.
+    echo   This machine has %PYVER%.
+    echo   Install a newer one from python.org and run this again.
+    pause
+    exit /b 1
+)
+
 if not exist "academy.spec" (
     echo   academy.spec is missing. Run this from the program folder.
     pause
@@ -117,6 +132,19 @@ REM  the exact parenthesis trap this project has already been bitten by
 REM  once (see CLAUDE.md): a for /f loop nested inside an if (...) block
 REM  in the same parenthesised group breaks in ways that are silent until
 REM  tested on a real machine.
+:check_version
+set "PYVER="
+for /f "tokens=2" %%V in ('"%PY%" -V 2^>^&1') do set "PYVER=%%V"
+for /f "tokens=1,2 delims=." %%A in ("%PYVER%") do (
+    set "PYMAJOR=%%A"
+    set "PYMINOR=%%B"
+)
+if not defined PYMINOR exit /b 1
+if %PYMAJOR% LSS 3 exit /b 1
+if %PYMAJOR% EQU 3 if %PYMINOR% LSS 10 exit /b 1
+exit /b 0
+
+
 :find_npm
 set "NPM="
 for %%C in (npm.cmd npm.exe) do (

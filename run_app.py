@@ -23,6 +23,38 @@ import traceback
 import webbrowser
 from datetime import datetime
 
+# The last line of defence against a build made with too old a Python.
+#
+# The app uses `int | None` annotations, which 3.9 evaluates at runtime and
+# rejects, so `import server` dies with "unsupported operand type(s) for |"
+# — a message that says nothing about the actual problem. The three build
+# scripts now refuse to produce such a binary, but one already exists in the
+# wild, and PyInstaller bakes the interpreter in: by the time this runs it
+# cannot be fixed, only explained.
+MIN_PYTHON = (3, 10)
+if sys.version_info < MIN_PYTHON:
+    have = ".".join(str(n) for n in sys.version_info[:3])
+    want = ".".join(str(n) for n in MIN_PYTHON)
+    message = (
+        f"\n  This program needs Python {want} or newer, and was built with "
+        f"{have}.\n\n"
+        "  Nothing is wrong with your computer — the build machine used an\n"
+        "  older Python than the program supports. On a Mac that is usually\n"
+        "  /usr/bin/python3, which is 3.9.\n\n"
+        "  Rebuild with a newer one (build_mac.sh now refuses the old one),\n"
+        "  or ask whoever sent you this file for a new copy.\n")
+    print(message)
+    try:
+        with open("error.log", "a") as fh:
+            fh.write(message)
+    except OSError:
+        pass
+    try:
+        input("  Press Enter to close this window... ")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    raise SystemExit(1)
+
 HOST = "127.0.0.1"
 PORT = 8000
 
