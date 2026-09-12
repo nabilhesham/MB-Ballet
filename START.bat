@@ -167,7 +167,13 @@ if not exist ".env" (
 )
 call :load_env
 
-if not exist "academy.db" (
+call :check_mongo
+
+REM Asked of the backend, not of the filesystem -- MongoDB has no file to
+REM look for. :probe_db writes "empty" or "ready" and falls back to the file
+REM check if it cannot answer at all.
+call :probe_db
+if "%DBSTATE%"=="empty" (
     echo    [6/7]  Setting up the database
     call :init_db
     if errorlevel 1 (
@@ -352,6 +358,34 @@ exit /b
 :check_packages
 "%VPY%" -c "import fastapi, uvicorn, qrcode, PIL, multipart" >nul 2>&1
 exit /b %errorlevel%
+
+
+:check_mongo
+REM pymongo is checked separately and NEVER blocks the launch. Adding it to
+REM :check_packages would make every reception machine reinstall on the next
+REM start, and one that is offline at that moment would retry forever while
+REM SQLite -- the backend it actually runs -- needs none of it.
+"%VPY%" -c "import pymongo" >nul 2>&1
+if errorlevel 1 "%VPY%" -m pip install "pymongo>=4.6" --quiet --no-warn-script-location >nul 2>&1
+exit /b 0
+
+
+:probe_db
+REM "empty" or "ready", asked of whichever backend is configured. Every
+REM command with parentheses or redirects lives in its own subroutine --
+REM cmd.exe parses a whole parenthesised block before running any of it, so
+REM a ")" inside one would terminate it early. See the note at the top.
+set "DBSTATE="
+for /f "usebackq delims=" %%S in (`call :db_state`) do set "DBSTATE=%%S"
+if not defined DBSTATE (
+    if exist "academy.db" (set "DBSTATE=ready") else (set "DBSTATE=empty")
+)
+exit /b 0
+
+
+:db_state
+"%VPY%" -c "import config;config.load_env();import repo as data;r=data.connect();print('empty' if r.is_empty() else 'ready');r.close()" 2>nul
+exit /b 0
 
 
 :install_packages

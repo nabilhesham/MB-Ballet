@@ -144,7 +144,21 @@ class SqliteRepo(SqliteAccess, SqliteSessions, SqliteBookings,
         db.migrate(self.conn)
 
     def is_empty(self):
-        return not any(self.count(t) for t in self.TABLES)
+        """
+        Whether there is any academy data yet.
+
+        A table that does not exist counts as empty rather than raising. The
+        first-run case -- a brand new file with no schema in it -- is the
+        whole reason the launchers ask this, so it must not be the one case
+        that fails.
+        """
+        for table in self.TABLES:
+            try:
+                if self.count(table):
+                    return False
+            except sqlite3.OperationalError:
+                continue          # no such table: nothing in it, then
+        return True
 
     def drop_all(self):
         # The file, its write-ahead log and its shared-memory index. Closing

@@ -292,6 +292,23 @@ def test_is_empty_answers_the_question_a_file_check_could_not(r):
     assert r.is_empty() is False
 
 
+def test_is_empty_on_a_database_with_no_schema_yet(backend, tmp_path, monkeypatch):
+    """
+    The first-run case, which is the whole reason the launchers ask. A brand
+    new SQLite file has no tables at all, and counting rows in one that does
+    not exist raised instead of answering.
+    """
+    if backend != "sqlite":
+        pytest.skip("a Mongo collection that does not exist is simply empty")
+    monkeypatch.setenv("MB_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("MB_SQLITE_PATH", str(tmp_path / "brand-new.db"))
+    fresh = data.connect()
+    try:
+        assert fresh.is_empty() is True
+    finally:
+        fresh.close()
+
+
 def test_drop_all_leaves_a_usable_empty_database(r):
     r.insert("clients", {"name_en": "Gone", "created_at": db.now(), "active": 1})
     r.drop_all()

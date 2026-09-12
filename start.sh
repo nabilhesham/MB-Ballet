@@ -74,6 +74,14 @@ if ! "$VPY" -c "import fastapi, uvicorn, qrcode, PIL, multipart" >/dev/null 2>&1
 fi
 ok "Packages installed"
 
+# pymongo is checked separately and NEVER blocks the launch. Adding it to
+# the probe above would make every reception machine reinstall on the next
+# start, and a machine that is offline at that moment would retry forever
+# while SQLite -- the backend it actually runs -- needs none of it.
+if ! "$VPY" -c "import pymongo" >/dev/null 2>&1; then
+  "$VPY" -m pip install "pymongo>=4.6" --quiet >/dev/null 2>&1 || true
+fi
+
 # ---------------------------------------------------------------- secret
 if [ ! -f ".env" ]; then
   step "Generating signing secret…"
@@ -94,12 +102,35 @@ for arg in "$@"; do
 done
 
 # ---------------------------------------------------------------- database
-if [ ! -f "academy.db" ]; then
-  printf "\n  No database yet.\n"
+# Asked of the backend, not of the filesystem: "is there a file" is not a
+# question MongoDB can answer, and it was never quite the right one anyway
+# -- a database that existed but had never been seeded skipped this prompt.
+# Falls back to the file check if the probe itself fails.
+db_state=$("$VPY" -c "
+import config; config.load_env()
+import repo as data
+r = data.connect()
+try:
+    print('empty' if r.is_empty() else 'ready')
+finally:
+    r.close()" 2>/dev/null) || db_state=""
+if [ -z "$db_state" ]; then
+  [ -f "academy.db" ] && db_state=ready || db_state=empty
+fi
+
+if [ "$db_state" = "empty" ]; then
+  printf "\n  No data yet.\n"
   printf "  Load it from the workbooks in sheets/? %s[Y/n]%s " "$dim" "$off"
   read -r reply || reply="y"
   case "${reply:-y}" in
-    [Nn]*) "$VPY" -c "import db; db.init(); print('  Empty database created.')" ;;
+    [Nn]*) "$VPY" -c "
+import config; config.load_env()
+import repo as data
+r = data.connect()
+try:
+    r.init_schema(); print('  Empty database created.')
+finally:
+    r.close()" ;;
     *)     "$VPY" seed.py --force ;;
   esac
 fi
