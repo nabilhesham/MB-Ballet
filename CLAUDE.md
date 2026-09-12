@@ -171,6 +171,19 @@ config.py         Where the files live and which database to talk to. Every
                   value is a function, never a module constant -- see the
                   Configuration section below. Must be imported and
                   load_env()'d before `import db`.
+repo/             The data-access interface and its two implementations.
+                  Nothing outside repo/sqlite/ writes SQL -- see the
+                  Repository section below.
+  base.py          The twelve primitives, the transaction boundary, and the
+                   admin methods. An ABC: a backend missing one fails at
+                   construction rather than at reception.
+  ports.py         Tier two -- the named business questions that join,
+                   aggregate, or compare-and-swap.
+  filters.py       The filter dialect both backends speak.
+  sqlite/          SQLite: the only place in the app that contains SQL.
+  mongo/           MongoDB: schema.py declares every field (which is what
+                   makes null-vs-missing a non-issue), ids.py mints the
+                   integer ids, filters.py adds the null guard.
 db.py             Schema + connection helpers + db.tx(). All tables live here.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
@@ -238,6 +251,8 @@ build_linux.sh    Same thing, run once on Linux, for a Linux binary. Same
 academy.spec      PyInstaller build definition, shared by all three build
                   scripts above. Hidden imports live here.
 run_app.py        Entry point for the packaged build.
+migrate_to_mongo.py  Copies an existing academy.db into MongoDB, preserving
+                  every integer id. --dry-run counts first.
 cleanup.sh        Removes leftovers from earlier versions.
                   (no settings page: the no-show rules it configured are gone)
 sheets/           The academy's own workbooks — the seed reads these.
@@ -1320,6 +1335,141 @@ Two things the fixture guards, because both have already bitten:
 `@pytest.mark.sqlite_only` marks the tests that introspect `PRAGMA
 table_info` and `sqlite_master`. They describe the backend rather than the
 app and do not port to a document store.
+
+## The repository
+
+**The backend is a configuration choice.** `MB_DB_BACKEND=sqlite` (the
+default, and what the reception laptop runs) or `mongo`. Nothing outside
+`repo/sqlite/` contains SQL -- `access.py`, every router, `seed.py` and the
+tests all speak the interface.
+
+Two tiers, with a boundary that is structural rather than a matter of
+discipline:
+
+**Tier one, twelve primitives** (`repo/base.py`): `get`, `find`, `find_one`,
+`count`, `exists`, `distinct`, `insert`, `insert_many`, `insert_ignore`,
+`update`, `update_where`, `delete`, `delete_where`. Single-collection only.
+The signatures make a join *impossible to express*, so "anything harder
+belongs in a named method" does not depend on anyone remembering it. About
+half the app's queries are this shape and need no method of their own.
+
+**Tier two, named business questions** (`repo/ports.py`): everything that
+joins, aggregates, has a computed predicate, or is a compare-and-swap, named
+for the question the app actually asks. `repo/sqlite/ports.py` answers them
+with joins; `repo/mongo/ports.py` answers the same questions with a few
+`$in` fetches joined in Python. **The contract is the dict that comes back,
+not the shape of the query** -- `tests/test_parity.py` is what enforces that.
+
+> **The governing rule: the interface is written in the weaker backend's
+> vocabulary, and SQLite implements downward into it.** MongoDB cannot do
+> `ORDER BY ABS(x - ?)` or a five-table join without becoming unreadable;
+> SQLite can do everything MongoDB can. Nothing in the interface quotes SQL.
+
+The filter dialect is deliberately Mongo-shaped: `{"f": v}`,
+`{"f": {"lt": x}}`, a top-level `"$or"`. No nesting beyond that, no
+field-to-field comparison, no computed values. A question needing one of
+those is a port method. That limit is the point -- it is what stops a caller
+building a query the other backend cannot answer.
+
+### Three things that are not negotiable
+
+**Integer ids, on both backends.** `tokens.py` packs `client_id` as a
+**uint32** into every card already in a client's hands; the client id *is*
+the printed member number reception types in when the scanner is down; and
+it is in filenames on disk. MongoDB `_id` therefore holds the integer
+itself, minted from a `_counters` collection with `$inc`. SQLite's
+`AUTOINCREMENT` and that counter agree **only because neither reuses a
+number** -- drop `AUTOINCREMENT` and a hard-deleted client's id is reissued
+to the next person, and a printed card in a drawer belongs to somebody else.
+`tests/test_sqlite_schema.py` asserts the keyword is still there.
+
+**Dates stay exactly as they are.** Epoch integers for moments, ISO
+`YYYY-MM-DD` strings for calendar days -- in the documents, on the wire,
+everywhere. Not BSON `Date`: this app has no timezone concept (`date.today()`,
+`datetime.combine(d, time.min).timestamp()`), and BSON dates are UTC-anchored,
+so a freeze entered at 23:30 Cairo would land on the wrong day.
+
+**Null and missing are the same thing in SQLite and different in MongoDB**,
+and the differences are silent:
+
+```
+{"f": None}                   matches explicit-null AND missing
+{"f": {"$ne": None}}          matches neither
+{"f": {"$lt": "2026-01-01"}}  MATCHES null      <- no SQL counterpart
+```
+
+That last one sits one line from `lift_expired_freezes()`'s
+`frozen_until <= today`: on MongoDB it would unfreeze plans that were never
+frozen, on one backend only, invisibly. Two things guard it, both structural
+rather than remembered:
+
+- `repo/mongo/schema.py` declares every field, and **every insert writes all
+  of them, even when null** -- so "missing" is a state that cannot occur. It
+  is also the MongoDB counterpart of `db.migrate()`'s `ALTER TABLE ... ADD
+  COLUMN`: SQLite backfills a new column at write time, this backfills at
+  read time.
+- `repo/mongo/filters.py` adds `$ne: None` to any range comparison on a
+  nullable field, automatically.
+
+Aggregates always return `0`, never `None`: SQL's `SUM` over no rows is NULL
+and MongoDB's is no group at all.
+
+Every sort ends with the primary key as a tiebreak, because SQLite falls back
+to rowid order and MongoDB to natural order, and two backends returning equal
+rows in different orders would make the parity tests compare lists that were
+never promised to match.
+
+### Round trips are the unit of cost
+
+On a local SQLite file an N+1 is invisible. Against Atlas each round trip is
+about **100ms measured from here**, so `/api/dashboard` calling
+`plan_state()` once per active client -- three queries each -- was three
+round trips per client: roughly a minute of landing page on a few hundred
+clients.
+
+`access.plan_states()` answers for many plans in three queries, and
+`plan_state()` is a one-element call into it so the two cannot drift.
+`plan_counts_bulk`, `attendance_counts`, `card_counts_bulk`,
+`taught_totals_bulk` and `active_plans_for` exist for the same reason.
+**`tests/test_query_budget.py` asserts the dashboard and the clients list do
+not grow a query per client** -- it is the only thing that stops this
+regressing.
+
+`insert_many()` is not a convenience either: it allocates a block of ids with
+a single increment, so selling a plan (twelve bookings) or repeating a term
+(up to ninety-six sessions) costs one round trip rather than one each.
+
+### MongoDB deployment
+
+**Transactions need a replica set.** Atlas is one; a standalone `mongod` is
+not, and `start_transaction` against one fails. The commit is retried only on
+`UnknownTransactionCommitResult`, where the outcome is genuinely unknown and
+the retry is idempotent. A `TransientTransactionError` is deliberately *not*
+retried -- this is a single-user app, so the real causes are network blips,
+and silently re-running a POST is worse than telling reception to press the
+button again.
+
+**`mongodb+srv://` needs a DNS SRV lookup that some networks filter.** This
+has already bitten: it fails with a DNS timeout that looks nothing like a
+configuration problem. The direct form names the hosts instead and is
+documented in `.env.example`:
+
+```
+mongodb://h1:27017,h2:27017,h3:27017/?replicaSet=...&tls=true&authSource=admin
+```
+
+**`drop_all()` refuses a database whose name does not start with `mbtest_`**
+unless `MB_MONGO_ALLOW_DROP` is set. On SQLite it unlinks a local file; on
+Atlas it can be a shared remote database, and `seed.py --force` runs from the
+same shell as everything else.
+
+**Reception should stay on SQLite.** It is the only backend that keeps
+working without internet. `MB_DB_BACKEND=mongo` with no `MB_MONGO_URI`
+raises at startup rather than falling back, because a silent fallback means a
+day of attendance written into a local file nobody looks at again. Do not
+build offline queueing or dual-write: reconciling two writers that allocate
+from independent integer counters is a genuinely hard distributed-systems
+problem, and half of it is worse than none.
 
 ## Conventions
 
