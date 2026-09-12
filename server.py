@@ -24,7 +24,7 @@ import config
 config.load_env()
 
 import access  # noqa: E402
-import db  # noqa: E402
+import repo as data  # noqa: E402
 
 from api.clients import router as clients_router
 from api.plans import router as plans_router
@@ -78,7 +78,15 @@ def _startup():
         print("  Keep a backup of that file — losing it invalidates every card.\n")
 
     print(f"  Database: {config.describe()}")
-    db.init()
+    # Through the repository, not db.init(). Calling the SQLite one directly
+    # created an empty academy.db beside the binary even when the backend was
+    # MongoDB — harmless, but it looks exactly like the app quietly ignoring
+    # the configuration.
+    starter = data.connect()
+    try:
+        starter.init_schema()
+    finally:
+        starter.close()
     os.makedirs("photos", exist_ok=True)
     os.makedirs("cards", exist_ok=True)
     asyncio.create_task(_settle_loop())
@@ -93,13 +101,13 @@ async def _settle_loop():
     await asyncio.sleep(15)
     while True:
         try:
-            conn = db.connect()
+            repo = data.connect()
             try:
-                n = access.settle_past_sessions(conn)
+                n = access.settle_past_sessions(repo)
                 if n:
                     print(f"[settle] {n} booking(s) marked absent")
             finally:
-                conn.close()
+                repo.close()
         except Exception as e:
             print(f"[settle] skipped: {e}")
         await asyncio.sleep(3600)
