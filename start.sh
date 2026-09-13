@@ -40,31 +40,94 @@ if [ -d ".venv" ]; then
 fi
 
 # ---------------------------------------------------------------- python
-PY=""
-for c in python3 python py; do
-  command -v "$c" >/dev/null 2>&1 && { PY="$c"; break; }
-done
-[ -n "$PY" ] || die "Python 3 not found. Install it from python.org, then run this again."
+# The app needs Python 3.10 or newer: it uses `int | None` annotations, which
+# 3.9 evaluates at runtime and rejects.
+#
+# **Taking the first `python3` on PATH is not good enough**, and this already
+# bit: launched from the Dock rather than from a terminal, a GUI terminal
+# inherits launchd's minimal PATH — /usr/bin and friends, without
+# /opt/homebrew/bin — so `python3` resolves to Apple's 3.9.6 and the launcher
+# refused to start on a machine with 3.14 installed and a working 3.14 venv
+# already sitting beside it. Same reason START.bat scans the registry and the
+# standard folders on Windows: a perfectly good interpreter is routinely
+# installed somewhere the current shell does not look.
+#
+# So this is the same search build_mac.sh and build_linux.sh do — every
+# candidate is measured and the highest wins, which makes the answer
+# independent of PATH order.
+MIN_MAJOR=3
+MIN_MINOR=10
 
-VER=$("$PY" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-MAJOR=${VER%%.*}; MINOR=${VER##*.}
-[ "$MAJOR" -ge 3 ] && [ "$MINOR" -ge 10 ] || die "Python 3.10 or newer required (found $VER)."
-ok "Python $VER"
+version_number() {
+  # "3.14" -> 314, so versions compare as integers. Empty if it will not run.
+  "$1" -c 'import sys; print(sys.version_info[0] * 100 + sys.version_info[1])' 2>/dev/null
+}
+
+find_python() {
+  PY=""
+  PY_BEST=0
+  FOUND=""
+  for candidate in \
+      python3.14 python3.13 python3.12 python3.11 python3.10 python3 python \
+      /opt/homebrew/bin/python3.* /opt/homebrew/bin/python3 \
+      /usr/local/bin/python3.* /usr/local/bin/python3 \
+      /opt/homebrew/opt/python@3*/bin/python3.* \
+      /Library/Frameworks/Python.framework/Versions/*/bin/python3 \
+      /usr/bin/python3
+  do
+    case "$candidate" in
+      /*) [ -x "$candidate" ] || continue ;;
+      *)  command -v "$candidate" >/dev/null 2>&1 || continue ;;
+    esac
+    n=$(version_number "$candidate") || continue
+    [ -n "$n" ] || continue
+    case "$FOUND" in
+      *"$candidate "*) continue ;;
+    esac
+    FOUND="$FOUND$candidate ($((n / 100)).$((n % 100))) "
+    if [ "$n" -ge "$((MIN_MAJOR * 100 + MIN_MINOR))" ] && [ "$n" -gt "$PY_BEST" ]; then
+      PY="$candidate"
+      PY_BEST="$n"
+    fi
+  done
+}
 
 # ---------------------------------------------------------------- venv
+# Checked BEFORE hunting for a base interpreter, deliberately. A base Python
+# is needed for exactly one thing — `python -m venv` — so a folder that
+# already holds a working, new-enough environment needs none at all, and
+# refusing to start because the *system* Python is old while a good venv sits
+# right there is the failure this ordering removes.
 VPY="$(venv_python)"
-if [ -n "$VPY" ] && ! "$VPY" -c "import sys" >/dev/null 2>&1; then
-  step "Environment is broken, rebuilding…"
-  rm -rf "$VENVDIR"
-  VPY=""
+if [ -n "$VPY" ]; then
+  VN="$(version_number "$VPY")"
+  if [ -z "$VN" ]; then
+    step "Environment is broken, rebuilding…"
+    rm -rf "$VENVDIR"
+    VPY=""
+  elif [ "$VN" -lt "$((MIN_MAJOR * 100 + MIN_MINOR))" ]; then
+    # Built by an older Python that has since been upgraded, or by the
+    # system 3.9 before this check existed.
+    step "Environment is Python $((VN / 100)).$((VN % 100)), rebuilding…"
+    rm -rf "$VENVDIR"
+    VPY=""
+  fi
 fi
+
 if [ -z "$VPY" ]; then
+  find_python
+  if [ -z "$PY" ]; then
+    if [ -n "$FOUND" ]; then
+      die "Python $MIN_MAJOR.$MIN_MINOR or newer is required. Found: $FOUND. Install a newer one — 'brew install python@3.12' or python.org — then run this again."
+    fi
+    die "Python 3 not found. Install it from python.org, then run this again."
+  fi
   step "Creating $VENVDIR…"
   "$PY" -m venv "$VENVDIR" || die "Could not create $VENVDIR"
   VPY="$(venv_python)"
 fi
 [ -n "$VPY" ] || die "Could not find the interpreter inside $VENVDIR"
-ok "Environment ready ($VENVDIR)"
+ok "Python $("$VPY" -c 'import sys; print(sys.version.split()[0])') ($VENVDIR)"
 
 # ---------------------------------------------------------------- deps
 if ! "$VPY" -c "import fastapi, uvicorn, qrcode, PIL, multipart" >/dev/null 2>&1; then
