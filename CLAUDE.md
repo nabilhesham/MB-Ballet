@@ -249,7 +249,9 @@ build_linux.sh    Same thing, run once on Linux, for a Linux binary. Same
                   reverse isn't true, and the reception Mac's hardware isn't
                   known. Do not "helpfully" bump this to the newer image.
 academy.spec      PyInstaller build definition, shared by all three build
-                  scripts above. Hidden imports live here.
+                  scripts above. Hidden imports live here, and so does
+                  the step that bakes this folder's .env into the
+                  binary -- it refuses to build without one.
 run_app.py        Entry point for the packaged build.
 migrate_to_mongo.py  Copies an existing academy.db into MongoDB, preserving
                   every integer id. --dry-run counts first.
@@ -264,7 +266,11 @@ cards/  photos/   Generated assets. Not in git. A photo is written with a
                   browser kept serving the cached old picture, so a
                   re-uploaded photo looked like it had not saved.
 academy.db        The database. Not in git. This IS the business record.
-.env              ENTRY_SECRET. Not in git, ever.
+.env              ENTRY_SECRET and the MB_ settings. Not in git, ever.
+                  There is exactly ONE of these, here, in the source
+                  folder -- a build bakes its values into the binary
+                  rather than the app growing a second copy beside
+                  the exe. See Configuration below.
 ```
 
 `static/reception.html` and `static/scanner-test.html` are deliberately
@@ -441,11 +447,21 @@ mounts. Any new mount needs the same treatment.
 
 `server.py` is freeze-safe for this: when `sys.frozen` is set, static assets are
 read from `sys._MEIPASS` (wiped on exit) while the working directory is the
-folder containing the exe, so `academy.db`, `.env`, `photos/` and `cards/`
-persist. Getting this backwards silently destroys the database on every close.
+folder containing the exe, so `academy.db`, `photos/` and `cards/` persist.
+Getting this backwards silently destroys the database on every close.
 
-The server also **provisions its own `ENTRY_SECRET`** into `.env` if none
-exists, since a double-clicked exe has no shell wrapper to export one.
+**`.env` is deliberately not in that list.** The server used to provision its
+own `ENTRY_SECRET` into a `.env` beside the exe when it found none, since a
+double-clicked exe has no shell wrapper to export one. That quietly minted a
+*second* signing key: `app_dir()` is the folder holding the executable, so a
+packaged build never saw the project's `.env` at all, invented one, and every
+card printed from the source tree stopped verifying against a build that
+looked like it had worked perfectly.
+
+So the values travel inside the binary instead. `academy.spec` reads the
+project's own `.env` at build time, writes it into a generated `_baked_env`
+module compiled into the bundle, and **refuses to build** when that file is
+missing or its `ENTRY_SECRET` is empty — see Configuration below.
 
 Manual, when working on the code:
 
@@ -1312,6 +1328,48 @@ key lived in `.env`: the file was only read when `ENTRY_SECRET` was unset
 (so on a machine where the secret is exported in the shell — which is what
 this document tells you to do — every other setting was ignored), and
 provisioning a generated secret opened it with mode `"w"`, truncating it.
+
+### There is one `.env`, in the source folder
+
+A packaged build does not read one and cannot write one. `academy.spec`
+parses this folder's `.env` at build time and writes the key/values into a
+generated `build/baked/_baked_env.py`, which is compiled into the bundle;
+`config._baked()` is its only reader, and `load_env()` applies it —
+`setdefault`, so a real environment variable still wins — **instead of**
+opening a file when `sys.frozen` is set.
+
+Three refusals hold that shape in place, all of them structural rather than
+remembered:
+
+| where | what it refuses |
+|---|---|
+| `academy.spec` | a build with no `.env`, or an empty `ENTRY_SECRET` |
+| `config.set_env_value()` | any write to `.env` from a frozen process |
+| `server.py`'s startup | provisioning a secret when `sys.frozen` is set |
+
+**Why it had to stop being a file beside the exe.** `app_dir()` is the folder
+holding the executable, so a build looked for `.env` in `dist/`, found none,
+and `server.py` generated a fresh random `ENTRY_SECRET` into a second file
+nobody knew existed. That build then signed cards with a key the source tree
+had never seen, and rejected every card the source tree had already printed —
+with nothing on screen to suggest it, because provisioning is what a healthy
+first run does too.
+
+The consequences, both deliberate: the `.env` parser now exists twice (in
+`config.load_env()` and `academy.spec::_read_env`, since the spec runs before
+anything of the app is importable — **keep the two in step**), and every
+setting in this folder's `.env` is embedded in any binary built from it, the
+Mongo URI included. A generated module rather than a `datas` entry because
+`datas` unpacks to `sys._MEIPASS`, a real directory on disk while the app
+runs.
+
+`.github/workflows/build-macos.yml` builds from a checkout, which has no
+`.env`, so it writes one from an `ENTRY_SECRET` **repository secret** before
+packaging and fails loudly when that is unset. It must match the local one,
+or a CI binary rejects every existing card.
+
+`START.bat` and `start.sh` still generate a `.env` when there is none — in
+the repo root, which is the one this section is about.
 
 ## Testing
 

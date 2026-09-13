@@ -11,6 +11,7 @@ paths, the FastAPI app, the startup event, and the static mounts.
 
 import asyncio
 import os
+import sys
 
 import uvicorn
 from fastapi import FastAPI
@@ -39,8 +40,9 @@ from api.dashboard import router as dashboard_router
 #
 # When packaged as a single .exe, PyInstaller unpacks the bundled files into a
 # temporary folder that is wiped on exit — so static assets are read from there,
-# but the database, photos, cards and .env must live next to the .exe or the
-# academy loses its records every time the program closes.
+# but the database, photos and cards must live next to the .exe or the academy
+# loses its records every time the program closes. `.env` is not one of them:
+# there is one, in the source folder, and its values are baked into the build.
 # --------------------------------------------------------------------------
 APP_DIR = config.app_dir()
 BUNDLE_DIR = config.bundle_dir()
@@ -70,8 +72,17 @@ app.include_router(dashboard_router)
 
 @app.on_event("startup")
 def _startup():
-    # .env is already loaded, at import. Only provisioning is left.
+    # Settings are already loaded, at import. Only provisioning is left, and
+    # only in a source checkout: a packaged build was handed its secret at
+    # build time and must never invent a second one. Minting one here is how
+    # a build ended up signing cards with a key nothing else knew, which
+    # every card already printed then failed against.
     if not os.environ.get("ENTRY_SECRET"):
+        if getattr(sys, "frozen", False):
+            raise RuntimeError(
+                "This build carries no signing key, so no member card can be "
+                "verified. It was packaged from a checkout whose .env had no "
+                "ENTRY_SECRET. Build again from one that does.")
         import secrets
         config.set_env_value("ENTRY_SECRET", secrets.token_urlsafe(32))
         print("  A new security key was created and saved to .env.")

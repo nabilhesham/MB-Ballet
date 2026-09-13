@@ -11,8 +11,10 @@ nothing here is a module constant: every value is a function, read when it is
 asked for.
 
 The frozen/APP_DIR block was also copied into both `server.py` and
-`run_app.py`. It is here once instead, because "the database, photos, cards
-and .env live next to the exe" is the same fact in both.
+`run_app.py`. It is here once instead, because "the database, photos and
+cards live next to the exe" is the same fact in both. `.env` is not in that
+list: there is one of those, in the source folder, and a packaged build
+carries its values rather than reading a second copy — see load_env().
 
     MB_DB_BACKEND   sqlite | mongo          (default sqlite)
     MB_SQLITE_PATH  academy.db              (relative to app_dir())
@@ -35,8 +37,11 @@ _env_loaded = False
 
 def app_dir() -> str:
     """
-    The folder the academy's own files live in: academy.db, .env, photos,
-    cards.
+    The folder the academy's own files live in: academy.db, photos, cards.
+
+    Not `.env`. In a source checkout this is the folder holding it anyway; in
+    a packaged build the settings are baked into the binary and nothing looks
+    for a file here. See load_env().
 
     When packaged, PyInstaller unpacks the bundle into a temporary folder
     that is wiped on exit, so this is deliberately the folder holding the
@@ -55,16 +60,40 @@ def bundle_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def _baked() -> dict:
+    """
+    The settings `academy.spec` read out of `.env` and compiled into the build.
+
+    Empty in a source checkout and under the test suite, where the module does
+    not exist — that is the signal to read the real file instead.
+    """
+    try:
+        import _baked_env
+    except ImportError:
+        return {}
+    return dict(_baked_env.VALUES)
+
+
 def load_env() -> None:
     """
-    Change into app_dir() and read `.env` into the environment.
+    Change into app_dir() and put the app's settings into the environment.
 
     Must be the first statement of any entry point, before `import db` binds
     anything. Idempotent, so calling it from several places is fine.
 
     Real environment variables win: values are set with `setdefault`, so
-    `MB_DB_BACKEND=mongo ./start.sh` overrides the file rather than being
-    silently overridden by it.
+    `MB_DB_BACKEND=mongo ./start.sh` overrides them rather than being silently
+    overridden.
+
+    **There is one `.env`, and it lives in the source folder.** A packaged
+    build carries its values inside the binary (see `_baked()`) and never
+    reads a file beside the executable — deliberately, because that file is
+    the one the app itself used to write. app_dir() is the folder holding the
+    exe, so a build would look there, find nothing, and mint a fresh random
+    ENTRY_SECRET into a second `.env` nobody knew about; every card already
+    printed then stopped verifying, with a build that looked like it worked.
+    The chdir stays either way: academy.db, photos/ and cards/ still live
+    beside the exe.
 
     The file is read unconditionally. It used to be read only when
     ENTRY_SECRET was unset — so on a machine where the secret was exported in
@@ -76,6 +105,12 @@ def load_env() -> None:
     if _env_loaded:
         return
     _env_loaded = True
+
+    if getattr(sys, "frozen", False):
+        for k, v in _baked().items():
+            os.environ.setdefault(k, v)
+        return
+
     if not os.path.exists(ENV_FILE):
         return
     with open(ENV_FILE) as f:
@@ -95,7 +130,18 @@ def set_env_value(key: str, value: str) -> None:
     ENTRY_SECRET, which truncated it. That was survivable while the secret
     was the only thing in there; with a Mongo URI beside it, provisioning a
     secret on first run would have thrown the URI away.
+
+    Refused outright in a packaged build. There is one `.env` and it is in
+    the source folder; writing one beside the exe is exactly how a second
+    signing secret came into existence. The guard is here rather than only at
+    the call site so a future caller cannot reintroduce it by not knowing.
     """
+    if getattr(sys, "frozen", False):
+        raise RuntimeError(
+            "A packaged build does not write .env. Its settings were baked in "
+            "from the project's own .env when it was built; change that file "
+            "and build again.")
+
     lines = []
     if os.path.exists(ENV_FILE):
         with open(ENV_FILE) as f:

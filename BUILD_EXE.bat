@@ -7,8 +7,10 @@ REM  the reception laptop something with nothing to install at all. It produces
 REM  dist\MB Ballet Academy.exe — copy that single file to the reception
 REM  laptop and double-click it. No Python, no packages, no internet needed.
 REM
-REM  The database, photos, cards and .env are created next to the .exe, so keep
-REM  it in its own folder rather than loose on the desktop.
+REM  The database, photos and cards are created next to the .exe, so keep it
+REM  in its own folder rather than loose on the desktop. Settings are not:
+REM  this project's .env is baked into the .exe as it is built, and the
+REM  build refuses to run without one.
 REM
 REM  PyInstaller cannot cross-compile: a Windows .exe must be built on Windows.
 REM ===========================================================================
@@ -116,8 +118,12 @@ echo     Copy that file into an EMPTY FOLDER on the reception
 echo     laptop and double-click it. Nothing else is needed.
 echo.
 echo     Put it in its own folder, not loose on the desktop: it
-echo     creates academy.db, .env, photos and cards beside
-echo     itself. Back up that whole folder, not just the file.
+echo     creates academy.db, photos and cards beside itself.
+echo     Back up that whole folder, not just the file.
+echo.
+echo     It needs no .env: the settings and the card-signing
+echo     key were built into it from this project's own .env,
+echo     so cards already printed still scan.
 echo.
 echo     Test it here first. If the window opens and closes
 echo     straight away, an error.log file will be sitting next

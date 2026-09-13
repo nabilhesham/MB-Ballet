@@ -88,7 +88,14 @@ if [ ! -f ".env" ]; then
   "$VPY" -c "import secrets; open('.env','w').write('ENTRY_SECRET='+secrets.token_urlsafe(32)+'\n')"
   printf "  %sSaved to .env — back this file up. Losing it invalidates every card.%s\n" "$dim" "$off"
 fi
-set -a; . ./.env; set +a
+# Deliberately NOT `. ./.env`. That sources the file as shell, and a Mongo
+# URI's query string carries `&` — which a shell reads as "run that in the
+# background", giving a parse error and an empty variable. Nothing in this
+# script needs the values anyway: config.load_env() reads the file inside the
+# app. This only confirms the signing key is there, through that same parser,
+# so the check and the app can never disagree about what the file says.
+"$VPY" -c "import config, os, sys; config.load_env(); sys.exit(0 if os.environ.get('ENTRY_SECRET') else 1)" \
+  || die "ENTRY_SECRET is missing from .env. Delete the file and run this again to have one generated."
 ok "Signing secret loaded"
 
 # ---------------------------------------------------------------- flags

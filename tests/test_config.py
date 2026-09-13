@@ -6,6 +6,8 @@ preserves, so they would have failed before it existed.
 """
 
 import os
+import sys
+import types
 
 import pytest
 
@@ -17,7 +19,11 @@ def env_dir(tmp_path, monkeypatch):
     """An app_dir with its own .env, and a clean environment."""
     monkeypatch.setattr(config, "app_dir", lambda: str(tmp_path))
     monkeypatch.setattr(config, "_env_loaded", False)
-    for k in ("MB_DB_BACKEND", "MB_SQLITE_PATH", "MB_MONGO_URI", "MB_MONGO_DB"):
+    # ENTRY_SECRET included: conftest.py loads the developer's real .env at
+    # collection time, and load_env() uses setdefault, so a test asserting on
+    # a secret it supplied itself would otherwise be reading that one.
+    for k in ("MB_DB_BACKEND", "MB_SQLITE_PATH", "MB_MONGO_URI", "MB_MONGO_DB",
+              "ENTRY_SECRET"):
         monkeypatch.delenv(k, raising=False)
     cwd = os.getcwd()
     yield tmp_path
@@ -59,6 +65,60 @@ def test_comments_and_blank_lines_are_skipped(env_dir):
 def test_a_missing_env_file_is_not_an_error(env_dir):
     config.load_env()
     assert config.backend() == "sqlite"
+
+
+# ------------------------------------------------------------ baked, frozen
+
+@pytest.fixture
+def frozen(monkeypatch):
+    """A packaged build, with a `.env` baked into it at build time."""
+    def _freeze(values):
+        module = types.ModuleType("_baked_env")
+        module.VALUES = dict(values)
+        monkeypatch.setitem(sys.modules, "_baked_env", module)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+    yield _freeze
+
+
+def test_a_packaged_build_reads_the_values_baked_into_it(env_dir, frozen):
+    frozen({"ENTRY_SECRET": "from-the-build", "MB_MONGO_DB": "baked"})
+    config.load_env()
+    assert os.environ["ENTRY_SECRET"] == "from-the-build"
+    assert config.mongo_db() == "baked"
+
+
+def test_a_packaged_build_ignores_a_env_beside_the_binary(env_dir, frozen):
+    """
+    The bug this pins: app_dir() is the folder holding the exe, so a build
+    read — and, finding nothing, wrote — a *second* .env there. Cards signed
+    with the project's own secret then failed against a build that looked
+    like it had worked. There is one .env, in the source folder.
+    """
+    (env_dir / ".env").write_text("ENTRY_SECRET=stray\nMB_MONGO_DB=stray\n")
+    frozen({"ENTRY_SECRET": "from-the-build", "MB_MONGO_DB": "baked"})
+
+    config.load_env()
+
+    assert os.environ["ENTRY_SECRET"] == "from-the-build"
+    assert config.mongo_db() == "baked"
+
+
+def test_a_real_environment_variable_still_beats_a_baked_value(env_dir, frozen,
+                                                               monkeypatch):
+    frozen({"MB_DB_BACKEND": "mongo"})
+    monkeypatch.setenv("MB_DB_BACKEND", "sqlite")
+    config.load_env()
+    assert config.backend() == "sqlite"
+
+
+def test_a_packaged_build_refuses_to_write_env(env_dir, frozen):
+    frozen({"ENTRY_SECRET": "from-the-build"})
+    os.chdir(env_dir)
+
+    with pytest.raises(RuntimeError, match="packaged build"):
+        config.set_env_value("ENTRY_SECRET", "invented")
+
+    assert not (env_dir / ".env").exists()
 
 
 # ---------------------------------------------------------------- writing
