@@ -187,3 +187,21 @@ def test_describe_never_prints_the_password(env_dir, monkeypatch):
 def test_describe_names_the_sqlite_file(env_dir):
     assert "SQLite" in config.describe()
     assert "academy.db" in config.describe()
+
+
+def test_the_legacy_picture_folder_follows_the_sqlite_file(env_dir, monkeypatch):
+    """
+    Not app_dir(), and not a function of the backend. photos/ and cards/ only
+    ever sat beside academy.db -- they predate there being a second backend --
+    and migrate_to_mongo.py reads SQLite whatever MB_DB_BACKEND says. Keying
+    this on the backend meant that, with it set to mongo, the migration
+    looked for the pictures in the folder it was launched from, found none,
+    and carried the paths across instead of the pictures. Silently.
+    """
+    import os
+
+    monkeypatch.setenv("MB_SQLITE_PATH", os.path.join(str(env_dir), "sub", "academy.db"))
+    for backend in ("sqlite", "mongo"):
+        monkeypatch.setenv("MB_DB_BACKEND", backend)
+        monkeypatch.setenv("MB_MONGO_URI", "mongodb://h/")
+        assert config.legacy_media_dir() == os.path.join(str(env_dir), "sub")

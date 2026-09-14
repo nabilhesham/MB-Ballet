@@ -166,12 +166,52 @@ def _legacy_photos(folder):
     return [(k, t, o, p) for (k, o), (t, p) in best.items()]
 
 
+def _legacy_cards(folder):
+    """(owner_id, variant, path) for each card file."""
+    import os
+    import re
+    out = []
+    for name in sorted(os.listdir(folder)):
+        m = re.match(r"client_(\d+)_(.+)\.png$", name)
+        if m:
+            out.append((int(m.group(1)), m.group(2), os.path.join(folder, name)))
+    return out
+
+
+def pending_legacy_files(app_dir: str) -> int:
+    """
+    How many picture files are sitting in photos/ and cards/, row or no row.
+
+    Deliberately a count of the disk alone, with no database in it: it is
+    what a caller asks *before* opening a transaction, to decide whether
+    there is anything to do at all. import_legacy_files() is the one that
+    knows which of them are already rows.
+    """
+    import os
+    n = 0
+    folder = os.path.join(app_dir, "photos")
+    if os.path.isdir(folder):
+        n += len(_legacy_photos(folder))
+    folder = os.path.join(app_dir, "cards")
+    if os.path.isdir(folder):
+        n += len(_legacy_cards(folder))
+    return n
+
+
 def import_legacy_files(repo, app_dir: str) -> int:
     """Move photos/ and cards/ into the database. Returns how many moved."""
     import os
-    import re
     import mimetypes
 
+    # One transaction for the lot. These are the bulkiest rows in the
+    # database and a bulk insert outside a boundary is an fsync per row --
+    # seventy cards one at a time is the difference between a pause and a
+    # wait. It is re-entrant, so a caller already inside one is unaffected.
+    with repo.begin():
+        return _import_legacy(repo, app_dir, os, mimetypes)
+
+
+def _import_legacy(repo, app_dir, os, mimetypes) -> int:
     moved = 0
     folder = os.path.join(app_dir, "photos")
     if os.path.isdir(folder):
@@ -191,15 +231,10 @@ def import_legacy_files(repo, app_dir: str) -> int:
 
     folder = os.path.join(app_dir, "cards")
     if os.path.isdir(folder):
-        for name in sorted(os.listdir(folder)):
-            m = re.match(r"client_(\d+)_(.+)\.png$", name)
-            if not m:
-                continue
-            owner, variant = int(m.group(1)), m.group(2)
+        for owner, variant, path in _legacy_cards(folder):
             if repo.exists("images", {"kind": CARD, "owner_id": owner,
                                       "variant": variant}):
                 continue
-            path = os.path.join(folder, name)
             with open(path, "rb") as f:
                 store(repo, CARD, owner, f.read(), "image/png",
                       variant=variant, now=int(os.path.getmtime(path)))

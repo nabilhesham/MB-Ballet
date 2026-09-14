@@ -1724,25 +1724,45 @@ process reading the file itself. This was the one that did not, so
 "ENTRY_SECRET is not set" against a `.env` that had one in it: the seed
 silently did nothing.
 
-**Migrate the pictures before migrating the database.** `migrate_to_mongo.py`
-copies rows, so a `photo_path` of `/photos/client_00001.jpg` arrives on Atlas
-as a path to a file on a laptop nobody will ever query it from, and a
-credential whose card was never read in has no picture to copy at all. Both
-are silent -- the profile renders, the client is just faceless. So the
-migration counts them first and **refuses** while any remain, naming the
-number and the remedy: start the app once with `photos/` and `cards/` beside
-`academy.db` (that is when `images.import_legacy_files()` runs), then
-migrate. `--force` overrides it for anyone who means to.
+**`migrate_to_mongo.py` brings the source's schema up to date before reading
+it.** `db.init()` is additive and idempotent -- it is what the app runs on
+every start -- and without it the tool cannot read a database older than its
+own `ORDER` list. The academy's own file predates the `images` table, so
+counting the rows to move died on `no such table: images` before anything had
+moved. This was once written down as "start the app once first", which made a
+manual step load-bearing; an instruction like that gets skipped exactly when
+it matters.
 
-The order for an existing academy is therefore:
+**It also reads the pictures in itself, first, for the same reason.** Rows are
+the only thing that travels, so a `photo_path` of `/photos/client_00001.jpg`
+would arrive on Atlas as a path to a file on a laptop nobody will ever query
+it from. `images.pending_legacy_files()` counts the files, the import runs
+before the rows are counted (or the `images` total is the one from before it),
+and `--dry-run` reports what it would take in without touching the disk. So
+the whole thing is one command:
 
 ```bash
-# 1. on the laptop, with photos/ and cards/ beside academy.db
-python server.py                 # prints "Moved N photo(s) and card(s)..."
-# 2. then, with MB_MONGO_URI set
-python migrate_to_mongo.py --dry-run
+python migrate_to_mongo.py --dry-run          # counts, writes nothing to Mongo
 MB_DB_BACKEND=mongo python migrate_to_mongo.py
 ```
+
+**What is left over is a warning, not a refusal**, and the difference matters.
+After the import, what can remain is a picture that exists *nowhere*: a photo
+never taken, a card whose PNG was deleted or never drawn. No amount of
+importing produces those -- only reissuing the card or uploading the photo
+does -- so refusing would be a refusal with no way to clear it, which is worse
+than a faceless profile. It says which of the two, how many, and what fixes
+one; a card with no picture still scans, because the token is in the database
+and only the printed image is missing.
+
+**`config.legacy_media_dir()` is the folder holding the SQLite file, and is
+deliberately not a function of `MB_DB_BACKEND`.** Those folders only ever sat
+beside `academy.db` -- they predate there being a second backend -- and the
+migration reads SQLite whatever the backend says. Keying it on the backend was
+wrong in the one place it mattered: with `MB_DB_BACKEND=mongo` it answered
+`app_dir()` while the pictures sat beside the source file, so the migration
+found nothing to read in and carried the paths across instead of the pictures.
+Silently. In an ordinary install the two answers are the same.
 
 **`drop_all()` refuses a database whose name does not start with `mbtest_`**
 unless `MB_MONGO_ALLOW_DROP` is set. On SQLite it unlinks a local file; on

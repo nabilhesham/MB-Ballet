@@ -26,6 +26,7 @@ import config
 config.load_env()
 
 import db                                    # noqa: E402
+import images                                # noqa: E402
 import repo as data                          # noqa: E402
 from repo.mongo import ids as mongo_ids      # noqa: E402
 from repo.mongo import schema as mongo_schema  # noqa: E402
@@ -47,7 +48,20 @@ IMAGE_BATCH = 25
 
 
 def sqlite_repo() -> SqliteRepo:
-    return SqliteRepo(db.connect(config.sqlite_path()))
+    """
+    The source, with its schema brought up to date first.
+
+    db.init() is additive and idempotent -- it is exactly what the app itself
+    runs on every start -- and without it this tool cannot read a database
+    older than its own ORDER list. The academy's own file predates the
+    `images` table, so counting the rows to move died on `no such table:
+    images` before it had moved anything. Leaving that to "start the app once
+    first" made a manual step load-bearing, which is the kind of instruction
+    that gets skipped exactly when it matters.
+    """
+    path = config.sqlite_path()
+    db.init(path)
+    return SqliteRepo(db.connect(path))
 
 
 def mongo_repo():
@@ -55,24 +69,31 @@ def mongo_repo():
     return MongoRepo(config.mongo_uri(), config.mongo_db())
 
 
-def pictures_still_files(source) -> int:
+def pictures_with_no_row(source):
     """
-    How many pictures this database points at but does not contain.
+    `(faces, cards)` this database points at but does not contain.
 
     The migration copies rows, so a `photo_path` of `/photos/client_00001.jpg`
-    arrives on the hosted backend as a path to a file on a laptop nobody will
-    ever query it from -- and a credential whose card was never read in has no
-    picture to copy at all. Both are silent: the profile renders, the client
-    is just faceless and the card has no image. Counting them before the move
-    is what turns that into a sentence someone can act on.
+    would arrive on the hosted backend as a path to a file on a laptop nobody
+    will ever query it from, and a live credential with no card row has no
+    picture to copy at all. Both are silent -- the profile renders, the client
+    is just faceless and the card has no image -- so they are counted and
+    said out loud.
+
+    This is a **warning, not a refusal**, and the difference matters. The
+    fixable half is fixed automatically now (see main), and what can be left
+    over is a picture that exists nowhere: a photo never taken, or a card
+    whose PNG was deleted or never drawn. No amount of importing produces
+    those -- only reissuing the card or uploading the photo does -- so
+    blocking the migration on them would be a refusal with no way to clear
+    it, which is worse than a faceless profile.
     """
-    n = 0
+    faces = 0
     for coll in ("clients", "instructors"):
-        n += sum(1 for r in source.find(coll, fields=["photo_path"])
-                 if (r.get("photo_path") or "").startswith("/photos/"))
+        faces += sum(1 for r in source.find(coll, fields=["photo_path"])
+                     if (r.get("photo_path") or "").startswith("/photos/"))
     live = source.count("credentials", {"revoked_at": None})
-    n += max(0, live - source.count("images", {"kind": "card"}))
-    return n
+    return faces, max(0, live - source.count("images", {"kind": "card"}))
 
 
 def copy(source, target, coll, dry_run):
@@ -107,6 +128,23 @@ def main() -> int:
 
     source = sqlite_repo()
     try:
+        # Pictures that are still files become rows first, because rows are
+        # the only thing that travels. It is the same idempotent read-in the
+        # app does on startup, and it has to run before the rows are counted
+        # or the `images` total is the one from before it. A dry run reports
+        # what it would take in and leaves the disk alone. What this says is
+        # held back until after the table, so the picture news reads together.
+        pending = images.pending_legacy_files(config.legacy_media_dir())
+        note = ""
+        if pending and not dry_run:
+            moved = images.import_legacy_files(source, config.legacy_media_dir())
+            if moved:
+                note = (f"  Read {moved} photo(s) and card(s) in off the disk "
+                        f"first -- rows are the only thing that travels.")
+        elif pending:
+            note = (f"  {pending} photo(s) and card(s) are still files. A real "
+                    f"run reads them in first.")
+
         counts = {c: source.count(c) for c in ORDER}
         total = sum(counts.values())
         print(f"\nSource: {config.sqlite_path()}")
@@ -114,18 +152,24 @@ def main() -> int:
             print(f"  {coll:<30}{n:>7}")
         print(f"  {'':<30}{'-' * 7}\n  {'total':<30}{total:>7}")
 
-        left_on_disk = pictures_still_files(source)
-        if left_on_disk:
-            print(f"\n  {left_on_disk} picture(s) are still files on a disk, not rows.\n"
-                  "  Start the app once with photos/ and cards/ beside this\n"
-                  "  database -- it reads them in -- then migrate. Moving now\n"
-                  "  carries the paths across and leaves the pictures behind.")
-            if not force:
-                print("\n  Refusing. Re-run with --force if you meant to.")
-                return 1
+        faces, cards = pictures_with_no_row(source)
+        if note:
+            print(f"\n{note}")
+        if faces or cards:
+            print("")
+            if faces:
+                print(f"  {faces} client/instructor photo(s) point at a file that "
+                      f"is not here.\n"
+                      f"    They will show initials instead. Upload the photo "
+                      f"again to fix one.")
+            if cards:
+                print(f"  {cards} live card(s) have no picture stored.\n"
+                      f"    The cards still scan -- the token is in the database. "
+                      f"Only the\n    printed image is missing, and Reissue on the "
+                      f"client's profile draws it.")
 
         if dry_run:
-            print("\n--dry-run: nothing was written.")
+            print("\n--dry-run: nothing was written to MongoDB.")
             return 0
 
         target = mongo_repo()

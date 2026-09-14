@@ -185,15 +185,19 @@ def legacy_media_dir() -> str:
     """
     Where an install older than images.py left its photos/ and cards/.
 
-    Beside the database, which is where they always sat. In every real
-    install that is app_dir() and these two answers are the same; they part
-    company only when MB_SQLITE_PATH puts the database somewhere else, and
-    then the photos lying in whatever folder the app was launched from
-    belong to a different database and must not be read into this one.
+    Beside the SQLite database, always, and deliberately not a function of
+    MB_DB_BACKEND: those folders only ever existed next to `academy.db`,
+    since they predate there being a second backend at all. In an ordinary
+    install this is app_dir() anyway -- sqlite_path() defaults to
+    "academy.db" and load_env() has chdir'd there.
+
+    Branching on backend() here was wrong, and wrong in the one place it
+    mattered. `migrate_to_mongo.py` reads SQLite whatever the backend is set
+    to, so with MB_DB_BACKEND=mongo this answered app_dir() while the
+    pictures sat beside the source file: it found nothing to read in and
+    migrated the paths instead of the pictures, silently.
     """
-    if backend() == "sqlite":
-        return os.path.dirname(os.path.abspath(sqlite_path()))
-    return app_dir()
+    return os.path.dirname(os.path.abspath(sqlite_path()))
 
 
 def mongo_uri() -> str:
