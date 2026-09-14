@@ -1852,6 +1852,40 @@ retried -- this is a single-user app, so the real causes are network blips,
 and silently re-running a POST is worse than telling reception to press the
 button again.
 
+**A packaged build carries its own CA bundle, and must.** The Mac binary
+died at startup against Atlas with
+
+```
+[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed:
+unable to get local issuer certificate (_ssl.c:1006)
+```
+
+PyInstaller bundles its own Python, and macOS keeps its root certificates in
+the Keychain rather than at the OpenSSL paths `ssl` falls back to — which is
+why a normal macOS Python install ships an "Install Certificates.command".
+There is no such step for a binary someone double-clicks, so the build works
+on the machine that made it and fails on every other Mac. **pymongo does not
+depend on certifi** (only dnspython), so nothing pulled a bundle in by
+accident. `repo/mongo/client.py`'s `ca_file()` passes `certifi.where()` as
+`tlsCAFile`, `certifi` is in `requirements.txt` *and* in `academy.spec`'s
+hiddenimports (the second is what makes PyInstaller's hook collect
+`cacert.pem`), and a URI that names its own bundle still wins — a keyword
+argument would otherwise override a deliberate choice.
+`tests/test_mongo_tls.py` holds all of that, including that both files still
+declare it.
+
+**A failed first connection says what to do, not what happened.** The same
+failure arrives from pymongo as several hundred characters of
+`ServerDescription` objects, one per replica-set member, each repeating the
+same underlying error — and startup is exactly where a dump is worst, because
+the window closes and `error.log` is all anyone gets.
+`server.py`'s `_connect_or_explain()` names the three real causes separately,
+because they need different actions from different people: a certificate that
+cannot be checked is a **fault in the build**; a name that cannot be looked up
+is the SRV filtering below; and no answer at all is either no internet or an
+IP missing from **Atlas → Network Access**, which is per-network, so a machine
+that works in one place stops working in another.
+
 **`mongodb+srv://` needs a DNS SRV lookup that some networks filter.** This
 has already bitten: it fails with a DNS timeout that looks nothing like a
 configuration problem. The direct form names the hosts instead and is

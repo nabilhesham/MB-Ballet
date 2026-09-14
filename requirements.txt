@@ -18,3 +18,9 @@ openpyxl
 # of modern pymongo rather than the old [srv] extra, and mongodb+srv:// URIs
 # do not resolve without it.
 pymongo>=4.6
+
+# Mozilla's root certificates, as a file. pymongo does not depend on it --
+# only dnspython -- and a packaged build has no usable system CA store, so
+# without this the macOS binary dies at startup with CERTIFICATE_VERIFY_FAILED
+# against Atlas. See repo/mongo/client.py's ca_file().
+certifi
