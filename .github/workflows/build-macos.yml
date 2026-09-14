@@ -203,13 +203,71 @@ jobs:
           echo "The ${{ matrix.arch }} binary starts natively on a ${{ matrix.arch }} Mac,"
           echo "serves the kiosk and the admin, and answers the API."
 
+      - name: Pack it so it arrives executable
+        # upload-artifact builds the zip itself and its own docs say "file
+        # permissions are not maintained ... all files will have 644". A
+        # 644 binary is not a broken download, it just refuses to run:
+        #
+        #     zsh: permission denied: ./MB Ballet Academy
+        #
+        # which is a second mystifying error after the CPU-type one, and the
+        # workaround the action recommends is to tar first. tar carries the
+        # mode, so the file comes out of the archive already executable and
+        # there is no chmod to remember -- a step that gets skipped exactly
+        # when it matters. macOS unarchives .tar.gz on a double-click, so
+        # this costs no Terminal either.
+        run: |
+          chmod +x "dist/MB Ballet Academy"
+          tar -czf "mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz" \
+              -C dist "MB Ballet Academy"
+          ls -l "mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz"
+
       - uses: actions/upload-artifact@v4
         with:
           # The architecture is in the name on purpose. Two downloads that
           # look identical is how the wrong one ends up on the Mac, and the
           # error it gives there names no cause you can act on.
           name: mb-ballet-academy-macos-${{ matrix.arch }}
-          path: dist/MB Ballet Academy
+          path: mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz
+
+      - name: Say what this is and how to run it
+        # The same notes build_mac.sh prints at the end of a local build, put
+        # where whoever downloads this actually looks. Every one of these is
+        # an error someone has already hit with nothing to go on: the wrong
+        # architecture, a 644 binary, Gatekeeper, and Rosetta 2 not being
+        # installed on a Mac that needs it.
+        run: |
+          {
+            echo "## ${{ matrix.arch }} build"
+            echo
+            echo 'Take this one if `uname -m` on the Mac says `${{ matrix.arch }}`.'
+            echo
+            case "${{ matrix.arch }}" in
+              arm64)  echo '- Apple Silicon (M1 and later). On an Intel Mac it cannot run at all.' ;;
+              x86_64) echo '- Intel Macs, natively. On Apple Silicon it needs Rosetta 2, which is'
+                      echo '  **not installed by default** and is not offered when you launch from'
+                      echo '  Terminal — you just get `bad CPU type in executable`. Install it once:'
+                      echo '  `softwareupdate --install-rosetta --agree-to-license`' ;;
+            esac
+            echo
+            echo '```bash'
+            echo 'tar -xzf mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz'
+            echo 'mkdir -p ~/"MB Ballet" && mv "MB Ballet Academy" ~/"MB Ballet"/'
+            echo 'cd ~/"MB Ballet" && ./"MB Ballet Academy"'
+            echo '```'
+            echo
+            echo 'It comes out of the tar already executable, so there is no `chmod` step.'
+            echo
+            echo 'It is unsigned, so the first run needs one right-click (or Control-click)'
+            echo 'on the file in Finder and **Open** to clear Gatekeeper.'
+            echo
+            echo 'Put it in its own folder, not loose on the Desktop: it creates'
+            echo '`academy.db` beside itself, and that folder is what needs backing up.'
+            echo
+            echo 'If it starts and then exits, an `error.log` appears next to it. If it'
+            echo 'says `bad CPU type in executable` it never started, so there is no'
+            echo '`error.log` — that is the architecture note above.'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Logs, if it went wrong
         if: failure()

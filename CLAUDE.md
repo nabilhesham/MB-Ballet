@@ -521,7 +521,28 @@ would have caught the macos-14 bug on the run that introduced it. x86_64 is
 the row with a deadline: **GitHub drops it in August 2027**, which then just
 removes a row.
 
-`build_mac.sh` prints the same thing for a local build: which architecture it
+**The artifact is a `.tar.gz`, not the bare binary, and that is not
+packaging taste.** `upload-artifact` builds the zip itself and its own docs
+say file permissions are not maintained — everything arrives `644`. A 644
+binary is not a broken download, it just refuses to run:
+
+```
+zsh: permission denied: ./MB Ballet Academy
+```
+
+which is a second unexplained error waiting behind the first. The workaround
+the action recommends is to tar before uploading, and tar carries the mode, so
+the file comes out already executable and there is no `chmod` to remember —
+the kind of step that gets skipped exactly when it matters. macOS unarchives a
+`.tar.gz` on a double-click, so it costs no Terminal either.
+
+**Each job writes what it built to the run summary**, which is where whoever
+downloads it actually looks: which architecture and how to check theirs, the
+unpack-and-run lines, the Gatekeeper right-click, the Rosetta install on the
+x86_64 job only, and the reminder that a CPU-type error leaves no `error.log`.
+Every line of it is an error someone has already hit with nothing to go on.
+
+`build_mac.sh` prints the same notes for a local build: which architecture it
 produced, which Macs that runs on, the Rosetta command if it is x86_64, and —
 correcting a promise it used to make — that a CPU-type error leaves no
 `error.log` to read, because nothing ever started.
