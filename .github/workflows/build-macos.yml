@@ -17,29 +17,48 @@ name: Build macOS binary
 on:
   workflow_dispatch:
 
+# Nothing here reads or writes the repository beyond checking it out.
+permissions:
+  contents: read
+
 jobs:
   build:
-    # Intel (x86_64) runner, deliberately NOT macos-latest/macos-14 (Apple
-    # Silicon/arm64). academy.spec's target_arch=None just builds for
-    # whatever the host is, and an x86_64 build runs natively on Intel Macs
-    # AND on Apple Silicon Macs via Rosetta 2 — the reverse isn't true,
-    # there's no way to run arm64 code on an Intel Mac. The reception Mac's
-    # exact hardware isn't known, so this is the strictly safer choice.
-    # Do not bump this to macos-latest without knowing that tradeoff.
-    runs-on: macos-14
+    # Intel (x86_64), deliberately not an Apple Silicon label.
+    # academy.spec's target_arch=None builds for whatever the host is, and an
+    # x86_64 build runs natively on Intel Macs AND on Apple Silicon Macs via
+    # Rosetta 2 — the reverse is not true, there is no way to run arm64 code
+    # on an Intel Mac. The reception Mac's exact hardware is not known, so
+    # this is the strictly safer choice.
+    #
+    # It was `macos-13` when that reasoning was written, then `macos-14`,
+    # and both of those are now wrong in different ways: macos-13 became
+    # fully unsupported in December 2025, and macos-14 is *arm64* — that
+    # change quietly inverted the decision above, so the comment said Intel
+    # while the runner built a binary no Intel Mac can execute at all.
+    # `macos-15-intel` is the label GitHub added for exactly this case.
+    #
+    # It is also the LAST x86_64 macOS image: GitHub drops the architecture
+    # in August 2027. Before then, either find out whether the academy's Mac
+    # is Intel or Apple Silicon and move to `macos-15`/`macos-26` if it is
+    # Apple Silicon, or build on a real Mac. Do not "helpfully" bump this to
+    # an arm64 label without settling that question first.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          # macOS minutes cost 10x, so the dependency download is worth
+          # caching even though it is the cheap half of this job.
+          cache: 'pip'
 
       - name: Install build tool and dependencies
         run: |
           python3 -m pip install --upgrade pip pyinstaller
           python3 -m pip install -r requirements.txt
 
-      - name: Write .env from the repository secret
+      - name: Write .env from the repository secrets
         # academy.spec bakes this project's .env into the binary and refuses
         # to build without an ENTRY_SECRET — that value signs every member
         # card, and a build that invents its own cannot verify a single card
@@ -47,8 +66,18 @@ jobs:
         # CI is handed the same secret through Settings -> Secrets and
         # variables -> Actions. It must match the one in the local .env, or
         # the binary this produces will reject every existing card.
+        #
+        # The MB_ settings are optional and unset means SQLite, which is what
+        # the reception laptop should run. They are here because every
+        # setting in .env is baked in, so a local build of a .env naming
+        # MongoDB and a CI build of the same commit would otherwise disagree
+        # about which database the binary talks to. Set the secrets only if
+        # the binary is meant to be the hosted-backend one.
         env:
           ENTRY_SECRET: ${{ secrets.ENTRY_SECRET }}
+          MB_DB_BACKEND: ${{ secrets.MB_DB_BACKEND }}
+          MB_MONGO_URI: ${{ secrets.MB_MONGO_URI }}
+          MB_MONGO_DB: ${{ secrets.MB_MONGO_DB }}
         run: |
           if [ -z "$ENTRY_SECRET" ]; then
             echo "The ENTRY_SECRET repository secret is not set."
@@ -57,15 +86,99 @@ jobs:
             exit 1
           fi
           printf 'ENTRY_SECRET=%s\n' "$ENTRY_SECRET" > .env
+          for key in MB_DB_BACKEND MB_MONGO_URI MB_MONGO_DB; do
+            eval "value=\$$key"
+            if [ -n "$value" ]; then
+              printf '%s=%s\n' "$key" "$value" >> .env
+              echo "  baking $key"
+            fi
+          done
+
+      - name: Check the committed interface is there
+        # static/app/ is the built React admin and is used exactly as
+        # committed — no npm/Node step here, the same "already built, just
+        # use it" fallback the local build scripts take when Node is absent.
+        # Which means a checkout missing it packages a binary that serves
+        # nothing at `/`, and the first person to find out is whoever opens
+        # the release. See the build-once-commit-the-output note in CLAUDE.md.
+        run: |
+          test -f static/app/index.html || {
+            echo "static/app/index.html is missing."
+            echo "Run 'cd frontend && npm run build' and commit static/app/."
+            exit 1
+          }
 
       - name: Package
-        # static/app/ (the built React interface) is used exactly as
-        # committed — no npm/Node step here, the same "already built, just
-        # use it" fallback the local build scripts take when Node isn't
-        # installed. The hidden imports live in academy.spec, not here.
+        # The hidden imports live in academy.spec, not here.
         run: python3 -m PyInstaller academy.spec --clean --noconfirm
+
+      - name: Smoke-test the binary
+        # The one failure this build has actually produced, more than once,
+        # is a missing hidden import: uvicorn and starlette load modules by
+        # string name, so static analysis cannot see them, and the symptom is
+        # a window that "opens and shuts" with nothing to go on. It costs a
+        # few seconds to prove the thing starts and answers, and an untested
+        # binary is the whole reason run_app.py has to write error.log.
+        #
+        # Three URLs rather than one: /reception is the screen the laptop
+        # exists for, / is the React admin out of static/app, and
+        # /api/dashboard proves the routers and the database came up. The
+        # frozen app creates its own empty academy.db in dist/ and needs no
+        # photos/ or cards/ folder beside it — pictures are rows now, and a
+        # missing mount directory used to raise at import time.
+        run: |
+          cd dist
+          "./MB Ballet Academy" > run.log 2>&1 &
+          pid=$!
+
+          # The port comes out of the binary's own banner, not assumed: when
+          # something else holds 8000 run_app.py deliberately moves to the
+          # next free one, so a hardcoded 8000 would either miss the binary
+          # or, worse, pass by talking to whatever else was listening.
+          base=""
+          for _ in $(seq 1 60); do
+            base=$(sed -n 's|.*The system is running at *\(http://[^ ]*\).*|\1|p' run.log | head -1)
+            [ -n "$base" ] && break
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 2
+          done
+
+          ok=""
+          if [ -n "$base" ]; then
+            for _ in $(seq 1 30); do
+              # -s without -S: a retry that has not come up yet is expected,
+              # and sixty "Failed to connect" lines bury the real failure.
+              curl -fs -o /dev/null "$base/reception" && { ok=1; break; }
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 2
+            done
+          fi
+
+          if [ -z "$ok" ]; then
+            echo "The packaged binary never came up${base:+ at $base}."
+            echo "--- stdout/stderr ---"; cat run.log || true
+            echo "--- error.log ---";     cat error.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "Answering at $base"
+          curl -fsS -o /dev/null "$base/" || {
+            echo "The admin interface did not load — check static/app/."; exit 1; }
+          curl -fsS -o /dev/null "$base/api/dashboard" || {
+            echo "The API did not answer — the database did not come up."; exit 1; }
+          kill "$pid" 2>/dev/null || true
+          echo "The binary starts, serves the kiosk and the admin, and answers the API."
 
       - uses: actions/upload-artifact@v4
         with:
           name: mb-ballet-academy-macos
           path: dist/MB Ballet Academy
+
+      - name: Logs, if it went wrong
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            dist/run.log
+            dist/error.log
+          if-no-files-found: ignore

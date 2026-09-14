@@ -250,11 +250,13 @@ build_linux.sh    Same thing, run once on Linux, for a Linux binary. Same
                   binary on a real GitHub-hosted Mac, for anyone who needs a
                   ready-to-run Mac build without access to a Mac. Download
                   the result from the finished run's Artifacts, or
-                  `gh run download`. Runs on macos-13 (Intel), deliberately
-                  not macos-latest/arm64 — an x86_64 build runs on Intel Macs
-                  natively and on Apple Silicon Macs via Rosetta 2, the
-                  reverse isn't true, and the reception Mac's hardware isn't
-                  known. Do not "helpfully" bump this to the newer image.
+                  `gh run download`. Runs on macos-15-intel (x86_64),
+                  deliberately not an arm64 label — an x86_64 build runs on
+                  Intel Macs natively and on Apple Silicon Macs via Rosetta
+                  2, the reverse isn't true, and the reception Mac's
+                  hardware isn't known. It also smoke-tests the binary it
+                  built. See the runner note below; do not bump this to an
+                  arm64 label without reading it.
 academy.spec      PyInstaller build definition, shared by all three build
                   scripts above. Hidden imports live here, and so does
                   the step that bakes this folder's .env into the
@@ -442,6 +444,38 @@ download the finished binary from the run's Artifacts or `gh run download`.
 It is manually triggered only (`workflow_dispatch`), never on push, because
 macOS runner minutes are billed at a 10x multiplier against the GitHub free
 tier and this is an occasional "cut a release" action, not a per-commit one.
+
+**The runner label is load-bearing and has a deadline.** `macos-15-intel` is
+x86_64, which is the whole point: that binary runs natively on an Intel Mac
+*and* on Apple Silicon via Rosetta 2, while an arm64 binary cannot run on an
+Intel Mac at all, and nobody has established which kind of Mac the academy
+has. The label has been wrong twice — it was `macos-13`, which GitHub made
+fully unsupported in December 2025, and then `macos-14`, which is **arm64**:
+that bump silently inverted the decision while the comment above it still
+said Intel, so the workflow was building a binary that would not start on
+half its possible targets. **GitHub drops x86_64 macOS entirely in August
+2027.** Before then, either find out what the academy's Mac is and move to
+`macos-15`/`macos-26` if it is Apple Silicon, or build on a real Mac.
+
+**It smoke-tests what it built**, because the failure this packaging step
+actually produces is a missing hidden import — uvicorn and starlette load
+modules by string name, static analysis cannot see them, and the symptom is a
+window that "opens and shuts" with nothing to go on. The step starts the
+binary, reads the port out of its own banner rather than assuming 8000 (a
+taken port makes `run_app.py` move, and a hardcoded one would either miss the
+binary or pass by talking to whatever else was listening), then asks for
+`/reception`, `/` and `/api/dashboard` — the kiosk, the committed React build
+and the database. It also fails the build when `static/app/index.html` is
+missing, since there is no npm step here and a checkout without it packages a
+binary that serves nothing at `/`. On failure both `run.log` and `error.log`
+are uploaded as an artifact.
+
+**The `.env` it bakes is ENTRY_SECRET plus, optionally, the `MB_` settings**,
+each from a repository secret of the same name. Unset means SQLite, which is
+what reception should run. They are settable because every value in `.env` is
+baked into the binary, so a local build from a `.env` naming MongoDB and a CI
+build of the same commit would otherwise disagree about which database the
+binary talks to.
 
 The entry point is `run_app.py`, not `server.py`. A double-clicked exe closes
 its console the moment the process dies, so an unhandled exception is invisible
