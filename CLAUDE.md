@@ -560,12 +560,43 @@ missing, since there is no npm step here and a checkout without it packages a
 binary that serves nothing at `/`. On failure both `run.log` and `error.log`
 are uploaded as an artifact.
 
-**The `.env` it bakes is ENTRY_SECRET plus, optionally, the `MB_` settings**,
-each from a repository secret of the same name. Unset means SQLite, which is
-what reception should run. They are settable because every value in `.env` is
-baked into the binary, so a local build from a `.env` naming MongoDB and a CI
-build of the same commit would otherwise disagree about which database the
-binary talks to.
+**The backend is a choice made when you press Run workflow**, and this is the
+one thing about CI builds that has to be understood rather than remembered:
+**the checkout has no `.env`.** It is gitignored and always will be — it holds
+`ENTRY_SECRET` and an Atlas password — so "make the build use my `.env`" is
+not a thing that can happen. CI has never seen that file. `academy.spec` bakes
+whatever `.env` is in the tree at build time, and the workflow's own step is
+what puts one there, from repository secrets.
+
+That is how a build came out talking to SQLite while the developer's `.env`
+said `mongo`. Nothing was broken: the settings were never given to CI, and
+`backend()` fell back to its default in silence. Two things stop it
+recurring. The `workflow_dispatch` input `backend` (`sqlite` | `mongo`,
+default `sqlite`) is printed in the log and named in the run summary, so a run
+always states which database its binary is for. And choosing `mongo` without
+the `MB_MONGO_URI` secret **fails the build there**, rather than shipping a
+binary that raises on the reception Mac — which it would, since
+`MB_DB_BACKEND=mongo` with no URI is a deliberate refusal, not a fallback.
+
+The backend is an input rather than a fourth secret because it is not one: it
+is a decision, and one visible switch beats two sources of truth that can
+disagree. `MB_MONGO_URI` and `MB_MONGO_DB` stay secrets, because the URI
+carries the password.
+
+**A `mongo` build has the Atlas credentials inside it**, which follows from
+baking `.env` at all and is worth saying out loud where someone downloads one:
+anyone who can fetch the artifact can read them. The run summary says so. Keep
+the repository private, and scope the Atlas user and IP access list to what
+reception actually needs.
+
+`config.describe()` is the line on the startup banner that names the backend,
+and it prints the host with any credentials stripped. It used to split on `@`
+alone, so a URI with **no** credentials in it — the direct multi-host form
+`.env.example` documents for networks that filter SRV lookups — kept the whole
+string and the next split returned the *scheme*, printing `at mongodb:`.
+`config.mongo_hosts()` does it properly now: drop the scheme, drop
+`user:pass@` from the right (a password may itself contain `@`), then take the
+host list.
 
 The entry point is `run_app.py`, not `server.py`. A double-clicked exe closes
 its console the moment the process dies, so an unhandled exception is invisible

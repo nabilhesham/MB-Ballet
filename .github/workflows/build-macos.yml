@@ -16,6 +16,12 @@ name: Build macOS binary
 
 on:
   workflow_dispatch:
+    inputs:
+      backend:
+        description: "Which database the binary should talk to"
+        type: choice
+        default: sqlite
+        options: [sqlite, mongo]
 
 # Nothing here reads or writes the repository beyond checking it out.
 permissions:
@@ -83,26 +89,31 @@ jobs:
           python3 -m pip install --upgrade pip pyinstaller
           python3 -m pip install -r requirements.txt
 
-      - name: Write .env from the repository secrets
-        # academy.spec bakes this project's .env into the binary and refuses
-        # to build without an ENTRY_SECRET — that value signs every member
-        # card, and a build that invents its own cannot verify a single card
-        # already printed. A checkout has no .env (it is never committed), so
-        # CI is handed the same secret through Settings -> Secrets and
-        # variables -> Actions. It must match the one in the local .env, or
-        # the binary this produces will reject every existing card.
+      - name: Write the .env this build bakes in
+        # THE CHECKOUT HAS NO .env. It is gitignored and always will be -- it
+        # holds ENTRY_SECRET and, now, an Atlas password. So "make the build
+        # use my .env" cannot mean reading the file: CI has never seen it.
+        # academy.spec bakes whatever .env is in the tree at build time, and
+        # this step is what puts one there.
         #
-        # The MB_ settings are optional and unset means SQLite, which is what
-        # the reception laptop should run. They are here because every
-        # setting in .env is baked in, so a local build of a .env naming
-        # MongoDB and a CI build of the same commit would otherwise disagree
-        # about which database the binary talks to. Set the secrets only if
-        # the binary is meant to be the hosted-backend one.
+        # That is why a build came out talking to SQLite while the developer's
+        # own .env said mongo. Nothing was broken -- the settings simply were
+        # not given to CI, and the backend fell back to its default in
+        # silence. Two changes stop that: the backend is a **choice made when
+        # you press Run workflow**, printed in the log and the summary, so a
+        # run always says which database its binary is for; and choosing
+        # mongo without the URI secret fails the build here instead of
+        # producing a binary that raises on the reception Mac.
+        #
+        # The backend is an input rather than a fourth secret because it is
+        # not one -- it is a decision, and one visible switch beats two
+        # sources of truth that can disagree. The URI and database name stay
+        # secrets, because the URI carries the password.
         env:
           ENTRY_SECRET: ${{ secrets.ENTRY_SECRET }}
-          MB_DB_BACKEND: ${{ secrets.MB_DB_BACKEND }}
           MB_MONGO_URI: ${{ secrets.MB_MONGO_URI }}
           MB_MONGO_DB: ${{ secrets.MB_MONGO_DB }}
+          BACKEND: ${{ inputs.backend }}
         run: |
           if [ -z "$ENTRY_SECRET" ]; then
             echo "The ENTRY_SECRET repository secret is not set."
@@ -111,13 +122,28 @@ jobs:
             exit 1
           fi
           printf 'ENTRY_SECRET=%s\n' "$ENTRY_SECRET" > .env
-          for key in MB_DB_BACKEND MB_MONGO_URI MB_MONGO_DB; do
-            eval "value=\$$key"
-            if [ -n "$value" ]; then
-              printf '%s=%s\n' "$key" "$value" >> .env
-              echo "  baking $key"
+
+          if [ "$BACKEND" = "mongo" ]; then
+            if [ -z "$MB_MONGO_URI" ]; then
+              echo "You chose the mongo backend, but the MB_MONGO_URI secret"
+              echo "is not set. The binary would start up and raise rather"
+              echo "than quietly fall back to SQLite, so this fails here."
+              echo
+              echo "Add MB_MONGO_URI (and MB_MONGO_DB if it is not mb_ballet)"
+              echo "under Settings -> Secrets and variables -> Actions, set to"
+              echo "the same values as your local .env."
+              exit 1
             fi
-          done
+            printf 'MB_DB_BACKEND=mongo\n'   >> .env
+            printf 'MB_MONGO_URI=%s\n' "$MB_MONGO_URI" >> .env
+            [ -n "$MB_MONGO_DB" ] && printf 'MB_MONGO_DB=%s\n' "$MB_MONGO_DB" >> .env
+            echo "Baking: MongoDB. MB_MONGO_URI is set${MB_MONGO_DB:+, database $MB_MONGO_DB}."
+          else
+            echo "Baking: SQLite, an academy.db beside the binary."
+            echo "Re-run with the backend input set to 'mongo' for a hosted build."
+          fi
+          # The keys only -- the URI carries the password and this is a log.
+          echo "Baked keys: $(cut -d= -f1 .env | tr '\n' ' ')"
 
       - name: Check the committed interface is there
         # static/app/ is the built React admin and is used exactly as
@@ -261,8 +287,29 @@ jobs:
             echo 'It is unsigned, so the first run needs one right-click (or Control-click)'
             echo 'on the file in Finder and **Open** to clear Gatekeeper.'
             echo
-            echo 'Put it in its own folder, not loose on the Desktop: it creates'
-            echo '`academy.db` beside itself, and that folder is what needs backing up.'
+            echo "### Database"
+            echo
+            if [ "${{ inputs.backend }}" = "mongo" ]; then
+              echo 'This binary talks to **MongoDB**. The connection string is baked'
+              echo 'into it, so it needs no `.env` and no configuration on the Mac —'
+              echo 'and it needs internet. Its startup banner names the database and'
+              echo 'host it connected to; check that line on the first run.'
+              echo
+              echo 'It also means **this artifact contains the Atlas credentials**.'
+              echo 'Anyone who can download it can read them, so treat it like the'
+              echo 'password itself: keep the repository private, and scope the Atlas'
+              echo 'user and IP access list to what reception actually needs.'
+            else
+              echo 'This binary uses **SQLite** and creates `academy.db` beside itself,'
+              echo 'which is what reception should run — it is the only backend that'
+              echo 'keeps working with no internet. Put the binary in its own folder,'
+              echo 'not loose on the Desktop, and back that folder up.'
+              echo
+              echo 'For a MongoDB build, re-run this workflow with the `backend` input'
+              echo 'set to `mongo` — a local `.env` saying so has no effect here,'
+              echo 'because the checkout has no `.env` at all.'
+            fi
+            echo
             echo
             echo 'If it starts and then exits, an `error.log` appears next to it. If it'
             echo 'says `bad CPU type in executable` it never started, so there is no'
