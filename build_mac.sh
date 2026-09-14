@@ -155,10 +155,36 @@ step "[3/4] Packaging…"
 "$BPY" -m PyInstaller academy.spec --clean --noconfirm || die "The build failed — see the output above."
 
 step "[4/4] Done."
+
+# PyInstaller cannot cross-compile and academy.spec sets target_arch=None, so
+# the binary is for whatever this Mac is and nothing else. Saying which, out
+# loud, is the difference between a copy that works and
+# "zsh: bad CPU type in executable" on a Mac of the other kind -- an error
+# that names no cause and that error.log cannot explain, because the process
+# never starts.
+BUILT_ARCH="$(lipo -archs "dist/MB Ballet Academy" 2>/dev/null || uname -m)"
+
 echo
 printf "  ------------------------------------------------------------\n"
 printf "    Your program is here:\n\n"
 printf "      dist/MB Ballet Academy\n\n"
+printf "    It is a %s build, made on this %s Mac.\n" "$BUILT_ARCH" "$(uname -m)"
+case "$BUILT_ARCH" in
+  arm64)
+    printf "    It runs on Apple Silicon Macs (M1 and later) only.\n"
+    printf "    On an Intel Mac it fails with \"bad CPU type in\n"
+    printf "    executable\" -- build there, or use the arm64/x86_64\n"
+    printf "    pair the GitHub workflow produces.\n\n" ;;
+  x86_64)
+    printf "    It runs natively on Intel Macs. On Apple Silicon it\n"
+    printf "    needs Rosetta 2, which is NOT installed by default and\n"
+    printf "    is not offered when you launch from Terminal -- you just\n"
+    printf "    get \"bad CPU type in executable\". Install it once with\n"
+    printf "      softwareupdate --install-rosetta --agree-to-license\n"
+    printf "    or use the arm64 build the GitHub workflow produces.\n\n" ;;
+  *)
+    printf "    Check it matches the target Mac's own \`uname -m\`.\n\n" ;;
+esac
 printf "    Copy that file into an EMPTY FOLDER on the reception\n"
 printf "    laptop and run it from Terminal: cd into that folder,\n"
 printf "    then ./\"MB Ballet Academy\". It isn't a signed .app, so\n"
@@ -170,6 +196,9 @@ printf "    Back up that whole folder, not just the file.\n\n"
 printf "    It needs no .env: the settings and the card-signing\n"
 printf "    key were built into it from this project's own .env,\n"
 printf "    so cards already printed still scan.\n\n"
-printf "    Test it here first. If it exits immediately, an error.log\n"
-printf "    file will be sitting next to it explaining why.\n"
+printf "    Test it here first. If it starts and then exits, an\n"
+printf "    error.log file will be sitting next to it explaining why.\n"
+printf "    If instead it says \"bad CPU type in executable\", it never\n"
+printf "    started and there is no error.log to read: that is the\n"
+printf "    architecture note above, not a fault in the program.\n"
 printf "  ------------------------------------------------------------\n\n"

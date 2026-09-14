@@ -227,6 +227,22 @@ def describe() -> str:
     """One line for the startup banner, with no secret in it."""
     if backend() == SQLITE:
         return f"SQLite  {os.path.join(app_dir(), sqlite_path())}"
-    # Never print the URI: it carries the password.
-    host = mongo_uri().split("@")[-1].split("/")[0]
-    return f"MongoDB  {mongo_db()} at {host}"
+    return f"MongoDB  {mongo_db()} at {mongo_hosts()}"
+
+
+def mongo_hosts() -> str:
+    """
+    The host part of the URI, with any credentials removed.
+
+    Never the URI itself: it carries the password, and this line goes on the
+    startup banner. Splitting on "@" alone was not enough -- a URI with no
+    credentials in it has no "@" to split on, so the whole thing survived and
+    the next split on "/" returned the *scheme*, printing "at mongodb:". That
+    is the one line telling reception which database the app is talking to,
+    and the direct multi-host form .env.example documents for networks that
+    filter SRV lookups is exactly the shape that has no credentials.
+    """
+    uri = mongo_uri()
+    _, _, rest = uri.partition("://")          # drop mongodb:// or mongodb+srv://
+    rest = rest.rpartition("@")[2] or rest     # drop user:pass@ if present
+    return rest.split("/")[0].split("?")[0] or "an unnamed host"
