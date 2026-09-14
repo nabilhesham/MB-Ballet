@@ -131,6 +131,23 @@ def test_the_profile_points_at_the_stored_photo(client):
     assert Image.open(io.BytesIO(r.content)).size == (60, 45)
 
 
+def test_a_card_with_no_stored_image_offers_no_link(client):
+    """
+    A credential can outlive its picture — issued before cards moved into the
+    database, or carried across a backend move without its images. The
+    profile offers Reissue instead of a Download that 404s.
+    """
+    a = client.academy
+    body = client.get(f"/api/clients/{a.dual}").json()
+    assert body["cards"], "the fixture issues cards"
+    assert all(cd["card_url"] is None for cd in body["cards"])
+
+    client.post(f"/api/clients/{a.dual}/card", json={"class_id": a.ballet})
+    cards = client.get(f"/api/clients/{a.dual}").json()["cards"]
+    ballet = [cd for cd in cards if cd["class_id"] == a.ballet][0]
+    assert ballet["card_url"] and client.get(ballet["card_url"]).status_code == 200
+
+
 # ---------------------------------------------------------------- upgrading
 
 def test_photos_and_cards_already_on_disk_are_carried_over(repo, academy, tmp_path):
@@ -164,6 +181,30 @@ def test_carrying_them_over_happens_once(repo, academy, tmp_path):
     images.store(repo, images.CLIENT_PHOTO, cid, newer, "image/png")
     assert images.import_legacy_files(repo, str(tmp_path)) == 0
     assert images.load(repo, images.CLIENT_PHOTO, cid)[0] == newer
+
+
+def test_a_photo_from_before_the_timestamp_is_carried_over_too(repo, academy, tmp_path):
+    """
+    The timestamp went into the filename to stop the browser serving a cached
+    old picture, so photos taken before that are plain `client_00001.jpg`.
+    The academy's own database has two of those and two of the newer kind.
+    """
+    cid = academy.dual
+    os.makedirs(tmp_path / "photos", exist_ok=True)
+    (tmp_path / "photos" / f"client_{cid:05d}.jpg").write_bytes(png())
+    assert images.import_legacy_files(repo, str(tmp_path)) == 1
+    assert images.load(repo, images.CLIENT_PHOTO, cid)[0] is not None
+
+
+def test_the_newer_name_wins_when_both_survive(repo, academy, tmp_path):
+    """A delete that once failed can leave an owner with one of each."""
+    cid = academy.dual
+    os.makedirs(tmp_path / "photos", exist_ok=True)
+    (tmp_path / "photos" / f"client_{cid:05d}.jpg").write_bytes(png(size=(20, 20)))
+    (tmp_path / "photos" / f"client_{cid:05d}_1700000000.jpg").write_bytes(png(size=(50, 40)))
+    assert images.import_legacy_files(repo, str(tmp_path)) == 1
+    blob, _ = images.load(repo, images.CLIENT_PHOTO, cid)
+    assert Image.open(io.BytesIO(blob)).size == (50, 40)
 
 
 def test_a_photo_belonging_to_nobody_is_skipped(repo, tmp_path):

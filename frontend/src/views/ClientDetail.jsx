@@ -352,13 +352,27 @@ export default function ClientDetail() {
                 <div className="eyebrow" style={{ margin: 0 }}>CARD</div>
                 {card ? (
                   <div className="row tight" style={{ marginTop: 5 }}>
-                    {/* The card is a row in the database now, so its URL is
-                        /api/images/card/17 and carries no filename of its own.
-                        Naming it here is what stops a download landing as a
-                        extensionless "17" in the receptionist's Downloads. */}
-                    <a className="btn sm" href={card.card_url}
-                       download={`card_${c.name_en}_${card.class_name}.png`.replace(/\s+/g, '_')}>Download</a>
-                    <button className="sm" onClick={() => window.open(card.card_url)}>Print</button>
+                    {/* card_url is null when the credential is live but its
+                        picture is not stored — a card issued before cards
+                        moved into the database, or one carried across a
+                        migration without its images. Reissue is the honest
+                        offer there; two links that 404 are not. */}
+                    {card.card_url ? (
+                      <>
+                        {/* The card is a row now, so its URL is
+                            /api/images/card/17 and carries no filename of its
+                            own. Naming it here is what stops a download
+                            landing as an extensionless "17" in the
+                            receptionist's Downloads. */}
+                        <a className="btn sm" href={card.card_url}
+                           download={`card_${c.name_en}_${card.class_name}.png`.replace(/\s+/g, '_')}>Download</a>
+                        <button className="sm" onClick={() => window.open(card.card_url)}>Print</button>
+                      </>
+                    ) : (
+                      <span className="sub" title="The card still works — only its picture is missing">
+                        no image stored
+                      </span>
+                    )}
                     <button className="sm" onClick={() => issueCard(p.class_id)}>Reissue</button>
                   </div>
                 ) : (

@@ -55,6 +55,26 @@ def mongo_repo():
     return MongoRepo(config.mongo_uri(), config.mongo_db())
 
 
+def pictures_still_files(source) -> int:
+    """
+    How many pictures this database points at but does not contain.
+
+    The migration copies rows, so a `photo_path` of `/photos/client_00001.jpg`
+    arrives on the hosted backend as a path to a file on a laptop nobody will
+    ever query it from -- and a credential whose card was never read in has no
+    picture to copy at all. Both are silent: the profile renders, the client
+    is just faceless and the card has no image. Counting them before the move
+    is what turns that into a sentence someone can act on.
+    """
+    n = 0
+    for coll in ("clients", "instructors"):
+        n += sum(1 for r in source.find(coll, fields=["photo_path"])
+                 if (r.get("photo_path") or "").startswith("/photos/"))
+    live = source.count("credentials", {"revoked_at": None})
+    n += max(0, live - source.count("images", {"kind": "card"}))
+    return n
+
+
 def copy(source, target, coll, dry_run):
     rows = source.find(coll)
     if dry_run or not rows:
@@ -93,6 +113,16 @@ def main() -> int:
         for coll, n in counts.items():
             print(f"  {coll:<30}{n:>7}")
         print(f"  {'':<30}{'-' * 7}\n  {'total':<30}{total:>7}")
+
+        left_on_disk = pictures_still_files(source)
+        if left_on_disk:
+            print(f"\n  {left_on_disk} picture(s) are still files on a disk, not rows.\n"
+                  "  Start the app once with photos/ and cards/ beside this\n"
+                  "  database -- it reads them in -- then migrate. Moving now\n"
+                  "  carries the paths across and leaves the pictures behind.")
+            if not force:
+                print("\n  Refusing. Re-run with --force if you meant to.")
+                return 1
 
         if dry_run:
             print("\n--dry-run: nothing was written.")

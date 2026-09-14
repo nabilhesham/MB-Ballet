@@ -184,7 +184,9 @@ repo/             The data-access interface and its two implementations.
   mongo/           MongoDB: schema.py declares every field (which is what
                    makes null-vs-missing a non-issue), ids.py mints the
                    integer ids, filters.py adds the null guard.
-db.py             Schema + connection helpers + db.tx(). All tables live here.
+db.py             Schema + connection helpers + db.tx(). All tables live
+                  here, and the indexes live in a *second* string applied
+                  after migrate() -- see the note under Files below.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
 cards.py          Member card PNG generation.
@@ -287,6 +289,17 @@ surface in the app (USB-HID scanner keystroke timing, camera barcode
 scanning, audio beeps), has no tables, no router, no modals, and nothing to
 gain from a re-render model. It stays self-contained, inline `<style>`,
 inline `<script>`, vanilla — exactly as before.
+
+**`db.init()` is three steps, in this order: tables, `migrate()`, indexes.**
+`CREATE TABLE IF NOT EXISTS` is a no-op on a database that already has the
+table, so a column added to `db.py` later does not reach an existing database
+until `migrate()` ALTERs it in. An index over that column sitting in the same
+`executescript` therefore ran *first*, failed with "no such column", and took
+the whole script down -- `migrate()` then never ran at all. That is why
+`INDEXES` is a separate string: the academy's own database predates
+`sessions.ends_at`, and `ix_sess_ends` made the app unable to open it.
+`tests/test_sqlite_schema.py` opens a hand-built pre-`ends_at` database to
+keep that true.
 
 ## Commands
 
@@ -888,6 +901,33 @@ are; `cleanup.sh` is where deleting them belongs, once someone has seen the
 photos still on screen. Shipping this change without that step would have
 blanked the largest element on the kiosk, which is the one real control
 against a screenshotted card being passed between friends.
+
+**Two legacy filename shapes, not one.** The timestamp went into the name to
+stop the browser serving a cached old picture, so anything uploaded before
+that is a plain `client_00001.jpg`. The academy's own database has two of
+each, and the importer's pattern accepts both (`client_00001[._]`). Where an
+owner has one of each, the timestamped one wins -- `.` sorts before `_`, so
+the newer scheme is always last.
+
+**A credential can outlive its picture, and the profile says so.**
+`get_client` hands back `card_url: null` when no image is stored, and the
+client page shows "no image stored" beside **Reissue** instead of a Download
+and a Print that 404. It happens to every card issued before this change on
+an install whose `cards/` folder was not beside `academy.db` at first start,
+and to any card carried across a backend move without its images.
+Regenerating the PNG on demand would be worse, not better: the card is a
+print snapshot of what `plan_state()` said at issue time, so a silently
+redrawn one would carry today's figures under the old issue date. The
+variants that *do* have a picture are fetched in one query for the whole
+profile, not an `exists()` per card -- `tests/test_query_budget.py` is what
+holds that.
+
+**`<Avatar>` falls back to initials on a failed load, not only on no photo.**
+`photo_path` is a URL this app answers and it can point at something gone --
+a legacy `/photos/...` path on a database opened before its folder was read
+in, a row lost in a move. A bare `<img>` on a 404 shows the browser's
+broken-image glyph, which reads as a fault in the app rather than as a client
+with no picture.
 
 There is no `/photos` or `/cards` mount any more, and nothing writes to the
 disk on an upload, a reissue or a seed.
@@ -1683,6 +1723,26 @@ process reading the file itself. This was the one that did not, so
 `./start.sh --seed` arrived with no `ENTRY_SECRET` and stopped with
 "ENTRY_SECRET is not set" against a `.env` that had one in it: the seed
 silently did nothing.
+
+**Migrate the pictures before migrating the database.** `migrate_to_mongo.py`
+copies rows, so a `photo_path` of `/photos/client_00001.jpg` arrives on Atlas
+as a path to a file on a laptop nobody will ever query it from, and a
+credential whose card was never read in has no picture to copy at all. Both
+are silent -- the profile renders, the client is just faceless. So the
+migration counts them first and **refuses** while any remain, naming the
+number and the remedy: start the app once with `photos/` and `cards/` beside
+`academy.db` (that is when `images.import_legacy_files()` runs), then
+migrate. `--force` overrides it for anyone who means to.
+
+The order for an existing academy is therefore:
+
+```bash
+# 1. on the laptop, with photos/ and cards/ beside academy.db
+python server.py                 # prints "Moved N photo(s) and card(s)..."
+# 2. then, with MB_MONGO_URI set
+python migrate_to_mongo.py --dry-run
+MB_DB_BACKEND=mongo python migrate_to_mongo.py
+```
 
 **`drop_all()` refuses a database whose name does not start with `mbtest_`**
 unless `MB_MONGO_ALLOW_DROP` is set. On SQLite it unlinks a local file; on

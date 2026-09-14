@@ -147,14 +147,21 @@ def _legacy_photos(folder):
     import re
     best = {}
     for name in sorted(os.listdir(folder)):
-        m = re.match(r"(client|instructor)_(\d+)_", name)
+        # The timestamp is optional: it was added to the filename to stop the
+        # browser serving a cached old picture, so photos uploaded before that
+        # are plain `client_00001.jpg`. The academy's own database has two of
+        # those and two of the newer kind, and requiring the trailing
+        # underscore silently skipped the older pair.
+        m = re.match(r"(client|instructor)_(\d+)[._]", name)
         if not m or m.group(1) not in _LEGACY_PHOTO_KINDS:
             continue
         kind, table = _LEGACY_PHOTO_KINDS[m.group(1)]
         owner = int(m.group(2))
         path = os.path.join(folder, name)
-        # Several files can survive for one owner if a delete ever failed;
-        # the timestamp is in the name, so the last one sorted is the newest.
+        # Several files can survive for one owner if a delete ever failed.
+        # Last one sorted wins: among timestamped names that is the newest,
+        # and an untimestamped one sorts before all of them ("." < "_"), so
+        # the older scheme never beats the newer.
         best[(kind, owner)] = (table, path)
     return [(k, t, o, p) for (k, o), (t, p) in best.items()]
 

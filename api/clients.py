@@ -153,10 +153,28 @@ def get_client(cid: int):
         # never appeared on it, the stored image being right and the picture
         # old. The stamp changes on every issue, which is exactly when the
         # image changes.
+        #
+        # `card_url` is None when no image is stored, and the profile offers
+        # Reissue in place of Download/Print rather than two links that 404.
+        # A credential can outlive its picture: one issued before cards moved
+        # into the database, on an install whose cards/ folder was not beside
+        # academy.db when it first started, or one carried across a backend
+        # migration without its images. Regenerating the PNG here instead
+        # would be worse -- the card is a print snapshot of what plan_state()
+        # said at issue time, and a silently redrawn one would carry today's
+        # figures under the old issue date.
+        #
+        # One query for every card this client has a picture for, not an
+        # exists() each: a client holds one per class, and against a networked
+        # backend each of those is a round trip on a page that already has a
+        # budget (tests/test_query_budget.py).
+        stored = {r["variant"] for r in repo.find(
+            "images", {"kind": images.CARD, "owner_id": cid}, fields=["variant"])}
         for cd in c["cards"]:
-            cd["card_url"] = images.url(images.CARD, cid,
-                                        variant=cards.class_slug(cd["class_name"]),
-                                        stamp=cd["issued_at"])
+            slug = cards.class_slug(cd["class_name"])
+            cd["card_url"] = (
+                images.url(images.CARD, cid, variant=slug, stamp=cd["issued_at"])
+                if slug in stored else None)
 
         now = db.now()
         c["upcoming"] = repo.client_upcoming(cid, now)

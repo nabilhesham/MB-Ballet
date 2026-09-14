@@ -190,7 +190,6 @@ CREATE TABLE IF NOT EXISTS instructor_hour_adjustments (
     note            TEXT,
     created_at      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_iha_date ON instructor_hour_adjustments(instructor_id, adjustment_date);
 
 -- Every image the app holds: client and instructor photos, and the printed
 -- member cards. Base64 text rather than a BLOB, because the same rows have to
@@ -217,8 +216,6 @@ CREATE TABLE IF NOT EXISTS images (
     updated_at INTEGER NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS ux_img_owner ON images(kind, owner_id, variant);
-
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
 CREATE TABLE IF NOT EXISTS settings (
@@ -241,8 +238,21 @@ CREATE TABLE IF NOT EXISTS access_events (
     source        TEXT NOT NULL DEFAULT 'scan'
 );
 
-CREATE INDEX IF NOT EXISTS ix_cred_token  ON credentials(token);
+"""
 
+# Applied *after* migrate(), never with the tables above.
+#
+# CREATE TABLE IF NOT EXISTS is a no-op on a database that already has the
+# table, so a column added to this file later does not appear in an existing
+# one until migrate() ALTERs it in -- but an index over that column was in the
+# same script and ran first, failing with "no such column" and taking the
+# whole executescript with it. migrate() then never ran at all. That is not
+# hypothetical: the academy's own database predates sessions.ends_at, and
+# `ix_sess_ends` made the app unable to open it.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_iha_date    ON instructor_hour_adjustments(instructor_id, adjustment_date);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_img_owner ON images(kind, owner_id, variant);
+CREATE INDEX IF NOT EXISTS ix_cred_token  ON credentials(token);
 CREATE INDEX IF NOT EXISTS ix_ev_time     ON access_events(scanned_at);
 CREATE INDEX IF NOT EXISTS ix_sess_start  ON sessions(starts_at);
 CREATE INDEX IF NOT EXISTS ix_sess_ends   ON sessions(ends_at);
@@ -331,8 +341,13 @@ def init(path: str = None) -> None:
     try:
         # executescript commits whatever is open before it runs, so this is
         # deliberately not inside a tx() — the schema is its own unit.
+        #
+        # Three steps, in this order and not two: the tables, then the
+        # columns an older database is missing, then the indexes — which may
+        # be over a column migrate() has only just added. See INDEXES.
         conn.executescript(SCHEMA)
         migrate(conn)
+        conn.executescript(INDEXES)
     finally:
         # sqlite3's connection context manager commits but does not close, so
         # `with connect(...) as conn:` leaked a handle on every call.
