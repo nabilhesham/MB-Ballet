@@ -35,7 +35,15 @@ from repo.sqlite import SqliteRepo           # noqa: E402
 # Parents before children, so a half-finished run leaves nothing pointing at
 # a document that is not there yet. Nothing enforces this in MongoDB — it is
 # for whoever has to read the database after an interrupted run.
-ORDER = ("settings", "instructors", "classes", "sessions", "clients",
+#
+# `settings` is deliberately not here. It is SQLite bookkeeping -- one row,
+# `expiry_backfilled`, written by db.migrate() to record that a one-shot
+# repair has been done -- and db.migrate() never runs against MongoDB, so the
+# marker would mean nothing there. Both backends' is_empty() already exclude
+# it for that reason; having it in this list contradicted them. It is also
+# the one table keyed by `key` rather than `id`, so find() appending its `id`
+# tiebreak was "no such column: id" on the very first collection copied.
+ORDER = ("instructors", "classes", "sessions", "clients",
          "subscriptions", "freezes", "bookings", "credentials",
          "instructor_hours", "instructor_hour_adjustments", "access_events",
          # Last: the photos and cards are the bulkiest rows and the only ones
@@ -97,23 +105,39 @@ def pictures_with_no_row(source):
 
 
 def copy(source, target, coll, dry_run):
+    """
+    One collection, by id, replacing whatever is already under each id.
+
+    Not insert_many(): that mints fresh ids from the counters, and the ids are
+    the whole point -- tokens.py packs client_id as a uint32 into every card
+    already in a client's hands. Passing the ids in explicitly fixes that, but
+    a plain insert then fails on the second run with a duplicate key, half way
+    through, leaving a database that is neither the old one nor the new one.
+
+    A migration is something people run more than once while they get it
+    right, so it converges instead: ReplaceOne(upsert=True) on each id makes a
+    re-run end with MongoDB holding exactly what SQLite holds. What it never
+    does is delete -- a document here and not in SQLite is left alone and
+    counted, because this tool is not the authority on what else might be in
+    that database.
+    """
     rows = source.find(coll)
     if dry_run or not rows:
         return len(rows)
 
-    # insert_many() would mint fresh ids from the counters. The ids are the
-    # thing being preserved, so the documents go in with the ones they have.
-    docs = []
+    from pymongo import ReplaceOne
+
+    ops = []
     for row in rows:
         body = mongo_schema.fill(coll, {k: v for k, v in row.items() if k != "id"})
         body["_id"] = row["id"]
-        docs.append(body)
+        ops.append(ReplaceOne({"_id": row["id"]}, body, upsert=True))
     # Photos and cards are two orders of magnitude bigger per row than
     # anything else here, so they go in smaller batches: five hundred of them
     # in one command is tens of megabytes against a limit measured in them.
     size = IMAGE_BATCH if coll == "images" else BATCH
-    for i in range(0, len(docs), size):
-        target.db[coll].insert_many(docs[i:i + size])
+    for i in range(0, len(ops), size):
+        target.db[coll].bulk_write(ops[i:i + size], ordered=True)
     return len(rows)
 
 
@@ -177,7 +201,9 @@ def main() -> int:
             print(f"\nTarget: {config.describe()}")
             if not target.is_empty() and not force:
                 print("\nThe target database already holds data. Re-run with "
-                      "--force if you mean to add to it.")
+                      "--force to overwrite what shares an id with this "
+                      "source;\nnothing else there is touched, and nothing is "
+                      "deleted.")
                 return 1
 
             target.init_schema()
@@ -196,6 +222,16 @@ def main() -> int:
             if bad:
                 print(f"\n  MISMATCH: {bad}")
                 return 1
+
+            # Documents that were already there under an id this source does
+            # not have. Nothing is deleted -- said out loud rather than left
+            # for someone to find, since on a re-run it usually means rows
+            # deleted from SQLite since the last one.
+            extra = {c: n for c in ORDER
+                     if (n := target.db[c].count_documents({}) - moved[c]) > 0}
+            if extra:
+                print(f"\n  Left in place, not in this source: {extra}")
+
             print(f"\n  {sum(moved.values())} documents moved, every id preserved.")
             print("  Check a previously printed card still scans before "
                   "trusting this.")

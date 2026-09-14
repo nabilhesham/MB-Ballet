@@ -1746,6 +1746,30 @@ python migrate_to_mongo.py --dry-run          # counts, writes nothing to Mongo
 MB_DB_BACKEND=mongo python migrate_to_mongo.py
 ```
 
+**It copies by id, replacing, and never deletes.** `insert_many()` would mint
+fresh ids from the counters and the ids are the whole point, so the documents
+go in with the ones they have -- but a plain insert then fails on the second
+run with a duplicate key, half way through, leaving a database that is neither
+the old one nor the new one. A migration is something people run more than
+once while they get it right, so `copy()` uses `ReplaceOne(upsert=True)` per
+id and converges: a re-run ends with MongoDB holding exactly what SQLite
+holds. A document under an id the source does not have is **left alone and
+counted** -- this tool is not the authority on what else is in that database.
+`--force` is therefore "overwrite what shares an id with this source", not
+"add to it", and the refusal without it stands so nobody overwrites a database
+by accident.
+
+**`settings` is deliberately not in `ORDER`.** It is SQLite bookkeeping -- one
+row, `expiry_backfilled`, recording that `db.migrate()`'s one-shot repair has
+run -- and `db.migrate()` never runs against MongoDB, so the marker would mean
+nothing there. Both backends' `is_empty()` already exclude it for that reason;
+having it in the list contradicted them. It is also the one table keyed by
+`key` rather than `id`, so `find()` appending its `id` tiebreak made the very
+first collection copied fail with `no such column: id` -- on a real run only,
+since `--dry-run` returns before `copy()` is ever reached.
+`tests/test_migrate_copy.py` drives `copy()` and `main()` against a recording
+stand-in for Atlas, which is what now covers that whole path without a server.
+
 **What is left over is a warning, not a refusal**, and the difference matters.
 After the import, what can remain is a picture that exists *nowhere*: a photo
 never taken, a card whose PNG was deleted or never drawn. No amount of
