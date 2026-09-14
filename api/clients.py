@@ -1,8 +1,6 @@
 """/api/clients/* — client profiles, their plans and cards."""
 
-import glob
 import os
-import shutil
 from datetime import date
 from typing import Optional
 
@@ -12,6 +10,7 @@ from pydantic import BaseModel
 import access
 import cards
 import db
+import images
 import repo as data
 
 
@@ -145,16 +144,19 @@ def get_client(cid: int):
             for p in c["active_plans"] if p["class_id"]]
 
         c["cards"] = repo.client_cards(cid)
-        # The PNG the card was written to, so the profile can offer it for
-        # download and print without guessing at the filename in the browser.
+        # Where the stored card can be fetched, so the profile can offer it
+        # for download and print.
         #
-        # ?v=issued_at is not decoration. Reissuing overwrites the same path,
-        # so the browser kept serving the card it had already cached and an
-        # edited end date never appeared on it — the file was right and the
-        # picture was old. The stamp changes on every issue, which is exactly
-        # when the image changes.
+        # ?v=issued_at is not decoration. The URL is derived from the client
+        # and the class, so reissuing hands back the same one and the browser
+        # kept serving the card it had already cached — an edited end date
+        # never appeared on it, the stored image being right and the picture
+        # old. The stamp changes on every issue, which is exactly when the
+        # image changes.
         for cd in c["cards"]:
-            cd["card_url"] = f"/{cards.card_path(cid, cd['class_name'])}?v={cd['issued_at']}"
+            cd["card_url"] = images.url(images.CARD, cid,
+                                        variant=cards.class_slug(cd["class_name"]),
+                                        stamp=cd["issued_at"])
 
         now = db.now()
         c["upcoming"] = repo.client_upcoming(cid, now)
@@ -191,26 +193,29 @@ def update_client(cid: int, body: ClientIn):
 
 @router.post("/api/clients/{cid}/photo")
 async def upload_photo(cid: int, file: UploadFile = File(...)):
+    """
+    The photo goes into the database, not into photos/ — see images.py.
+
+    `photo_path` still holds the thing an `<img src>` points at, so nothing
+    that renders a face had to change; what it holds is now a URL this app
+    answers rather than a file on the disk. It is stamped with the upload
+    time for the reason it always was: the URL is derived from who the photo
+    belongs to, so without the stamp a re-upload leaves the browser showing
+    the picture it already had and the new one looks like it never saved.
+    """
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "use jpg, png or webp")
-    # A fresh filename per upload. Writing back to the same path meant the
-    # browser kept serving the cached old picture after a re-upload, so a new
-    # photo looked like it had not saved at all — reloading the profile did
-    # not help, because the URL had not changed. The previous files are
-    # removed so the folder does not fill up with every photo ever taken.
-    path = f"photos/client_{cid:05d}_{db.now()}{ext}"
-    for old in glob.glob(f"photos/client_{cid:05d}*"):
-        try:
-            os.remove(old)
-        except OSError:
-            pass
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    blob, mime = images.shrink(await file.read(),
+                               file.content_type or "image/jpeg")
     repo = data.connect()
     try:
-        repo.update("clients", cid, {"photo_path": "/" + path})
-        return {"photo_path": "/" + path}
+        now = db.now()
+        with repo.begin():
+            images.store(repo, images.CLIENT_PHOTO, cid, blob, mime, now=now)
+            url = images.url(images.CLIENT_PHOTO, cid, stamp=now)
+            repo.update("clients", cid, {"photo_path": url})
+        return {"photo_path": url}
     finally:
         repo.close()
 
@@ -244,14 +249,17 @@ def issue_card(cid: int, body: CardIn):
             raise HTTPException(r.get("status", 400), r["error"])
         # Drawing the PNG is file I/O and presentation, so it stays here
         # rather than in access.py.
-        path = cards.build_card(cid, r["client_name"], r["token"],
-                                r["sessions_total"], r["expires_on"],
-                                class_name=r["class_name"],
-                                colour=r["class_colour"])
-        # Stamped with the issue time: card_path() gives one stable filename
-        # per client per class, so a reissue overwrites a URL the browser has
-        # already cached and the old picture keeps being shown.
-        return {"token": r["token"], "card_url": f"/{path}?v={db.now()}",
+        png = cards.build_card(cid, r["client_name"], r["token"],
+                               r["sessions_total"], r["expires_on"],
+                               class_name=r["class_name"],
+                               colour=r["class_colour"])
+        # Stamped with the issue time, for the reason get_client gives above.
+        now = db.now()
+        slug = cards.class_slug(r["class_name"])
+        images.store(repo, images.CARD, cid, png, "image/png",
+                     variant=slug, now=now)
+        return {"token": r["token"],
+                "card_url": images.url(images.CARD, cid, variant=slug, stamp=now),
                 "revoked": r["revoked"]}
     finally:
         repo.close()

@@ -1,8 +1,6 @@
 """/api/instructors/* — instructor roster, hours and pay."""
 
-import glob
 import os
-import shutil
 from datetime import date
 from typing import Optional
 
@@ -11,6 +9,7 @@ from pydantic import BaseModel
 
 import access
 import db
+import images
 import repo as data
 
 
@@ -159,23 +158,20 @@ def adjust_hours(iid: int, body: HoursAdjustIn):
 
 @router.post("/api/instructors/{iid}/photo")
 async def upload_photo(iid: int, file: UploadFile = File(...)):
+    """Stored in the database, exactly as a client's is — see images.py."""
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "use jpg, png or webp")
-    # Timestamped for the same reason as the client photo: a stable filename
-    # let the browser keep showing the cached previous picture.
-    path = f"photos/instructor_{iid:05d}_{db.now()}{ext}"
-    for old in glob.glob(f"photos/instructor_{iid:05d}*"):
-        try:
-            os.remove(old)
-        except OSError:
-            pass
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    blob, mime = images.shrink(await file.read(),
+                               file.content_type or "image/jpeg")
     repo = data.connect()
     try:
-        repo.update("instructors", iid, {"photo_path": "/" + path})
-        return {"photo_path": "/" + path}
+        now = db.now()
+        with repo.begin():
+            images.store(repo, images.INSTRUCTOR_PHOTO, iid, blob, mime, now=now)
+            url = images.url(images.INSTRUCTOR_PHOTO, iid, stamp=now)
+            repo.update("instructors", iid, {"photo_path": url})
+        return {"photo_path": url}
     finally:
         repo.close()
 

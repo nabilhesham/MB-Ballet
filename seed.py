@@ -18,11 +18,35 @@ import os
 import sys
 from datetime import date, datetime, time, timedelta
 
-import access
-import cards
-import db
-import repo as data
-import sheets
+# Before `import db` and before anything reads an environment variable.
+# start.sh deliberately does not export .env into the shell -- a Mongo URI's
+# `&` does not survive sourcing -- and relies on each entry point reading the
+# file itself. Every one of them did except this one, so `./start.sh --seed`
+# arrived here with no ENTRY_SECRET and stopped with "ENTRY_SECRET is not set"
+# against a .env that had one in it: the seed silently did nothing.
+import config
+
+config.load_env()
+
+import access                                   # noqa: E402
+import cards                                    # noqa: E402
+import db                                       # noqa: E402
+import images                                   # noqa: E402
+import sheets                                   # noqa: E402
+from repo.sqlite import SqliteRepo              # noqa: E402
+
+
+def sqlite_repo() -> SqliteRepo:
+    """
+    The seed writes academy.db, whatever MB_DB_BACKEND says.
+
+    repo.connect() is the wrong question for an importer. This reads the
+    academy's workbooks and rebuilds the database from them, and its first act
+    is drop_all() -- against a hosted Mongo that is a wipe of the live record
+    with nothing to undo it from. migrate_to_mongo.py is the one thing that
+    writes to Mongo, and it reads what this produced.
+    """
+    return SqliteRepo(db.connect(config.sqlite_path()))
 
 # ---------------------------------------------------------------- the sheets
 # Real client data. Drop the term's workbooks in sheets/ and list them here.
@@ -376,9 +400,13 @@ def seed_cards(repo, make_pngs=True):
                 "client_id": plan["client_id"], "class_id": plan["class_id"],
                 "token": token, "kind": "card", "issued_at": db.now()})
             if make_pngs:
-                cards.build_card(plan["client_id"], client["name_en"], token,
-                                 plan["sessions_total"], plan["expires_on"],
-                                 class_name=klass["name"], colour=klass["colour"])
+                # Stored with the rest of the record, not written to cards/.
+                png = cards.build_card(plan["client_id"], client["name_en"], token,
+                                       plan["sessions_total"], plan["expires_on"],
+                                       class_name=klass["name"],
+                                       colour=klass["colour"])
+                images.store(repo, images.CARD, plan["client_id"], png,
+                             "image/png", variant=cards.class_slug(klass["name"]))
             n += 1
         return n
 
@@ -392,7 +420,7 @@ def main():
     if not dry:
         # Asked of the backend rather than of the filesystem. A database that
         # exists but was never seeded used to slip past this.
-        probe = data.connect()
+        probe = sqlite_repo()
         try:
             existing = not probe.is_empty()
         finally:
@@ -431,7 +459,7 @@ def main():
         _report(warnings)
         return
 
-    repo = data.connect()
+    repo = sqlite_repo()
     try:
         repo.drop_all()
         seed_instructors(repo, payrolls, rosters, warn)

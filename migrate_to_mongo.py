@@ -36,9 +36,14 @@ from repo.sqlite import SqliteRepo           # noqa: E402
 # for whoever has to read the database after an interrupted run.
 ORDER = ("settings", "instructors", "classes", "sessions", "clients",
          "subscriptions", "freezes", "bookings", "credentials",
-         "instructor_hours", "instructor_hour_adjustments", "access_events")
+         "instructor_hours", "instructor_hour_adjustments", "access_events",
+         # Last: the photos and cards are the bulkiest rows and the only ones
+         # nothing else points at, so an interrupted run leaves a database
+         # that is whole apart from its pictures.
+         "images")
 
 BATCH = 500
+IMAGE_BATCH = 25
 
 
 def sqlite_repo() -> SqliteRepo:
@@ -62,8 +67,12 @@ def copy(source, target, coll, dry_run):
         body = mongo_schema.fill(coll, {k: v for k, v in row.items() if k != "id"})
         body["_id"] = row["id"]
         docs.append(body)
-    for i in range(0, len(docs), BATCH):
-        target.db[coll].insert_many(docs[i:i + BATCH])
+    # Photos and cards are two orders of magnitude bigger per row than
+    # anything else here, so they go in smaller batches: five hundred of them
+    # in one command is tens of megabytes against a limit measured in them.
+    size = IMAGE_BATCH if coll == "images" else BATCH
+    for i in range(0, len(docs), size):
+        target.db[coll].insert_many(docs[i:i + size])
     return len(rows)
 
 

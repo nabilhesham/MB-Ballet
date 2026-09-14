@@ -20,11 +20,12 @@ from fastapi.staticfiles import StaticFiles
 
 # Before `import db`, which used to bind its path at import time, and
 # before anything reads an environment variable. load_env() also does the
-# chdir into the folder holding academy.db, .env, photos and cards.
+# chdir into the folder holding academy.db and .env.
 import config
 config.load_env()
 
 import access  # noqa: E402
+import images  # noqa: E402
 import repo as data  # noqa: E402
 
 from api.clients import router as clients_router
@@ -34,24 +35,24 @@ from api.classes import router as classes_router
 from api.sessions import router as sessions_router
 from api.access_routes import router as access_router
 from api.dashboard import router as dashboard_router
+from api.images import router as images_router
 
 # --------------------------------------------------------------------------
 # Paths.
 #
 # When packaged as a single .exe, PyInstaller unpacks the bundled files into a
 # temporary folder that is wiped on exit — so static assets are read from there,
-# but the database, photos and cards must live next to the .exe or the academy
-# loses its records every time the program closes. `.env` is not one of them:
-# there is one, in the source folder, and its values are baked into the build.
+# but the database must live next to the .exe or the academy loses its records
+# every time the program closes. `.env` is not one of them: there is one, in
+# the source folder, and its values are baked into the build.
+#
+# Photos and cards used to need the same care, as folders beside the exe. They
+# are rows in the database now (see images.py), so there is one thing left to
+# keep next to the binary instead of three.
 # --------------------------------------------------------------------------
 APP_DIR = config.app_dir()
 BUNDLE_DIR = config.bundle_dir()
 STATIC_DIR = os.path.join(BUNDLE_DIR, "static")
-
-# These must exist before the StaticFiles mounts below, which run at import
-# time and raise if their directory is missing.
-for _d in ("photos", "cards"):
-    os.makedirs(os.path.join(APP_DIR, _d), exist_ok=True)
 
 app = FastAPI(title="MB Ballet Academy")
 
@@ -68,6 +69,7 @@ app.include_router(classes_router)
 app.include_router(sessions_router)
 app.include_router(access_router)
 app.include_router(dashboard_router)
+app.include_router(images_router)
 
 
 @app.on_event("startup")
@@ -96,10 +98,15 @@ def _startup():
     starter = data.connect()
     try:
         starter.init_schema()
+        # Any install older than the move into the database still has its
+        # faces and cards on the disk. Carry them over on the first start
+        # after the upgrade; afterwards this finds nothing and costs a
+        # directory listing. See images.import_legacy_files().
+        moved = images.import_legacy_files(starter, config.legacy_media_dir())
+        if moved:
+            print(f"  Moved {moved} photo(s) and card(s) into the database.")
     finally:
         starter.close()
-    os.makedirs("photos", exist_ok=True)
-    os.makedirs("cards", exist_ok=True)
     asyncio.create_task(_settle_loop())
 
 
@@ -166,8 +173,10 @@ async def cache_policy(request, call_next):
 
 
 # ================================================================ static
-app.mount("/photos", StaticFiles(directory="photos"), name="photos")
-app.mount("/cards", StaticFiles(directory="cards"), name="cards")
+#
+# No /photos or /cards mount: both are served out of the database by
+# api/images.py now, so there is no folder to expose and nothing on the disk
+# a backup of academy.db can miss.
 
 
 @app.get("/")

@@ -194,9 +194,11 @@ server.py         FastAPI app, paths, startup, cache policy, static mounts.
 api/              One router module per resource, wired into server.py with
                   ordinary static imports (clients.py, plans.py,
                   classes.py, instructors.py, sessions.py, access_routes.py,
-                  dashboard.py).
+                  dashboard.py, images.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
-seed.py           Wipes the DB and rebuilds it from sheets/. --force required.
+seed.py           Wipes academy.db and rebuilds it from sheets/. --force
+                  required. Always SQLite, whatever MB_DB_BACKEND says —
+                  migrate_to_mongo.py is what moves it to Mongo.
 frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                   for the build-once-commit-the-output model.
   src/views/       One file per route: Dashboard, Calendar, Classes,
@@ -263,12 +265,15 @@ cleanup.sh        Removes leftovers from earlier versions.
 sheets/           The academy's own workbooks — the seed reads these.
                   Real names and numbers, so not in git. See sheets/README.md.
 static/scanner-test.html   Scanner timing diagnostic, for tuning GAP_MS.
-cards/  photos/   Generated assets. Not in git. A photo is written with a
-                  timestamp in its name (`client_00060_1788711822.png`) and
-                  the previous one deleted: a stable filename meant the
-                  browser kept serving the cached old picture, so a
-                  re-uploaded photo looked like it had not saved.
-academy.db        The database. Not in git. This IS the business record.
+images.py         Every picture the app holds — client and instructor
+                  photos and the printed cards — stored in the database as
+                  base64. Also carries photos/ and cards/ from an older
+                  install in on first start. See the image section below.
+cards/  photos/   Only on an install older than images.py: the files those
+                  pictures used to be, left where they are once they have
+                  been read in. Not in git. `cleanup.sh` removes them.
+academy.db        The database, pictures included. Not in git. This IS the
+                  business record.
 .env              ENTRY_SECRET and the MB_ settings. Not in git, ever.
                   There is exactly ONE of these, here, in the source
                   folder -- a build bakes its values into the binary
@@ -443,15 +448,17 @@ starlette load modules by string name that static analysis cannot find, and a
 missing one produces exactly the silent-crash symptom above.
 
 **Bug worth remembering:** `app.mount("/photos", StaticFiles(directory="photos"))`
-executes at *import* time and raises if the folder is absent. Creating the
+executed at *import* time and raised if the folder was absent. Creating the
 folders in the startup event was too late, so a fresh install died during
-import. `server.py` now makes `photos/` and `cards/` at module level, before the
-mounts. Any new mount needs the same treatment.
+import; `server.py` made them at module level, before the mounts. Both mounts
+are gone now that pictures are rows, so the folders are gone with them — but
+**any new mount needs the same treatment**, which is why this is still here.
 
 `server.py` is freeze-safe for this: when `sys.frozen` is set, static assets are
 read from `sys._MEIPASS` (wiped on exit) while the working directory is the
-folder containing the exe, so `academy.db`, `photos/` and `cards/` persist.
-Getting this backwards silently destroys the database on every close.
+folder containing the exe, so `academy.db` persists. Getting this backwards
+silently destroys the database on every close. That used to be three things to
+keep beside the binary and is now one.
 
 **`.env` is deliberately not in that list.** The server used to provision its
 own `ENTRY_SECRET` into a `.env` beside the exe when it found none, since a
@@ -691,6 +698,17 @@ moment it was created. `/api/sessions` with no `start`/`end` now means no
 date bound, and the Sessions view asks for exactly that. Do not put a window
 back on that screen without giving it a way to reach past the window.
 
+It has a **FROM/TO date range** over the top of it instead, which is a filter
+on what is already loaded rather than a narrower fetch — the whole timetable
+still arrives, and "Show all" is one press away. `<DataTable>`'s search box
+matches the row's own values and a session's date is an epoch integer in
+there, so typing "12 Sep" found nothing: the one screen showing every session
+was the one screen a session could not be found by date on. The text box
+stays, for class, instructor and status. The range applies on a button and
+not on change, and the TO bound is the end of its day — picking one date for
+both would otherwise match nothing but midnight. See the `.filterbar` note
+above.
+
 **Deleting sessions in bulk keeps the same rule one-at-a-time deletion
 has.** `POST /api/sessions/bulk-delete` refuses any session carrying
 attendance unless `force`, and **names the ones it kept back rather than
@@ -816,6 +834,64 @@ remembered to press Reissue. `EditPlan` now issues one itself, the same thing
 card for that class as it goes, and a class change needs the new class's card
 anyway.
 
+## Pictures live in the database
+
+Client photos, instructor photos and the printed member cards were files —
+`photos/client_00060_1788711822.png`, `cards/client_00060_ballet.png` — with
+the path written into a column. They are rows in `images` now, and `images.py`
+owns all of it.
+
+**Why.** They were the one part of the academy's record a backup of
+`academy.db` did not contain, so the nightly backup this project still owes
+itself would have restored an academy with no faces on it. On the hosted
+backend it was worse: the data lived on Atlas and the pictures lived on
+whichever laptop had done the uploading, which is not a deployment, it is two
+half-deployments.
+
+**Base64 text, not a BLOB.** The same rows have to live in MongoDB, and
+base64 is the one encoding SQLite, BSON and the repository's plain dicts all
+carry with no per-backend special case. It costs a third more space than raw
+bytes, which for a few hundred photos is nothing next to having them in the
+backup.
+
+**What is stored is not what is served.** A row holds the bytes; the column
+holds a short URL — `/api/images/client_photo/60?v=1789387980` — that
+`api/images.py` exchanges for them. A `data:` URI in `photo_path` would have
+been fewer moving parts and much worse: that column is returned in the
+clients list, the dashboard's attention list and every kiosk scan, so a
+megabyte of base64 would ride along with every row of every list that
+mentions a person.
+
+**The `?v=` is the same fix the card file needed, for the same reason.** The
+URL is derived from *who* the picture belongs to, so it does not change when
+the picture does and the browser goes on showing the one it already has — an
+edited end date was right in the database and wrong on the screen. Stamping
+it with the update time changes the URL exactly when the bytes change. There
+is no second mechanism: a fresh filename per upload was the old answer and it
+is gone, because a row has no filename to make fresh.
+
+**A photo is shrunk to 900px on the way in** (`images.shrink()`, EXIF
+orientation applied first — a phone stores the sensor's idea of up and a tag
+saying how to turn it). The largest anything is displayed is the kiosk's
+150px square, so this is already generous; and a raw phone upload genuinely
+threatens MongoDB's 16MB document limit. Anything Pillow cannot decode comes
+back untouched rather than failing the upload — the route has already checked
+the extension.
+
+**An install older than this keeps its pictures.** `images.import_legacy_files()`
+runs once at startup, reads whatever is in `photos/` and `cards/` beside the
+database, and rewrites the `photo_path` columns. It is idempotent by
+construction — a file is read only when there is no row for that owner yet —
+so it moves everything on the first start after the upgrade and costs a
+directory listing on every start after that. The files are left where they
+are; `cleanup.sh` is where deleting them belongs, once someone has seen the
+photos still on screen. Shipping this change without that step would have
+blanked the largest element on the kiosk, which is the one real control
+against a screenshotted card being passed between friends.
+
+There is no `/photos` or `/cards` mount any more, and nothing writes to the
+disk on an upload, a reissue or a seed.
+
 ## Seeding from the academy's spreadsheets
 
 Reception has run this academy out of Excel for years and will keep doing so.
@@ -897,6 +973,30 @@ is revoked unless another live plan holds the class up. Renewing or freezing
 is what almost every case actually wants; this is for a plan entered by
 mistake. It deliberately does **not** call `refresh_expiry()` — the plan whose
 expiry would be recomputed is itself gone.
+
+**Deleting the last live plan for a class also takes the client out of that
+class**, which is what a receptionist means by deleting a plan.
+`access.release_from_class()` is that step: membership is derived from
+bookings, so a slot of theirs still sitting on a date next week left them on
+the class page's student list and on next week's roster for a class they had
+just been removed from. The leftover is normally an older, already-renewed
+plan's booking, which is why those slots *are* given back — each goes to
+whichever plan paid for it, as `unassigned`, with `refresh_expiry()` on that
+plan (these bookings are deleted directly rather than through `unbook()`, the
+same rule `delete_session` and `delete_class` follow). It runs only when no
+other live plan of theirs stands behind the class — the same condition that
+decides whether the card is revoked, and for the same reason: one plan per
+class per client is what makes `active_plan()` answer at all.
+
+**Only what is still ahead of them, and this is the line.** A booking already
+marked present or absent is the record of a session that happened and belongs
+to the plan that paid for it — visible in the payment history right below.
+This deletion takes attendance, but it takes *this plan's*, because a plan's
+bookings are its attendance; it does not reach into another plan's. So a
+client with attended sessions in the class funded by an earlier plan still
+appears on that class's student list afterwards, correctly: they did attend
+it. If that ever needs to change, it is a decision about erasing history, not
+a bug in this path.
 
 **Archiving a class also releases its upcoming sessions.** A class that
 stops being offered has nothing left to happen for, so `delete_class`'s soft
@@ -1210,11 +1310,12 @@ the flood is what spares the white "MB Ballet Academy" lettering inside the
 purple panel, which a blanket knockout would have punched through to the
 paper. Replace the logo only with a PNG that already has alpha.
 
-Cards are written to `cards/client_00001_ballet.png` — the class slug is part of
-the filename so two cards coexist. `cards.card_path()` derives that name and is
-the only place that does: the client profile offers the file for download and
-print, and a second copy of the rule drifting from this one is a dead link on
-the one screen that has to work.
+Cards are rows, not files — `build_card()` returns the PNG's bytes and
+`images.store()` keeps them under the class slug, which is what lets two
+cards coexist for one client. `cards.class_slug()` derives that slug and is
+the only place that does: the client profile builds the download and print
+links from it, and a second copy of the rule drifting from this one is a dead
+link on the one screen that has to work.
 
 ### What a scan shows
 
@@ -1565,10 +1666,27 @@ documented in `.env.example`:
 mongodb://h1:27017,h2:27017,h3:27017/?replicaSet=...&tls=true&authSource=admin
 ```
 
+**`seed.py` writes SQLite, always — `MB_DB_BACKEND` does not apply to it.**
+It is an importer: it reads the academy's workbooks and rebuilds the database
+from them, and its first act is `drop_all()`. Asked through `repo.connect()`
+that would be a wipe of the live hosted record with nothing to undo it from,
+triggered by an environment variable set for a different reason. So it builds
+its own `SqliteRepo` over `config.sqlite_path()` (`seed.py`'s `sqlite_repo()`),
+and `migrate_to_mongo.py` is the one thing that writes to Mongo — reading
+exactly what the seed produced. The two steps are `python seed.py --force`
+then `python migrate_to_mongo.py`.
+
+It calls `config.load_env()` as its first statement, above `import db`, like
+every other entry point. `start.sh` deliberately does not export `.env` into
+the shell — a Mongo URI's `&` does not survive sourcing — and relies on each
+process reading the file itself. This was the one that did not, so
+`./start.sh --seed` arrived with no `ENTRY_SECRET` and stopped with
+"ENTRY_SECRET is not set" against a `.env` that had one in it: the seed
+silently did nothing.
+
 **`drop_all()` refuses a database whose name does not start with `mbtest_`**
 unless `MB_MONGO_ALLOW_DROP` is set. On SQLite it unlinks a local file; on
-Atlas it can be a shared remote database, and `seed.py --force` runs from the
-same shell as everything else.
+Atlas it can be a shared remote database.
 
 **Reception should stay on SQLite.** It is the only backend that keeps
 working without internet. `MB_DB_BACKEND=mongo` with no `MB_MONGO_URI`

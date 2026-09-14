@@ -124,7 +124,7 @@ hiddenimports = [
     "sqlite3",
     # local modules, imported normally but listed so a rename cannot break
     # the build silently
-    "server", "access", "cards", "config", "db", "tokens",
+    "server", "access", "cards", "config", "db", "images", "tokens",
     "repo", "repo.base", "repo.ports", "repo.errors", "repo.filters",
     "repo.sqlite", "repo.sqlite.filters", "repo.sqlite.ports",
     # The Mongo backend is imported lazily by repo/__init__.py, so a build
@@ -140,6 +140,7 @@ hiddenimports = [
     "dns", "dns.resolver",
     "api", "api.clients", "api.plans", "api.classes",
     "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
+    "api.images",
 ]
 
 a = Analysis(

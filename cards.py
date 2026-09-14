@@ -27,6 +27,7 @@ Design notes, so the next person does not undo them by accident:
     _card_date.
 """
 
+import io
 import os
 import sys
 
@@ -205,28 +206,33 @@ def _centre(draw, y, text, font, fill):
 
 
 # ---------------------------------------------------------------- the card
-def card_path(client_id: int, class_name: str = None, out_dir="cards") -> str:
+def class_slug(class_name: str = None) -> str:
     """
-    Where a client's card for one class lives.
+    Which of a client's cards this is.
 
-    The class slug is part of the filename so two cards coexist. It is derived
-    here and nowhere else: the profile page offers this file for download, and
-    a second copy of the rule drifting from this one is a dead link on the one
-    screen that has to work.
+    A client holds one card per class, so the class has to be part of how a
+    card is addressed. This used to be part of a filename; it is now the
+    `variant` of a stored image. Derived here and nowhere else: the profile
+    offers the card for download and print, and a second copy of the rule
+    drifting from this one is a dead link on the one screen that has to work.
     """
-    slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in (class_name or "all"))
-    return os.path.join(out_dir, f"client_{client_id:05d}_{slug}.png")
+    return "".join(ch.lower() if ch.isalnum() else "-" for ch in (class_name or "all"))
 
 
 def build_card(client_id: int, name: str, token: str, sessions_total: int,
-               expires_on: str, out_dir="cards",
-               class_name: str = None, colour: str = None) -> str:
+               expires_on: str, class_name: str = None,
+               colour: str = None) -> bytes:
     """
-    A client holds one card per class, so the class name is printed prominently
-    and the accent takes that class's colour — at the desk the two cards must
-    be tellable apart at a glance.
+    Draw the card and hand back the PNG bytes.
+
+    Bytes rather than a path: the card is stored in the database with the
+    photos now (see images.py), so the only thing on disk was a copy that
+    a backup of the database did not include. Nothing here writes a file.
+
+    A client holds one card per class, so the class name is printed
+    prominently and the accent takes that class's colour — at the desk the
+    two cards must be tellable apart at a glance.
     """
-    os.makedirs(out_dir, exist_ok=True)
     name = (name or "").strip()
     accent = colour or ACCENT
 
@@ -392,6 +398,6 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     d.rectangle([FRAME + 5, height - FRAME - 11, CARD_W - FRAME - 6, height - FRAME - 6],
                 fill=accent)
 
-    path = card_path(client_id, class_name, out_dir)
-    card.save(path, dpi=(300, 300))
-    return path
+    out = io.BytesIO()
+    card.save(out, "PNG", dpi=(300, 300))
+    return out.getvalue()

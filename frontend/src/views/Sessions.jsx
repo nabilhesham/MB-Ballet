@@ -50,6 +50,19 @@ function sessionColumns(selected, toggle) {
   ];
 }
 
+/* A day as the epoch seconds it spans. The list holds `starts_at` as a
+   timestamp, so a typed date has to become one to compare against it — and
+   the TO bound is the *end* of that day, or picking the same date for both
+   would match nothing but midnight. */
+function dayStart(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).getTime() / 1000;
+}
+function dayEnd(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d, 23, 59, 59).getTime() / 1000;
+}
+
 export default function Sessions() {
   const now = Math.floor(Date.now() / 1000);
   // Every session, not a window. This list is the one place a session can be
@@ -64,12 +77,30 @@ export default function Sessions() {
   const toast = useToast();
   const nav = useNavigate();
   const [selected, setSelected] = useState(() => new Set());
+  // Two states, not one: `draft` is what the date inputs hold and `range` is
+  // what the tables are filtered by. A date input fires on every edit, so
+  // binding the filter straight to it empties the list while a year is still
+  // half typed — the same reason the instructor page's range applies on a
+  // button. See CLAUDE.md.
+  const [draft, setDraft] = useState({ from: '', to: '' });
+  const [range, setRange] = useState({ from: '', to: '' });
 
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
 
-  const upcoming = list.filter(s => s.starts_at >= now - 3600);
-  const past = list.filter(s => s.starts_at < now - 3600).slice().reverse();
+  // The one thing this list could not be searched by. DataTable's search box
+  // matches the row's own values, and a session's date is an epoch integer
+  // in there, so typing "12 Sep" found nothing — on the one screen that
+  // shows the whole timetable and is the only place a session can be
+  // deleted from. The text box stays for class, instructor and status.
+  const dirty = draft.from !== range.from || draft.to !== range.to;
+  const inRange = s => (!range.from || s.starts_at >= dayStart(range.from))
+    && (!range.to || s.starts_at <= dayEnd(range.to));
+  const shown = list.filter(inRange);
+  const filtered = range.from || range.to;
+
+  const upcoming = shown.filter(s => s.starts_at >= now - 3600);
+  const past = shown.filter(s => s.starts_at < now - 3600).slice().reverse();
 
   const openRepeat = async () => {
     const [classes, instructors] = await Promise.all([api('/classes'), api('/instructors')]);
@@ -128,13 +159,38 @@ export default function Sessions() {
         <div>
           <h1>Sessions</h1>
           <div className="sub">
-            {upcoming.length} upcoming · {past.length} past — the whole timetable,
-            the same sessions the calendar shows
+            {upcoming.length} upcoming · {past.length} past
+            {filtered
+              ? <> — {shown.length} of {list.length} sessions, in the dates picked</>
+              : <> — the whole timetable, the same sessions the calendar shows</>}
           </div>
         </div>
         <div className="row">
           <button onClick={openRepeat}>Repeat weekly</button>
           <button className="pri" onClick={openSchedule}>Add session</button>
+        </div>
+      </div>
+
+      {/* Two .filterbar rows, the same shape the instructor page uses: the
+          dates together on their own line, the buttons acting on them under
+          it, both at the same height. */}
+      <div style={{ margin: '0 0 16px' }}>
+        <div className="filterbar">
+          <div>
+            <label>FROM</label>
+            <input type="date" value={draft.from}
+                   onChange={e => setDraft(d => ({ ...d, from: e.target.value }))} />
+          </div>
+          <div>
+            <label>TO</label>
+            <input type="date" value={draft.to}
+                   onChange={e => setDraft(d => ({ ...d, to: e.target.value }))} />
+          </div>
+        </div>
+        <div className="filterbar" style={{ marginTop: 10 }}>
+          <button className="pri" onClick={() => setRange(draft)} disabled={!dirty}>Apply</button>
+          <button onClick={() => { setDraft({ from: '', to: '' }); setRange({ from: '', to: '' }); }}
+                  disabled={!filtered && !draft.from && !draft.to}>Show all</button>
         </div>
       </div>
 
@@ -157,7 +213,7 @@ export default function Sessions() {
       <div className="box pad0 dt-host">
         <DataTable
           rows={upcoming} rowKey={r => r.id} search="Search by class, instructor or status…"
-          onRowClick={r => nav(`/session/${r.id}`)} empty="Nothing scheduled." columns={columns}
+          onRowClick={r => nav(`/session/${r.id}`)} empty={filtered ? "Nothing scheduled in those dates." : "Nothing scheduled."} columns={columns}
         />
       </div>
 
@@ -170,7 +226,7 @@ export default function Sessions() {
       <div className="box pad0 dt-host">
         <DataTable
           rows={past} rowKey={r => r.id} search="Search by class, instructor or status…"
-          onRowClick={r => nav(`/session/${r.id}`)} empty="No past sessions." columns={columns}
+          onRowClick={r => nav(`/session/${r.id}`)} empty={filtered ? "No past sessions in those dates." : "No past sessions."} columns={columns}
         />
       </div>
     </>

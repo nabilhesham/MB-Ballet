@@ -35,9 +35,9 @@ export default defineConfig({
     // separately with ./start.sh) — everything that isn't a Vite asset goes
     // there, so the dev server behaves like the production one-file app.
     proxy: {
+      // Photos and cards come through /api/images now, so this one rule
+      // covers them too — see images.py.
       '/api': 'http://127.0.0.1:8000',
-      '/photos': 'http://127.0.0.1:8000',
-      '/cards': 'http://127.0.0.1:8000',
       '/reception': 'http://127.0.0.1:8000',
       '/static': {
         target: 'http://127.0.0.1:8000',

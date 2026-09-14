@@ -65,6 +65,10 @@ FIELDS = {
         "client_id": None, "session_id": None, "subscription_id": None,
         "status": "booked", "checked_in_at": None, "created_at": None,
     },
+    "images": {
+        "kind": None, "owner_id": None, "variant": "", "mime": None,
+        "data": None, "updated_at": None,
+    },
     "credentials": {
         "client_id": None, "class_id": None, "token": None, "kind": "card",
         "issued_at": None, "revoked_at": None,
@@ -95,6 +99,7 @@ NULLABLE = {coll: {f for f, default in fields.items() if default is None}
 # only idempotent because they exist, and without them seed.py would
 # silently duplicate every booking it re-imports.
 INDEXES = {
+    "images": [(["kind", "owner_id", "variant"], True)],
     "credentials": [(["token"], True), (["client_id", "class_id"], False)],
     "access_events": [(["scanned_at"], False), (["client_id"], False),
                       (["session_id"], False)],

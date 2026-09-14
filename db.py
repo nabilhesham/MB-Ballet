@@ -192,6 +192,33 @@ CREATE TABLE IF NOT EXISTS instructor_hour_adjustments (
 );
 CREATE INDEX IF NOT EXISTS ix_iha_date ON instructor_hour_adjustments(instructor_id, adjustment_date);
 
+-- Every image the app holds: client and instructor photos, and the printed
+-- member cards. Base64 text rather than a BLOB, because the same rows have to
+-- live in MongoDB too and base64 is the one encoding both stores and the
+-- repository interface's plain dicts carry without a per-backend special case.
+--
+-- In the database rather than in photos/ and cards/ on purpose. Those folders
+-- were the one part of the academy's record that a backup of the database did
+-- not contain, and on the hosted backend they were worse than that: the data
+-- lived on Atlas and the faces lived on whichever laptop happened to upload
+-- them.
+--
+-- `kind` is what the image is of, `owner_id` who, and `variant` which one of
+-- theirs -- the class slug for a card, since a client holds one per class.
+-- The three together are unique: an upload or a reissue replaces, never
+-- accumulates.
+CREATE TABLE IF NOT EXISTS images (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    owner_id   INTEGER NOT NULL,
+    variant    TEXT NOT NULL DEFAULT '',
+    mime       TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_img_owner ON images(kind, owner_id, variant);
+
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
 CREATE TABLE IF NOT EXISTS settings (

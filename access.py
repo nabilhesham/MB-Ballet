@@ -16,6 +16,7 @@ import time
 from datetime import date, datetime, timedelta, time as _t
 
 import db
+import images
 import tokens
 
 # Only plans of this size or larger may be frozen. Short packs are meant to be
@@ -1103,8 +1104,24 @@ def delete_plan(repo, sub_id: int) -> dict:
     plan that keeps the record. So the counts are taken before the delete and
     returned, and the confirm dialog says what will go rather than what did.
 
-    No refresh_expiry() here, unlike the other bulk booking deletes: the plan
-    whose expiry would be recomputed is itself gone.
+    Deleting the last live plan for a class also takes the client **out of
+    that class**, which is what a receptionist means by deleting a plan: the
+    class page lists "students with a booking", so a slot of theirs still
+    sitting on a date next week left them on the roster of a class they had
+    just been removed from. Only slots still ahead of them go, and only when
+    no other live plan of theirs stands behind that class. Those slots are
+    usually funded by an older, already-renewed plan, so each one is given
+    back to whatever plan paid for it -- which is why this branch *does* call
+    refresh_expiry(), on the other plans rather than on this one.
+
+    Attendance in the class is never touched, even though this is the one
+    deletion that takes attendance with it: what it takes is *this plan's*,
+    because a plan's bookings are its attendance. A session another plan
+    already paid for and the client already attended belongs to that plan's
+    history, and is on screen in the payment list underneath.
+
+    No refresh_expiry() for the deleted plan itself, unlike the other bulk
+    booking deletes: the plan whose expiry would be recomputed is gone.
     """
     with repo.begin():
         sub = repo.get("subscriptions", sub_id)
@@ -1119,7 +1136,7 @@ def delete_plan(repo, sub_id: int) -> dict:
         repo.delete_where("bookings", {"subscription_id": sub_id})
         repo.delete("subscriptions", sub_id)
 
-        revoked = 0
+        revoked = released = 0
         if sub["class_id"]:
             still = repo.exists("subscriptions",
                                 {"client_id": sub["client_id"],
@@ -1130,9 +1147,51 @@ def delete_plan(repo, sub_id: int) -> dict:
                     {"client_id": sub["client_id"], "class_id": sub["class_id"],
                      "revoked_at": None},
                     {"revoked_at": db.now()})
+                released = release_from_class(repo, sub["client_id"],
+                                              sub["class_id"])
         return {"ok": True, "bookings": total,
                 "upcoming": total - attended,
-                "attended": attended, "cards_revoked": revoked}
+                "attended": attended, "cards_revoked": revoked,
+                "released": released}
+
+
+def release_from_class(repo, client_id: int, class_id: int) -> int:
+    """
+    Take a client off a class's upcoming sessions. Returns how many slots.
+
+    Membership is derived from bookings, so this is what "remove them from
+    the class" actually consists of. Only what is still ahead of them: a
+    booking already marked present or absent is the record of a session that
+    happened, and belongs to the plan that paid for it.
+
+    Every slot goes back to its own plan as unassigned, which is why the
+    expiry of each one is refreshed -- these bookings are deleted directly
+    rather than through unbook(), the same rule delete_session and
+    delete_class follow.
+
+    Not called on its own anywhere yet; delete_plan is its one caller. It is
+    a named function rather than an inline block because "which bookings put
+    someone in a class" is a question two screens already ask differently,
+    and a third phrasing of it would eventually disagree with both.
+    """
+    theirs = [b for b in repo.find("bookings",
+                                   {"client_id": client_id, "status": "booked"},
+                                   fields=["id", "session_id", "subscription_id"])]
+    if not theirs:
+        return 0
+    # The session's class, not the plan's: this is about who is standing in
+    # the room, which is the same question the class page's student list asks.
+    ahead = {x["id"] for x in repo.find(
+        "sessions",
+        {"id": {"in": [b["session_id"] for b in theirs]}, "class_id": class_id,
+         "status": "scheduled", "starts_at": {"gt": db.now()}}, fields=["id"])}
+    drop = [b for b in theirs if b["session_id"] in ahead]
+    if not drop:
+        return 0
+    repo.delete_where("bookings", {"id": {"in": [b["id"] for b in drop]}})
+    for sub_id in {b["subscription_id"] for b in drop if b["subscription_id"]}:
+        refresh_expiry(repo, sub_id)
+    return len(drop)
 
 
 def delete_client(repo, client_id: int, hard: bool = False) -> dict:
@@ -1173,6 +1232,12 @@ def delete_client(repo, client_id: int, hard: bool = False) -> dict:
             # Ordered by hand to respect the foreign keys.
             for coll in ("bookings", "credentials", "subscriptions", "access_events"):
                 repo.delete_where(coll, {"client_id": client_id})
+            # Their photo and every card ever printed for them. These used to
+            # be files nothing ever removed, so a hard delete left them on the
+            # disk; now they are rows, and rows nobody can reach are the
+            # bulkiest thing in the database.
+            images.drop(repo, images.CLIENT_PHOTO, client_id)
+            images.drop(repo, images.CARD, client_id)
             repo.delete("clients", client_id)
             return {"ok": True, "action": "delete"}
 

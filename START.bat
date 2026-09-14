@@ -25,7 +25,7 @@ set "RUNTIME=%~dp0runtime"
 REM  A virtual environment holds compiled, platform-specific binaries, so a
 REM  single .venv shared between Windows and Linux destroys itself every time
 REM  the other platform runs. Each gets its own folder; the database, .env,
-REM  cards and photos are plain files and stay shared.
+REM  academy.db is plain data and stays shared.
 set "VENVDIR=.venv-windows"
 set "PY="
 set "FOUNDANY="

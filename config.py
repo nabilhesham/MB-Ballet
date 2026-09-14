@@ -11,8 +11,8 @@ nothing here is a module constant: every value is a function, read when it is
 asked for.
 
 The frozen/APP_DIR block was also copied into both `server.py` and
-`run_app.py`. It is here once instead, because "the database, photos and
-cards live next to the exe" is the same fact in both. `.env` is not in that
+`run_app.py`. It is here once instead, because "the database lives
+next to the exe" is the same fact in both. `.env` is not in that
 list: there is one of those, in the source folder, and a packaged build
 carries its values rather than reading a second copy — see load_env().
 
@@ -37,7 +37,8 @@ _env_loaded = False
 
 def app_dir() -> str:
     """
-    The folder the academy's own files live in: academy.db, photos, cards.
+    The folder the academy's own files live in — academy.db, and nothing
+    else since the photos and cards moved into it (see images.py).
 
     Not `.env`. In a source checkout this is the folder holding it anyway; in
     a packaged build the settings are baked into the binary and nothing looks
@@ -92,8 +93,7 @@ def load_env() -> None:
     exe, so a build would look there, find nothing, and mint a fresh random
     ENTRY_SECRET into a second `.env` nobody knew about; every card already
     printed then stopped verifying, with a build that looked like it worked.
-    The chdir stays either way: academy.db, photos/ and cards/ still live
-    beside the exe.
+    The chdir stays either way: academy.db still lives beside the exe.
 
     The file is read unconditionally. It used to be read only when
     ENTRY_SECRET was unset — so on a machine where the secret was exported in
@@ -179,6 +179,21 @@ def backend() -> str:
 
 def sqlite_path() -> str:
     return os.environ.get("MB_SQLITE_PATH") or "academy.db"
+
+
+def legacy_media_dir() -> str:
+    """
+    Where an install older than images.py left its photos/ and cards/.
+
+    Beside the database, which is where they always sat. In every real
+    install that is app_dir() and these two answers are the same; they part
+    company only when MB_SQLITE_PATH puts the database somewhere else, and
+    then the photos lying in whatever folder the app was launched from
+    belong to a different database and must not be read into this one.
+    """
+    if backend() == "sqlite":
+        return os.path.dirname(os.path.abspath(sqlite_path()))
+    return app_dir()
 
 
 def mongo_uri() -> str:

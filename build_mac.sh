@@ -7,7 +7,7 @@
 #  dist/MB Ballet Academy — copy that single file to the reception laptop
 #  and run it. No Python, no packages, no internet needed.
 #
-#  The database, photos and cards are created next to it, so keep it in
+#  The database is created next to it, so keep it in
 #  its own folder rather than loose on the desktop. Settings are not:
 #  this project's .env is baked into the binary as it is built, and
 #  the build refuses to run without one.
@@ -165,7 +165,7 @@ printf "    then ./\"MB Ballet Academy\". It isn't a signed .app, so\n"
 printf "    Finder may not offer to run it by double-clicking —\n"
 printf "    Terminal is the reliable way in.\n\n"
 printf "    Put it in its own folder, not loose on the desktop: it\n"
-printf "    creates academy.db, photos and cards beside itself.\n"
+printf "    creates academy.db beside itself.\n"
 printf "    Back up that whole folder, not just the file.\n\n"
 printf "    It needs no .env: the settings and the card-signing\n"
 printf "    key were built into it from this project's own .env,\n"

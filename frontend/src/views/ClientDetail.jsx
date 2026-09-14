@@ -147,13 +147,16 @@ export default function ClientDetail() {
             ? `${plan.used} attended session${plan.used === 1 ? '' : 's'} on it `
               + `${plan.used === 1 ? 'is' : 'are'} erased from the record too. `
             : ''}
-          The card for this class stops working unless another plan in it is still live.
+          The card for this class stops working unless another plan in it is still live,
+          and {c.name_en} comes off {plan.class_name || 'the class'} — any slot of theirs
+          still ahead in it goes back to whichever plan paid for it.
         </>
       ),
       label: 'Delete for good',
       onConfirm: async () => {
         const r = await api(`/plans/${plan.id}`, { method: 'DELETE' });
         toast(`Plan deleted — ${r.bookings} booking${r.bookings === 1 ? '' : 's'} removed`
+          + (r.released ? `, off ${r.released} more upcoming session${r.released === 1 ? '' : 's'}` : '')
           + (r.cards_revoked ? ', card revoked' : ''));
         reload();
       },
@@ -349,7 +352,12 @@ export default function ClientDetail() {
                 <div className="eyebrow" style={{ margin: 0 }}>CARD</div>
                 {card ? (
                   <div className="row tight" style={{ marginTop: 5 }}>
-                    <a className="btn sm" href={card.card_url} download>Download</a>
+                    {/* The card is a row in the database now, so its URL is
+                        /api/images/card/17 and carries no filename of its own.
+                        Naming it here is what stops a download landing as a
+                        extensionless "17" in the receptionist's Downloads. */}
+                    <a className="btn sm" href={card.card_url}
+                       download={`card_${c.name_en}_${card.class_name}.png`.replace(/\s+/g, '_')}>Download</a>
                     <button className="sm" onClick={() => window.open(card.card_url)}>Print</button>
                     <button className="sm" onClick={() => issueCard(p.class_id)}>Reissue</button>
                   </div>

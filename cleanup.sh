@@ -4,7 +4,7 @@
 #   ./cleanup.sh          show what would be removed
 #   ./cleanup.sh --apply  actually remove it
 #
-# Nothing here touches academy.db, .env, photos/ or your source files.
+# Nothing here touches academy.db, .env, photos/, cards/ or your source files.
 
 set -u
 cd "$(dirname "$0")"
@@ -73,7 +73,9 @@ echo "  Kept on purpose"
 echo "  ---------------"
 echo "    academy.db      your records — back this up"
 echo "    .env            signing key — losing it invalidates every card"
-echo "    cards/          generated member cards, rebuilt when you reissue"
-echo "    photos/         client photos, not recoverable if deleted"
+echo "    photos/         left from before pictures moved into the database."
+echo "                    The app copied them in on its first start after the"
+echo "    cards/          upgrade, so once you have seen the photos still on"
+echo "                    the screens, these two folders can be deleted by hand."
 echo "    .venv-*/        one environment per platform, rebuilt on next start"
 echo
