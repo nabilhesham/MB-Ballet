@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
+import { fetchAnyClassSessions } from '../lib/planSessions';
 import { fmtDate, fmtFull, fmtTime } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
@@ -171,10 +172,12 @@ export default function ClientDetail() {
   // Every class, not just this booking's own — the slot keeps the plan that
   // paid for it, so moving across classes is a correction reception is
   // allowed to make. Selling a plan stays class-locked; see PlanPicker.
+  //
+  // The window is the shared one (lib/planSessions.js), three weeks back
+  // included: "she came on Saturday instead" is a correction about a day
+  // that has already happened, and this list used to start at today.
   const openMove = async fromSessionId => {
-    const now = Math.floor(Date.now() / 1000);
-    const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&available_for=${c.id}`);
-    const open_ = list.filter(s => s.status !== 'cancelled');
+    const open_ = await fetchAnyClassSessions(c.id);
     if (!open_.length) return toast('No other sessions to move to', 'bad');
     return open(
       <MoveBooking clientId={c.id} fromSessionId={fromSessionId} sessions={open_} onSaved={reload} />,

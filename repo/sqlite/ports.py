@@ -19,7 +19,8 @@ def _marks(values):
 
 class SqliteSessions(SessionsPort):
 
-    def sessions_in_range(self, start, end, class_id=None, not_booked_by=None):
+    def sessions_in_range(self, start=None, end=None, class_id=None,
+                          not_booked_by=None):
         sql = ("SELECT s.*, c.name AS class_name, c.colour,"
                "       i.name AS instructor_name,"
                "  (SELECT COUNT(*) FROM bookings b WHERE b.session_id=s.id) AS booked,"
@@ -27,8 +28,15 @@ class SqliteSessions(SessionsPort):
                "     AND b.status='present') AS attended"
                "  FROM sessions s JOIN classes c ON c.id=s.class_id"
                "  LEFT JOIN instructors i ON i.id=s.instructor_id"
-               " WHERE s.starts_at >= ? AND s.starts_at < ?")
-        params = [start, end]
+               " WHERE 1=1")
+        params = []
+        # A bound left out is left off the query — see the note on the port.
+        if start is not None:
+            sql += " AND s.starts_at >= ?"
+            params.append(start)
+        if end is not None:
+            sql += " AND s.starts_at < ?"
+            params.append(end)
         if class_id:
             sql += " AND s.class_id = ?"
             params.append(class_id)

@@ -65,8 +65,17 @@ class _Helpers:
 
 class MongoSessions(SessionsPort, _Helpers):
 
-    def sessions_in_range(self, start, end, class_id=None, not_booked_by=None):
-        flt = {"starts_at": {"$gte": start, "$lt": end}}
+    def sessions_in_range(self, start=None, end=None, class_id=None,
+                          not_booked_by=None):
+        # A bound left out is left off the query — see the note on the port.
+        # starts_at is declared and always written, so an absent filter here
+        # cannot be the null-matching trap compile_filter() guards against.
+        window = {}
+        if start is not None:
+            window["$gte"] = start
+        if end is not None:
+            window["$lt"] = end
+        flt = {"starts_at": window} if window else {}
         if class_id:
             flt["class_id"] = class_id
         sessions = [schema.normalise("sessions", d) for d in

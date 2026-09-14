@@ -251,8 +251,13 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
         # stretched; a logo file of a very different shape would be, and
         # would want these two numbers revisited rather than the resize.
         logo = logo.resize((LOGO_W, LOGO_H), Image.LANCZOS)
-        # Composite rather than paste so the transparent background picks up
-        # the card's paper colour instead of a white block.
+        # Composite rather than paste, so the logo's transparent background
+        # picks up the card's paper instead of a white block. That needs the
+        # asset itself to carry an alpha channel: static/logo.png did not
+        # until it was knocked out by hand, and this line quietly pasted an
+        # opaque white rectangle onto off-white paper the whole time, edged
+        # with the black scan lines along the file's top and bottom. If the
+        # logo is ever replaced, replace it with a transparent PNG.
         card.paste(logo, ((CARD_W - logo.width) // 2, y), logo)
         y += logo.height + 16
     else:

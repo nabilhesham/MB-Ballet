@@ -26,11 +26,19 @@ from abc import ABC, abstractmethod
 class SessionsPort(ABC):
 
     @abstractmethod
-    def sessions_in_range(self, start: int, end: int, class_id: int = None,
-                          not_booked_by: int = None) -> list:
+    def sessions_in_range(self, start: int = None, end: int = None,
+                          class_id: int = None, not_booked_by: int = None) -> list:
         """
         Sessions starting in [start, end), each with its class and instructor
         named and its booked/attended counts.
+
+        **Either bound may be None, meaning no bound on that side.** Both
+        None is the whole timetable, which is what the Sessions screen asks
+        for: it is the only place a session can be deleted from, so anything
+        it cannot show is a session nobody can remove — and one outside its
+        range still showed in the calendar and still held its slot against
+        slot_conflict(), so scheduling over it was refused by something
+        invisible. See CLAUDE.md.
 
         Those two counts appeared as the same pair of correlated subqueries
         in five separate places — the timetable, the class page twice, the

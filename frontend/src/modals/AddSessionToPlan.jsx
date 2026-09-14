@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { api } from '../api';
+import { fetchAnyClassSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import Empty from '../components/Empty';
@@ -31,9 +32,10 @@ export default function AddSessionToPlan({ clientId, classesEnrolled, onSaved })
 
   useEffect(() => {
     (async () => {
-      const now = Math.floor(Date.now() / 1000);
-      const list = await api(`/sessions?start=${now}&end=${now + 180 * 86400}&available_for=${clientId}`);
-      setSessions(list.filter(s => s.status !== 'cancelled'));
+      // The same window as every other picker, three weeks of it behind
+      // today: a slot is often written down after the client has already
+      // been coming, and this list offered nothing but the future.
+      setSessions(await fetchAnyClassSessions(clientId));
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
