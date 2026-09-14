@@ -250,6 +250,10 @@ select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns=
 @keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 .modal.wide{max-width:780px}
 .modal .mh{color:var(--mute);font-size:13px;margin:6px 0 4px;line-height:1.6}
+/* A refusal that names something to act on -- a client the number already
+   belongs to, and their member number. It stays on screen, unlike the
+   toast beside it, because reception has to read an identifier out of it. */
+.modal .mh.bad{color:var(--bad);background:var(--bad-soft);padding:8px 10px;border-radius:8px;margin:8px 0}
 .modal .acts{display:flex;gap:10px;justify-content:flex-end;margin-top:26px;flex-wrap:wrap}
 
 /* ---------------------------------------------------------------- calendar */

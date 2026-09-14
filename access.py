@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, time as _t
 
 import db
 import images
+import phones
 import tokens
 
 # Only plans of this size or larger may be frozen. Short packs are meant to be
@@ -289,6 +290,49 @@ def can_freeze(sub) -> tuple:
     if sub["frozen_on"]:
         return False, "already frozen"
     return True, ""
+
+
+# ---------------------------------------------------------------- identity
+def phone_conflict(repo, phone, exclude_id=None) -> str | None:
+    """
+    The sentence to refuse a client with, or None if the number is free.
+
+    The mobile number is what identifies a client — the seed has always
+    merged the roster sheets on it rather than on the spelling of a name,
+    and this is the same rule applied to a client typed in by hand. Two
+    profiles for one person is not a tidiness problem: their sessions,
+    their plans and their cards divide between the two records, so a card
+    scans against a balance that is only half of what they bought.
+
+    Like can_freeze(), it is the single answer to the question, so the form
+    and the endpoint cannot drift apart — both refuse with this sentence.
+
+    A blank number is never a conflict. Reception does not always have one
+    at the moment a client is written down, and refusing to create anybody
+    without a phone would be a worse rule than the one being fixed. Such a
+    client simply has no identity to check against, exactly as before.
+
+    `exclude_id` is the client being edited: their own number is not a
+    duplicate of itself.
+    """
+    key = phones.key(phone)
+    if not key:
+        return None
+    others = [c for c in repo.clients_by_phone_key(key) if c["id"] != exclude_id]
+    if not others:
+        return None
+    c = others[0]
+    who = f"{c['name_en']}, member {c['id']}"
+    if not c["active"]:
+        # Archived, so the number is on somebody who was deliberately put
+        # away rather than somebody on the list. Saying "already exists"
+        # would send reception looking for a client they cannot find, and
+        # the only way out of that is a second profile for one person —
+        # which is the thing this refusal is here to prevent.
+        return (f"That mobile number belongs to {who}, who is archived. "
+                f"Restore them from the Archived list instead of adding "
+                f"them again.")
+    return f"That mobile number already belongs to {who}."
 
 
 # ---------------------------------------------------------------- auto-absent

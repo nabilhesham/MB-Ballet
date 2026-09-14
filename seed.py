@@ -32,6 +32,7 @@ import access                                   # noqa: E402
 import cards                                    # noqa: E402
 import db                                       # noqa: E402
 import images                                   # noqa: E402
+import phones                                   # noqa: E402
 import sheets                                   # noqa: E402
 from repo.sqlite import SqliteRepo              # noqa: E402
 
@@ -227,8 +228,12 @@ def _identity(student):
     The phone number is the identity: the same student is "rodaina hesham" on
     the flexibility sheet and "rodina hesham" on the ballet one, and merging
     them is what makes her two cards belong to one client rather than two.
+
+    phones.key() is the same comparison the admin refuses a duplicate client
+    on, deliberately — a number the seed treats as one person must not be two
+    people the moment reception types it in by hand.
     """
-    return sheets.phone_key(student.phone) or f"name:{sheets.name_key(student.name)}"
+    return phones.key(student.phone) or f"name:{sheets.name_key(student.name)}"
 
 
 def _plan(student, family):

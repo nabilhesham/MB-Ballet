@@ -20,8 +20,15 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
   const [joined, setJoined] = useState(existing?.joined_on || todayISO());
   const [school, setSchool] = useState(existing?.school || '');
   const [notes, setNotes] = useState(existing?.notes || '');
+  // A save that failed, kept on screen rather than only in a toast. The one
+  // that matters is the duplicate-number refusal: it names the client the
+  // number already belongs to and their member number, which reception has
+  // to read and go and look up. A message that fades while they are still
+  // reaching for it is no message at all.
+  const [err, setErr] = useState('');
 
   const save = async () => {
+    setErr('');
     if (!name.trim()) return toast('Name is required', 'bad');
     const body = {
       name_en: name, phone, age: age === '' ? null : Number(age),
@@ -39,13 +46,14 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
         toast('Client created');
         onCreated(r.id);
       }
-    } catch (e) { toast(e.message, 'bad'); }
+    } catch (e) { setErr(e.message); toast(e.message, 'bad'); }
   };
 
   return (
     <>
       <h3>{existing ? 'Edit client' : 'New client'}</h3>
       {!existing && <div className="mh">Add their plan next — that is where sessions get assigned.</div>}
+      {err && <div className="mh bad">{err}</div>}
       <div className="fieldrow">
         <div>
           <label>FULL NAME</label>
@@ -53,7 +61,11 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
         </div>
         <div>
           <label>MOBILE NUMBER</label>
-          <input type="tel" inputMode="tel" value={phone} onChange={e => setPhone(e.target.value)}
+          {/* Identity, not just a contact detail: two clients may share a
+              name but never a number. Still optional — reception does not
+              always have one when a client is first written down. */}
+          <input type="tel" inputMode="tel" value={phone}
+                 onChange={e => { setPhone(e.target.value); setErr(''); }}
                  placeholder="01001234567" />
         </div>
       </div>

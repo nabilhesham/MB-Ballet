@@ -8,6 +8,7 @@ tests check directly.
 """
 
 import db
+import phones
 
 from ..ports import (AccessPort, BookingsPort, ClassesPort, ClientsPort,
                      EventsPort, InstructorsPort, PlansPort, SessionsPort)
@@ -180,6 +181,18 @@ class SqliteClients(ClientsPort):
             " WHERE c.active = ? AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
             "   OR c.school LIKE ?)"
             " ORDER BY c.name_en, c.id", (active, q, like, like, like)).fetchall()]
+
+    def clients_by_phone_key(self, key):
+        # The comparison is the last ten digits, which no index can answer:
+        # a stored number may carry spaces, dashes or a +20, so a suffix LIKE
+        # over the raw text would miss the very duplicates this exists to
+        # catch. Reading the numbers and comparing in Python is what both
+        # backends do, and it happens only when a client is created or their
+        # number edited — never on a page reception waits for.
+        rows = self.conn.execute(
+            "SELECT id, name_en, phone, active FROM clients"
+            " WHERE phone IS NOT NULL AND phone != '' ORDER BY id").fetchall()
+        return [dict(r) for r in rows if phones.key(r["phone"]) == key]
 
     def card_counts_bulk(self, client_ids):
         out = {c: 0 for c in client_ids}

@@ -102,8 +102,16 @@ def list_clients(q: str = "", status: str = "all"):
 
 @router.post("/api/clients")
 def create_client(body: ClientIn):
+    """
+    The mobile number is the client's identity, so a number already in the
+    database is a refusal rather than a second profile — see
+    access.phone_conflict() for why, and for why a blank one is still fine.
+    """
     repo = data.connect()
     try:
+        clash = access.phone_conflict(repo, body.phone)
+        if clash:
+            raise HTTPException(409, clash)
         return {"id": repo.insert("clients", {
             "name_en": body.name_en, "phone": body.phone, "age": body.age,
             "school": body.school,
@@ -198,8 +206,18 @@ def plan_sessions(cid: int, pid: int):
 
 @router.put("/api/clients/{cid}")
 def update_client(cid: int, body: ClientIn):
+    """
+    Same identity rule as create_client(), excluding this client — their own
+    number is not a duplicate of itself. Editing had to be covered too or the
+    rule would only be half true: refusing at creation and then allowing the
+    number to be typed over somebody else's a minute later leaves exactly the
+    two-profiles-one-person state the refusal exists to prevent.
+    """
     repo = data.connect()
     try:
+        clash = access.phone_conflict(repo, body.phone, exclude_id=cid)
+        if clash:
+            raise HTTPException(409, clash)
         repo.update("clients", cid, {
             "name_en": body.name_en, "phone": body.phone, "age": body.age,
             "school": body.school, "joined_on": body.joined_on,
