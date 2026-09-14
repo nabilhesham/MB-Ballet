@@ -1,0 +1,49 @@
+# Line endings, decided here rather than by whatever each machine's Git was
+# installed with.
+#
+# The problem this fixes, which bit repeatedly: Git for Windows ships with
+# core.autocrlf=true, so a clone made on Windows rewrites every text file to
+# CRLF on checkout. The repo's own files are all LF and stay that way -- but
+# this project is *worked on from WSL against a checkout living on a Windows
+# drive*, and bash cannot run a CRLF script at all:
+#
+#     start.sh: line 8: $'\r': command not found
+#     : invalid option name: pipefail
+#
+# It is not a warning either. A CRLF script dies at its first `if`, because
+# `then\r` is not `then` -- so no guard written in shell can survive its own
+# file, and there is no version of a .sh file that works both ways. The only
+# fix is for CRLF never to reach one.
+#
+# .gitattributes beats core.autocrlf and core.eol, and it is committed, so
+# this holds on every clone on every machine without anyone configuring
+# anything.
+
+# Normalise every text file to LF in the repository, and check it out as LF.
+# Only the batch files below want anything else.
+* text=auto eol=lf
+
+# Batch files are the exception and genuinely want CRLF: cmd.exe is
+# documented to mis-handle LF-only files around labels and goto, and
+# START.bat is built out of subroutines it jumps between. See the batch trap
+# in CLAUDE.md for how expensive a cmd.exe parsing surprise already was here.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# Never touched. `text=auto` already detects these by their NUL bytes, but
+# saying so is cheap and the cost of being wrong is not: a CRLF pass over
+# static/logo.png would corrupt the alpha channel the printed card composites
+# against, and over static/fonts/*.ttf the typefaces every card is set in.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.webp  binary
+*.ico   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.xlsx  binary
+*.db    binary
+*.exe   binary
+*.zip   binary

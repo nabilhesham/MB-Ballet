@@ -231,6 +231,10 @@ static/style.css  Design tokens and components. Shared by the React admin,
                   into `static/app/`.
 static/reception.html  Kiosk check-in screen (standalone, own JS, untouched
                   by the React rewrite — see the note below).
+.gitattributes    Line endings: LF everywhere, CRLF for .bat, binary
+                  left alone. Committed because it beats whatever Git each
+                  machine was installed with -- see the line-ending trap
+                  below.
 START.bat         Windows double-click launcher.
 start.sh          Same thing for terminal / Mac / Linux.
                   (Both open the browser with a per-launch ?v= — see the
@@ -380,6 +384,43 @@ file's binary format. `build_mac.sh` and `build_linux.sh` now both refuse to
 run on the wrong host (`case "$(uname -s)" in Darwin*)`/`Linux*)`), failing
 fast with an explanation instead of producing a wrong-platform binary that
 "succeeds" until someone actually tries to run it. **Keep those guards.**
+
+**The line-ending trap, which bit repeatedly until `.gitattributes` existed.**
+Git for Windows installs with `core.autocrlf=true`, so a clone made on Windows
+rewrites every text file to CRLF on checkout. This project is then worked on
+*from WSL, against that same checkout on a Windows drive* — and bash cannot run
+a CRLF script at all:
+
+```
+start.sh: line 8: $'\r': command not found
+: invalid option name: pipefail
+```
+
+There is no version of a `.sh` file that works both ways, and **no guard can be
+written inside one either**: a CRLF script dies at its first `if` with exit 2,
+because `then\r` is not `then`. Whatever the guard said would never run. The
+only fix is for CRLF never to reach a shell script.
+
+`.gitattributes` does that, and it is the right place because it beats
+`core.autocrlf` and `core.eol` and it is committed — so it holds on every clone
+on every machine with nobody configuring anything. `* text=auto eol=lf` for
+everything, `*.bat`/`*.cmd` back to `eol=crlf` (cmd.exe mis-handles LF-only
+files around labels and `goto`, and `START.bat` is built out of subroutines it
+jumps between — see the batch trap above), and the shipped assets marked
+`binary` so no conversion can ever touch `static/logo.png`'s alpha or the card's
+typefaces.
+
+**It only acts at checkout, so a checkout that is already CRLF needs one
+command.** `git add --renormalize .` does *not* do it — git's clean filter
+strips the CR on read, decides the file is unchanged, and rewrites nothing,
+which looks like it worked. What works is re-checking-out every tracked file:
+
+```bash
+git rm --cached -rq . && git reset --hard
+```
+
+That discards uncommitted changes to tracked files, so commit first. It cannot
+touch `academy.db`, `.env`, `photos/` or `cards/` — none of them are tracked.
 
 Detection also scans the standard install folders and the registry, because
 installing Python with "Add to PATH" unticked is common and makes `where`
