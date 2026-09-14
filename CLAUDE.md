@@ -231,6 +231,10 @@ static/style.css  Design tokens and components. Shared by the React admin,
                   into `static/app/`.
 static/reception.html  Kiosk check-in screen (standalone, own JS, untouched
                   by the React rewrite — see the note below).
+.gitattributes    Line endings: LF everywhere, CRLF for .bat, binary
+                  left alone. Committed because it beats whatever Git each
+                  machine was installed with -- see the line-ending trap
+                  below.
 START.bat         Windows double-click launcher.
 start.sh          Same thing for terminal / Mac / Linux.
                   (Both open the browser with a per-launch ?v= — see the
@@ -381,6 +385,43 @@ run on the wrong host (`case "$(uname -s)" in Darwin*)`/`Linux*)`), failing
 fast with an explanation instead of producing a wrong-platform binary that
 "succeeds" until someone actually tries to run it. **Keep those guards.**
 
+**The line-ending trap, which bit repeatedly until `.gitattributes` existed.**
+Git for Windows installs with `core.autocrlf=true`, so a clone made on Windows
+rewrites every text file to CRLF on checkout. This project is then worked on
+*from WSL, against that same checkout on a Windows drive* — and bash cannot run
+a CRLF script at all:
+
+```
+start.sh: line 8: $'\r': command not found
+: invalid option name: pipefail
+```
+
+There is no version of a `.sh` file that works both ways, and **no guard can be
+written inside one either**: a CRLF script dies at its first `if` with exit 2,
+because `then\r` is not `then`. Whatever the guard said would never run. The
+only fix is for CRLF never to reach a shell script.
+
+`.gitattributes` does that, and it is the right place because it beats
+`core.autocrlf` and `core.eol` and it is committed — so it holds on every clone
+on every machine with nobody configuring anything. `* text=auto eol=lf` for
+everything, `*.bat`/`*.cmd` back to `eol=crlf` (cmd.exe mis-handles LF-only
+files around labels and `goto`, and `START.bat` is built out of subroutines it
+jumps between — see the batch trap above), and the shipped assets marked
+`binary` so no conversion can ever touch `static/logo.png`'s alpha or the card's
+typefaces.
+
+**It only acts at checkout, so a checkout that is already CRLF needs one
+command.** `git add --renormalize .` does *not* do it — git's clean filter
+strips the CR on read, decides the file is unchanged, and rewrites nothing,
+which looks like it worked. What works is re-checking-out every tracked file:
+
+```bash
+git rm --cached -rq . && git reset --hard
+```
+
+That discards uncommitted changes to tracked files, so commit first. It cannot
+touch `academy.db`, `.env`, `photos/` or `cards/` — none of them are tracked.
+
 Detection also scans the standard install folders and the registry, because
 installing Python with "Add to PATH" unticked is common and makes `where`
 useless.
@@ -445,17 +486,66 @@ It is manually triggered only (`workflow_dispatch`), never on push, because
 macOS runner minutes are billed at a 10x multiplier against the GitHub free
 tier and this is an occasional "cut a release" action, not a per-commit one.
 
-**The runner label is load-bearing and has a deadline.** `macos-15-intel` is
-x86_64, which is the whole point: that binary runs natively on an Intel Mac
-*and* on Apple Silicon via Rosetta 2, while an arm64 binary cannot run on an
-Intel Mac at all, and nobody has established which kind of Mac the academy
-has. The label has been wrong twice — it was `macos-13`, which GitHub made
-fully unsupported in December 2025, and then `macos-14`, which is **arm64**:
-that bump silently inverted the decision while the comment above it still
-said Intel, so the workflow was building a binary that would not start on
-half its possible targets. **GitHub drops x86_64 macOS entirely in August
-2027.** Before then, either find out what the academy's Mac is and move to
-`macos-15`/`macos-26` if it is Apple Silicon, or build on a real Mac.
+**It builds both architectures, and that is the fix for a real failure.** The
+academy's Mac met an x86_64 binary and said:
+
+```
+zsh: bad CPU type in executable: /Users/…/MB Ballet Academy
+```
+
+That error names no cause anyone can act on, **and `error.log` cannot explain
+it** — the process never starts, so `run_app.py` never runs. Worse, it has two
+opposite causes: an arm64 binary on an Intel Mac (impossible, full stop), or an
+x86_64 binary on Apple Silicon **without Rosetta 2** — which is not installed
+by default, and is *not* offered when the binary is launched from Terminal the
+way Finder launches a Unix executable. The written-down reasoning here used to
+be "x86_64 runs everywhere via Rosetta 2", and that is the sentence this
+disproved: it runs everywhere Rosetta 2 is *already there*.
+
+So the matrix builds `macos-15` (arm64) and `macos-15-intel` (x86_64) and
+names each artifact after its architecture. Download the one matching the
+Mac's own `uname -m` and it runs natively, with no Rosetta and nothing to work
+out. `fail-fast: false`, so a broken Intel build still hands over a working
+Apple Silicon one. A `universal2` build would sidestep the question but needs
+every wheel to be universal2, and pydantic-core and pymongo ship
+per-architecture ones.
+
+**Two guards, because this label has been wrong twice.** It was `macos-13`,
+retired by GitHub in December 2025, and then `macos-14`, which is arm64 — that
+bump silently inverted a comment still claiming Intel, and the wrong binary
+only surfaced on the reception Mac. `academy.spec` sets `target_arch=None`, so
+the runner label *is* the choice of target and GitHub may redefine it at any
+time. Each job therefore checks `uname -m` against what the matrix asked for
+before building, and `lipo -archs` on the finished binary after — the first
+would have caught the macos-14 bug on the run that introduced it. x86_64 is
+the row with a deadline: **GitHub drops it in August 2027**, which then just
+removes a row.
+
+**The artifact is a `.tar.gz`, not the bare binary, and that is not
+packaging taste.** `upload-artifact` builds the zip itself and its own docs
+say file permissions are not maintained — everything arrives `644`. A 644
+binary is not a broken download, it just refuses to run:
+
+```
+zsh: permission denied: ./MB Ballet Academy
+```
+
+which is a second unexplained error waiting behind the first. The workaround
+the action recommends is to tar before uploading, and tar carries the mode, so
+the file comes out already executable and there is no `chmod` to remember —
+the kind of step that gets skipped exactly when it matters. macOS unarchives a
+`.tar.gz` on a double-click, so it costs no Terminal either.
+
+**Each job writes what it built to the run summary**, which is where whoever
+downloads it actually looks: which architecture and how to check theirs, the
+unpack-and-run lines, the Gatekeeper right-click, the Rosetta install on the
+x86_64 job only, and the reminder that a CPU-type error leaves no `error.log`.
+Every line of it is an error someone has already hit with nothing to go on.
+
+`build_mac.sh` prints the same notes for a local build: which architecture it
+produced, which Macs that runs on, the Rosetta command if it is x86_64, and —
+correcting a promise it used to make — that a CPU-type error leaves no
+`error.log` to read, because nothing ever started.
 
 **It smoke-tests what it built**, because the failure this packaging step
 actually produces is a missing hidden import — uvicorn and starlette load
@@ -470,12 +560,43 @@ missing, since there is no npm step here and a checkout without it packages a
 binary that serves nothing at `/`. On failure both `run.log` and `error.log`
 are uploaded as an artifact.
 
-**The `.env` it bakes is ENTRY_SECRET plus, optionally, the `MB_` settings**,
-each from a repository secret of the same name. Unset means SQLite, which is
-what reception should run. They are settable because every value in `.env` is
-baked into the binary, so a local build from a `.env` naming MongoDB and a CI
-build of the same commit would otherwise disagree about which database the
-binary talks to.
+**The backend is a choice made when you press Run workflow**, and this is the
+one thing about CI builds that has to be understood rather than remembered:
+**the checkout has no `.env`.** It is gitignored and always will be — it holds
+`ENTRY_SECRET` and an Atlas password — so "make the build use my `.env`" is
+not a thing that can happen. CI has never seen that file. `academy.spec` bakes
+whatever `.env` is in the tree at build time, and the workflow's own step is
+what puts one there, from repository secrets.
+
+That is how a build came out talking to SQLite while the developer's `.env`
+said `mongo`. Nothing was broken: the settings were never given to CI, and
+`backend()` fell back to its default in silence. Two things stop it
+recurring. The `workflow_dispatch` input `backend` (`sqlite` | `mongo`,
+default `sqlite`) is printed in the log and named in the run summary, so a run
+always states which database its binary is for. And choosing `mongo` without
+the `MB_MONGO_URI` secret **fails the build there**, rather than shipping a
+binary that raises on the reception Mac — which it would, since
+`MB_DB_BACKEND=mongo` with no URI is a deliberate refusal, not a fallback.
+
+The backend is an input rather than a fourth secret because it is not one: it
+is a decision, and one visible switch beats two sources of truth that can
+disagree. `MB_MONGO_URI` and `MB_MONGO_DB` stay secrets, because the URI
+carries the password.
+
+**A `mongo` build has the Atlas credentials inside it**, which follows from
+baking `.env` at all and is worth saying out loud where someone downloads one:
+anyone who can fetch the artifact can read them. The run summary says so. Keep
+the repository private, and scope the Atlas user and IP access list to what
+reception actually needs.
+
+`config.describe()` is the line on the startup banner that names the backend,
+and it prints the host with any credentials stripped. It used to split on `@`
+alone, so a URI with **no** credentials in it — the direct multi-host form
+`.env.example` documents for networks that filter SRV lookups — kept the whole
+string and the next split returned the *scheme*, printing `at mongodb:`.
+`config.mongo_hosts()` does it properly now: drop the scheme, drop
+`user:pass@` from the right (a password may itself contain `@`), then take the
+host list.
 
 The entry point is `run_app.py`, not `server.py`. A double-clicked exe closes
 its console the moment the process dies, so an unhandled exception is invisible
