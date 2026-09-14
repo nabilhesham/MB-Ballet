@@ -486,17 +486,45 @@ It is manually triggered only (`workflow_dispatch`), never on push, because
 macOS runner minutes are billed at a 10x multiplier against the GitHub free
 tier and this is an occasional "cut a release" action, not a per-commit one.
 
-**The runner label is load-bearing and has a deadline.** `macos-15-intel` is
-x86_64, which is the whole point: that binary runs natively on an Intel Mac
-*and* on Apple Silicon via Rosetta 2, while an arm64 binary cannot run on an
-Intel Mac at all, and nobody has established which kind of Mac the academy
-has. The label has been wrong twice — it was `macos-13`, which GitHub made
-fully unsupported in December 2025, and then `macos-14`, which is **arm64**:
-that bump silently inverted the decision while the comment above it still
-said Intel, so the workflow was building a binary that would not start on
-half its possible targets. **GitHub drops x86_64 macOS entirely in August
-2027.** Before then, either find out what the academy's Mac is and move to
-`macos-15`/`macos-26` if it is Apple Silicon, or build on a real Mac.
+**It builds both architectures, and that is the fix for a real failure.** The
+academy's Mac met an x86_64 binary and said:
+
+```
+zsh: bad CPU type in executable: /Users/…/MB Ballet Academy
+```
+
+That error names no cause anyone can act on, **and `error.log` cannot explain
+it** — the process never starts, so `run_app.py` never runs. Worse, it has two
+opposite causes: an arm64 binary on an Intel Mac (impossible, full stop), or an
+x86_64 binary on Apple Silicon **without Rosetta 2** — which is not installed
+by default, and is *not* offered when the binary is launched from Terminal the
+way Finder launches a Unix executable. The written-down reasoning here used to
+be "x86_64 runs everywhere via Rosetta 2", and that is the sentence this
+disproved: it runs everywhere Rosetta 2 is *already there*.
+
+So the matrix builds `macos-15` (arm64) and `macos-15-intel` (x86_64) and
+names each artifact after its architecture. Download the one matching the
+Mac's own `uname -m` and it runs natively, with no Rosetta and nothing to work
+out. `fail-fast: false`, so a broken Intel build still hands over a working
+Apple Silicon one. A `universal2` build would sidestep the question but needs
+every wheel to be universal2, and pydantic-core and pymongo ship
+per-architecture ones.
+
+**Two guards, because this label has been wrong twice.** It was `macos-13`,
+retired by GitHub in December 2025, and then `macos-14`, which is arm64 — that
+bump silently inverted a comment still claiming Intel, and the wrong binary
+only surfaced on the reception Mac. `academy.spec` sets `target_arch=None`, so
+the runner label *is* the choice of target and GitHub may redefine it at any
+time. Each job therefore checks `uname -m` against what the matrix asked for
+before building, and `lipo -archs` on the finished binary after — the first
+would have caught the macos-14 bug on the run that introduced it. x86_64 is
+the row with a deadline: **GitHub drops it in August 2027**, which then just
+removes a row.
+
+`build_mac.sh` prints the same thing for a local build: which architecture it
+produced, which Macs that runs on, the Rosetta command if it is x86_64, and —
+correcting a promise it used to make — that a CPU-type error leaves no
+`error.log` to read, because nothing ever started.
 
 **It smoke-tests what it built**, because the failure this packaging step
 actually produces is a missing hidden import — uvicorn and starlette load

@@ -23,28 +23,53 @@ permissions:
 
 jobs:
   build:
-    # Intel (x86_64), deliberately not an Apple Silicon label.
-    # academy.spec's target_arch=None builds for whatever the host is, and an
-    # x86_64 build runs natively on Intel Macs AND on Apple Silicon Macs via
-    # Rosetta 2 — the reverse is not true, there is no way to run arm64 code
-    # on an Intel Mac. The reception Mac's exact hardware is not known, so
-    # this is the strictly safer choice.
+    # BOTH architectures, one job each, because guessing wrong produces a
+    # binary that cannot start and says almost nothing about why:
     #
-    # It was `macos-13` when that reasoning was written, then `macos-14`,
-    # and both of those are now wrong in different ways: macos-13 became
-    # fully unsupported in December 2025, and macos-14 is *arm64* — that
-    # change quietly inverted the decision above, so the comment said Intel
-    # while the runner built a binary no Intel Mac can execute at all.
-    # `macos-15-intel` is the label GitHub added for exactly this case.
+    #     zsh: bad CPU type in executable: /…/MB Ballet Academy
     #
-    # It is also the LAST x86_64 macOS image: GitHub drops the architecture
-    # in August 2027. Before then, either find out whether the academy's Mac
-    # is Intel or Apple Silicon and move to `macos-15`/`macos-26` if it is
-    # Apple Silicon, or build on a real Mac. Do not "helpfully" bump this to
-    # an arm64 label without settling that question first.
-    runs-on: macos-15-intel
+    # academy.spec's target_arch=None builds for whatever the host is, so the
+    # runner label *is* the choice of target. That label has been wrong twice
+    # already -- `macos-13` (retired by GitHub in December 2025) and then
+    # `macos-14`, which is arm64 and silently inverted a comment that still
+    # claimed Intel. A universal2 build would avoid the question, but it needs
+    # every wheel to be universal2 and pydantic-core and pymongo ship
+    # per-architecture ones, so it is not available here.
+    #
+    # Building both and naming each artifact after its architecture is what
+    # settles it instead: download the one matching `uname -m` on the Mac and
+    # it runs natively, with no Rosetta 2 and nothing to work out. x86_64 is
+    # the one with a deadline -- GitHub drops it in August 2027, and that
+    # just removes a row from this matrix.
+    strategy:
+      # One architecture failing must not cancel the other: a broken Intel
+      # build should still hand over a working Apple Silicon one.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64          # Apple Silicon: M1 and later
+          - runner: macos-15-intel
+            arch: x86_64         # Intel Macs
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check the runner is the architecture we asked for
+        # The guard that would have caught the macos-14 bug on the run that
+        # introduced it, rather than on the reception Mac weeks later. A
+        # runner label is GitHub's to redefine, and this build's only way of
+        # choosing a target is which machine it runs on.
+        run: |
+          got=$(uname -m)
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "Runner ${{ matrix.runner }} reports $got, not ${{ matrix.arch }}."
+            echo "GitHub has changed what that label means. Fix the matrix"
+            echo "rather than shipping a binary for the wrong architecture."
+            exit 1
+          fi
+          echo "${{ matrix.runner }} is $got, as expected."
 
       - uses: actions/setup-python@v5
         with:
@@ -112,6 +137,15 @@ jobs:
         # The hidden imports live in academy.spec, not here.
         run: python3 -m PyInstaller academy.spec --clean --noconfirm
 
+      - name: Check the binary is the architecture we asked for
+        # Belt and braces over the runner check: this asks the file itself,
+        # which is the thing that actually reaches the Mac.
+        run: |
+          got=$(lipo -archs "dist/MB Ballet Academy")
+          echo "dist/MB Ballet Academy is: $got"
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "Expected ${{ matrix.arch }}."; exit 1; }
+
       - name: Smoke-test the binary
         # The one failure this build has actually produced, more than once,
         # is a missing hidden import: uvicorn and starlette load modules by
@@ -166,18 +200,22 @@ jobs:
           curl -fsS -o /dev/null "$base/api/dashboard" || {
             echo "The API did not answer — the database did not come up."; exit 1; }
           kill "$pid" 2>/dev/null || true
-          echo "The binary starts, serves the kiosk and the admin, and answers the API."
+          echo "The ${{ matrix.arch }} binary starts natively on a ${{ matrix.arch }} Mac,"
+          echo "serves the kiosk and the admin, and answers the API."
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mb-ballet-academy-macos
+          # The architecture is in the name on purpose. Two downloads that
+          # look identical is how the wrong one ends up on the Mac, and the
+          # error it gives there names no cause you can act on.
+          name: mb-ballet-academy-macos-${{ matrix.arch }}
           path: dist/MB Ballet Academy
 
       - name: Logs, if it went wrong
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
+          name: build-logs-${{ matrix.arch }}
           path: |
             dist/run.log
             dist/error.log
