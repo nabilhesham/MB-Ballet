@@ -30,6 +30,18 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
   const save = async () => {
     setErr('');
     if (!name.trim()) return toast('Name is required', 'bad');
+    // Checked here as well as server-side, the same split every other rule
+    // in this app uses: the form answers without a round trip, the endpoint
+    // refuses independently. The sentences are kept identical to
+    // access.phone_required()'s, so reception never sees the rule worded two
+    // ways for one mistake.
+    if (!phone.trim()) {
+      return setErr('A mobile number is required — it is what identifies a client.');
+    }
+    if (phone.replace(/\D/g, '').length < 8) {
+      return setErr('That does not look like a mobile number. It identifies the '
+                    + 'client, so it has to be the real one.');
+    }
     const body = {
       name_en: name, phone, age: age === '' ? null : Number(age),
       school, joined_on: joined, notes,
@@ -62,8 +74,12 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
         <div>
           <label>MOBILE NUMBER</label>
           {/* Identity, not just a contact detail: two clients may share a
-              name but never a number. Still optional — reception does not
-              always have one when a client is first written down. */}
+              name but never a number, and a client with none cannot be told
+              apart from the next client with none. Required for that reason
+              — including when editing, or it could be cleared a minute after
+              being demanded. Unmarked, like FULL NAME above: this form has
+              never carried required-field markers and adding one to half the
+              required fields would read as the other half being optional. */}
           <input type="tel" inputMode="tel" value={phone}
                  onChange={e => { setPhone(e.target.value); setErr(''); }}
                  placeholder="01001234567" />

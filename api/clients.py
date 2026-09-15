@@ -20,6 +20,11 @@ router = APIRouter()
 # ---------------------------------------------------------------- models
 class ClientIn(BaseModel):
     name_en: str
+    # Mandatory — the mobile number is what identifies a client — but
+    # deliberately still Optional here so the refusal is ours. A required
+    # pydantic field answers a missing key with a 422 whose detail is a list
+    # of dicts, and this project's rule is that a refusal is a sentence a
+    # receptionist can read. access.phone_required() is that sentence.
     phone: Optional[str] = None
     # Float, not int: the roster sheets carry "4.8" and reception needs to
     # type 3.5 for the youngest children. An int field here does not round a
@@ -103,10 +108,15 @@ def list_clients(q: str = "", status: str = "all"):
 @router.post("/api/clients")
 def create_client(body: ClientIn):
     """
-    The mobile number is the client's identity, so a number already in the
-    database is a refusal rather than a second profile — see
-    access.phone_conflict() for why, and for why a blank one is still fine.
+    The mobile number is the client's identity, which makes it two refusals
+    rather than one: it is required (access.phone_required()), and a number
+    another client already holds is a refusal rather than a second profile
+    (access.phone_conflict()). In that order — a blank number has nothing to
+    compare, so checking uniqueness first would let it through.
     """
+    missing = access.phone_required(body.phone)
+    if missing:
+        raise HTTPException(400, missing)
     repo = data.connect()
     try:
         clash = access.phone_conflict(repo, body.phone)
@@ -207,12 +217,24 @@ def plan_sessions(cid: int, pid: int):
 @router.put("/api/clients/{cid}")
 def update_client(cid: int, body: ClientIn):
     """
-    Same identity rule as create_client(), excluding this client — their own
-    number is not a duplicate of itself. Editing had to be covered too or the
-    rule would only be half true: refusing at creation and then allowing the
-    number to be typed over somebody else's a minute later leaves exactly the
-    two-profiles-one-person state the refusal exists to prevent.
+    Same two rules as create_client(), excluding this client — their own
+    number is not a duplicate of itself. Editing had to be covered too or
+    neither rule would be more than half true: refusing at creation and then
+    allowing the number to be typed over somebody else's a minute later
+    leaves exactly the two-profiles-one-person state the refusal exists to
+    prevent, and allowing it to be *cleared* a minute later gives back the
+    client with no identity that requiring it removed.
+
+    The one cost, written down because it is what reception will meet: a
+    client seeded from a roster sheet that never carried a number cannot be
+    saved from this form until somebody types one in. That is deliberate —
+    it is the moment the missing number is actually askable, with the client
+    on the screen — but it does mean an unrelated edit to such a profile
+    asks for the number too.
     """
+    missing = access.phone_required(body.phone)
+    if missing:
+        raise HTTPException(400, missing)
     repo = data.connect()
     try:
         clash = access.phone_conflict(repo, body.phone, exclude_id=cid)

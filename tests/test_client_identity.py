@@ -70,9 +70,10 @@ def test_the_same_number_written_differently_is_still_refused(repo, academy):
 
 def test_a_blank_number_is_never_a_conflict(repo, academy):
     """
-    Reception does not always have a number when a client is first written
-    down, and refusing to create anybody without one would be a worse rule
-    than the one being fixed. Several such clients may coexist.
+    True of phone_conflict() alone, and exactly why phone_required() had to
+    exist: with nothing to compare, two blanks are not duplicates of each
+    other and never would be. The routes refuse a blank before they get
+    here — see the route tests below.
     """
     for blank in (None, "", "   "):
         assert access.phone_conflict(repo, blank) is None
@@ -110,7 +111,8 @@ def client(academy):
         yield c
 
 
-def _new(name="Test Person", phone=None):
+def _new(name="Test Person", phone="01555000111"):
+    """A number by default: a client without one is refused outright now."""
     return {"name_en": name, "phone": phone, "joined_on": date.today().isoformat()}
 
 
@@ -131,10 +133,66 @@ def test_a_free_number_still_creates(client):
     assert r.json()["id"]
 
 
-def test_two_clients_with_no_number_are_both_allowed(client):
-    """A missing number is not a shared one."""
-    assert client.post("/api/clients", json=_new("One")).status_code == 200
-    assert client.post("/api/clients", json=_new("Two")).status_code == 200
+def test_a_client_cannot_be_created_without_a_number(client):
+    """
+    The number is the identity, so there is no client without one. Two
+    clients with no number are not duplicates of each other — nothing to
+    compare — which is the hole requiring it closes.
+    """
+    for body in ({"name_en": "No Phone"},
+                 {"name_en": "No Phone", "phone": ""},
+                 {"name_en": "No Phone", "phone": "   "}):
+        r = client.post("/api/clients", json=body)
+        assert r.status_code == 400
+        assert "required" in r.json()["detail"]
+
+
+def test_a_placeholder_is_not_a_number(client):
+    """
+    A required field that accepts "n/a" is not required in any sense that
+    matters: it carries no identity, and several clients could hold the same
+    placeholder without any of them conflicting.
+    """
+    for junk in ("n/a", "-", "none", "0", "123", "0111"):
+        r = client.post("/api/clients", json=_new(phone=junk))
+        assert r.status_code == 400, junk
+        assert "does not look like" in r.json()["detail"]
+
+
+def test_a_real_number_of_any_shape_is_accepted(client):
+    """
+    The shape check has to be loose enough for a real number written any of
+    the ways reception writes one, including a foreign one. A distinct
+    number per shape, because the same number written two ways is one
+    number — which is the next test.
+    """
+    for i, good in enumerate(("01012345671", "0101 234 5672", "+201012345673",
+                              "+44 7700 900123", "1012345674")):
+        r = client.post("/api/clients", json=_new(f"Person {i}", good))
+        assert r.status_code == 200, good
+
+
+def test_the_shape_check_does_not_let_a_duplicate_through(client):
+    """
+    The two rules run in order and both apply: a well-shaped number that
+    somebody already holds is still refused, whichever way it is written.
+    """
+    assert client.post("/api/clients",
+                       json=_new("First", "01012345675")).status_code == 200
+    r = client.post("/api/clients", json=_new("Second", "+20 101 234 5675"))
+    assert r.status_code == 409
+    assert "First" in r.json()["detail"]
+
+
+def test_a_number_cannot_be_cleared_by_an_edit(client):
+    """
+    Otherwise the requirement lasts exactly as long as it takes to press
+    Edit, and the client is back to having no identity.
+    """
+    cid = client.academy.solo_ballet
+    r = client.put(f"/api/clients/{cid}", json={"name_en": "Farah Adel", "phone": ""})
+    assert r.status_code == 400
+    assert client.get(f"/api/clients/{cid}").json()["phone"] == "01111111112"
 
 
 def test_nothing_is_written_when_the_number_is_refused(client):

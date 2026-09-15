@@ -293,6 +293,37 @@ def can_freeze(sub) -> tuple:
 
 
 # ---------------------------------------------------------------- identity
+def phone_required(phone) -> str | None:
+    """
+    The sentence to refuse with when there is no usable number, or None.
+
+    The mobile number identifies the client, so it is mandatory — a client
+    with no number cannot be told apart from the next client with no number,
+    and phone_conflict() below has nothing to compare, which means two of
+    them are not duplicates of each other and never will be. Making it
+    required is what closes that.
+
+    "Usable" is doing work here. A required field that accepts "n/a" is not
+    required in any sense that matters: it would be satisfied by something
+    carrying no identity, and several clients could hold the same placeholder
+    without any of them conflicting. phones.looks_like_a_number() is the
+    test, and phones.MIN_DIGITS records where the line is and why.
+
+    The seed does **not** go through this. `seed.py` inserts clients
+    directly, and it must: the roster sheets are the business record, and
+    refusing to import a student because nobody wrote her number down would
+    lose her. So a seeded database can legitimately hold a client with no
+    number, and editing that client from the profile is where reception is
+    asked for one.
+    """
+    if not str(phone or "").strip():
+        return "A mobile number is required — it is what identifies a client."
+    if not phones.looks_like_a_number(phone):
+        return ("That does not look like a mobile number. It identifies the "
+                "client, so it has to be the real one.")
+    return None
+
+
 def phone_conflict(repo, phone, exclude_id=None) -> str | None:
     """
     The sentence to refuse a client with, or None if the number is free.
@@ -307,10 +338,13 @@ def phone_conflict(repo, phone, exclude_id=None) -> str | None:
     Like can_freeze(), it is the single answer to the question, so the form
     and the endpoint cannot drift apart — both refuse with this sentence.
 
-    A blank number is never a conflict. Reception does not always have one
-    at the moment a client is written down, and refusing to create anybody
-    without a phone would be a worse rule than the one being fixed. Such a
-    client simply has no identity to check against, exactly as before.
+    A blank number is never a conflict — there is nothing to compare, so
+    two of them are not duplicates of each other. That is exactly why
+    phone_required() exists and why both routes call it *first*: this
+    function alone cannot make a number the identity, it can only stop one
+    being used twice. The clause stays because a caller reaching here with a
+    blank must get a defensible answer rather than an exception, and because
+    seeded clients without numbers are real (see phone_required()).
 
     `exclude_id` is the client being edited: their own number is not a
     duplicate of itself.
