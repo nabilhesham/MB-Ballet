@@ -106,7 +106,7 @@ jobs:
     # MB_DB_BACKEND and the binary would be for a database nobody chose.
     if: github.event_name != 'schedule'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check the runner is the architecture we asked for
         # The guard that would have caught the macos-14 bug on the run that
@@ -422,7 +422,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     name: canary ${{ matrix.arch }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Check the runner is the architecture we asked for
         # The same guard `build` carries, which is most of the point of
