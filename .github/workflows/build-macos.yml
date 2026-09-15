@@ -22,10 +22,50 @@ on:
         type: choice
         default: sqlite
         options: [sqlite, mongo]
+  # For the `canary` job at the bottom, never for `build` -- which carries
+  # an `if:` refusing scheduled runs, because a 10x-billed two-architecture
+  # PyInstaller build once a month is not what this is for.
+  #
+  # 07:00 UTC on the 1st. Cron here is always UTC, never Cairo.
+  schedule:
+    - cron: "0 7 1 * *"
 
 # Nothing here reads or writes the repository beyond checking it out.
 permissions:
   contents: read
+
+# ------------------------------------------------------------------ actions
+#
+# Every `uses:` below is pinned to a major that declares `runs.using: node24`,
+# and that is a deadline, not a preference. GitHub removed Node 20 from the
+# runner images on **23 September 2026**; from 16 June 2026 runners had
+# already been forcing node20 actions onto Node 24 and printing a deprecation
+# warning, which is the only notice this workflow ever got. An action still
+# declaring node20 after that date does not warn -- it fails to start.
+#
+# The versions do NOT line up, and assuming they do is the trap here:
+#
+#     actions/checkout         v4 node20 -> v5 node24 -> v6   (pinned v6)
+#     actions/setup-python     v5 node20 -> v6 node24 -> v7   (pinned v7)
+#     actions/upload-artifact  v4 node20 -> v5 STILL node20
+#                                        -> v6 node24 -> v7   (pinned v7)
+#
+# upload-artifact skips a major: v5 predates the Node 24 move and is still
+# node20, so bumping each action to "the next one" fixes two thirds of the
+# problem and looks finished. Check `runs.using` in the action's own
+# action.yml before trusting a version number here.
+#
+# Two things checked before pinning these: no input this workflow passes was
+# removed (setup-python v7 dropped `pip-install`, which is not used here),
+# and upload-artifact v6+ needs Actions Runner >= 2.327.1, which the
+# GitHub-hosted images have and a self-hosted runner might not.
+#
+# upload-artifact v7's new `archive: false` is NOT a replacement for the tar
+# step further down. The tar exists so the executable bit survives, and a
+# mode can only travel inside an archive that carries one -- a raw
+# single-file upload has nowhere to put it.
+#
+# `.github/dependabot.yml` is what notices the next one of these in time.
 
 jobs:
   build:
@@ -59,8 +99,14 @@ jobs:
             arch: x86_64         # Intel Macs
     runs-on: ${{ matrix.runner }}
     name: ${{ matrix.arch }}
+    # The schedule above exists for `canary` only. Without this, every cron
+    # would run two full macOS PyInstaller builds at a 10x billing
+    # multiplier, and it would also run them with no `backend` input --
+    # a scheduled event carries none, so the .env step would write an empty
+    # MB_DB_BACKEND and the binary would be for a database nobody chose.
+    if: github.event_name != 'schedule'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Check the runner is the architecture we asked for
         # The guard that would have caught the macos-14 bug on the run that
@@ -77,7 +123,7 @@ jobs:
           fi
           echo "${{ matrix.runner }} is $got, as expected."
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
           # macOS minutes cost 10x, so the dependency download is worth
@@ -248,7 +294,7 @@ jobs:
               -C dist "MB Ballet Academy"
           ls -l "mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           # The architecture is in the name on purpose. Two downloads that
           # look identical is how the wrong one ends up on the Mac, and the
@@ -318,10 +364,115 @@ jobs:
 
       - name: Logs, if it went wrong
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: build-logs-${{ matrix.arch }}
           path: |
             dist/run.log
             dist/error.log
           if-no-files-found: ignore
+
+  # ================================================================ canary
+  #
+  # The cheap monthly proof that the job above still *can* run, on a day
+  # nobody needed it to.
+  #
+  # Three things have now changed under this workflow while nobody was
+  # looking -- `macos-13` retired, `macos-14` silently meaning arm64, and
+  # Node 20 removed from the runner images on 23 September 2026 -- and all
+  # three surfaced on the reception Mac rather than here. One cause:
+  # `build` is manual-only, correctly, so nothing exercises it between
+  # releases and the breakage always lands on the day somebody urgently
+  # needs a binary.
+  #
+  # So this runs the fragile half and stops: check out, prove the runner
+  # label still means the architecture the matrix claims, set Python up,
+  # upload something. No PyInstaller, no smoke test -- about a minute of
+  # wall clock, which at the 10x multiplier across two architectures is
+  # roughly 20-40 billed minutes a month, one to two percent of the
+  # free-tier quota. Change the cron to "0 7 1 */3 *" for quarterly if even
+  # that is unwanted; the cost of quarterly is a blind window three times
+  # as wide.
+  #
+  # Deliberately on the real macOS labels rather than ubuntu, even though
+  # ubuntu would bill at 1x: a canary that does not use the same runner
+  # labels cannot catch a retired or redefined label, which is the failure
+  # that has actually happened twice.
+  #
+  # WHAT IT DOES NOT COVER: `academy.spec`'s hidden imports, PyInstaller
+  # itself, and whether the binary starts. Those need the real build --
+  # which is what the smoke test in `build` is for. This only says the
+  # scaffolding still holds.
+  #
+  # NOTE the runner list below is a second copy of `build`'s matrix. The
+  # same deliberate double as the .env parser in config.py and
+  # academy.spec -- KEEP THE TWO IN STEP. If they drift, this job fails
+  # with "no runner matching the labels", which points straight at the
+  # drift rather than hiding it, so the failure mode is loud.
+  canary:
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    name: canary ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check the runner is the architecture we asked for
+        # The same guard `build` carries, which is most of the point of
+        # running this on the real labels.
+        run: |
+          got=$(uname -m)
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "Runner ${{ matrix.runner }} reports $got, not ${{ matrix.arch }}."
+            echo "GitHub has changed what that label means. Fix the matrix in"
+            echo "BOTH jobs in this file before cutting another release --"
+            echo "a build from here would be for the wrong architecture and"
+            echo "would fail on the Mac with 'bad CPU type in executable'."
+            exit 1
+          fi
+          echo "${{ matrix.runner }} is $got, as expected."
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Prove Python is the version the build assumes
+        # If '3.11' ever stops being available on the image, the real build
+        # would either fail here or quietly embed something else in the
+        # binary reception runs.
+        run: |
+          python3 -VV
+          python3 -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
+
+      - name: Upload something, to exercise the artifact path
+        # upload-artifact is the action whose majors do not line up with the
+        # others (see the note at the top), so it is the one most worth
+        # actually invoking rather than assuming.
+        run: echo "canary ${{ matrix.arch }} $(date -u +%FT%TZ)" > canary.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: canary-${{ matrix.arch }}
+          path: canary.txt
+          retention-days: 1
+
+      - name: Say what this run proved
+        run: |
+          {
+            echo "### Canary — ${{ matrix.arch }}"
+            echo
+            echo "\`${{ matrix.runner }}\` is still $(uname -m), it carries"
+            echo "$(python3 -V), and checkout / setup-python /"
+            echo "upload-artifact all still start. Cutting a release from"
+            echo "this workflow should work."
+            echo
+            echo "This did **not** build or run a binary. See the \`build\`"
+            echo "job for that."
+          } >> "$GITHUB_STEP_SUMMARY"

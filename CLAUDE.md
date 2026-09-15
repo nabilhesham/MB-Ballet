@@ -260,13 +260,17 @@ build_linux.sh    Same thing, run once on Linux, for a Linux binary. Same
                   binary on a real GitHub-hosted Mac, for anyone who needs a
                   ready-to-run Mac build without access to a Mac. Download
                   the result from the finished run's Artifacts, or
-                  `gh run download`. Runs on macos-15-intel (x86_64),
-                  deliberately not an arm64 label — an x86_64 build runs on
-                  Intel Macs natively and on Apple Silicon Macs via Rosetta
-                  2, the reverse isn't true, and the reception Mac's
-                  hardware isn't known. It also smoke-tests the binary it
-                  built. See the runner note below; do not bump this to an
-                  arm64 label without reading it.
+                  `gh run download`. Builds **both** architectures --
+                  macos-15 (arm64) and macos-15-intel (x86_64) -- because
+                  x86_64 needs Rosetta 2 to be *already installed* on
+                  Apple Silicon and it is not there by default; see the
+                  runner note below before touching either label. It also
+                  smoke-tests the binary it built, and carries a second,
+                  cheap `canary` job on a monthly cron -- see the
+                  deprecation note below.
+  dependabot.yml  Opens one grouped pull request when a GitHub Action
+                  publishes a new version. github-actions only: Python and
+                  npm are deliberately excluded -- see the file.
 academy.spec      PyInstaller build definition, shared by all three build
                   scripts above. Hidden imports live here, and so does
                   the step that bakes this folder's .env into the
@@ -526,6 +530,61 @@ before building, and `lipo -archs` on the finished binary after — the first
 would have caught the macos-14 bug on the run that introduced it. x86_64 is
 the row with a deadline: **GitHub drops it in August 2027**, which then just
 removes a row.
+
+**Every action is pinned to a major that runs on Node 24, and that is a
+deadline rather than a preference.** GitHub removed Node 20 from the runner
+images on **23 September 2026**. From 16 June 2026 runners had already been
+forcing node20 actions onto Node 24 and printing a deprecation warning,
+which was the only notice this workflow ever got; after that date an action
+still declaring `runs.using: node20` does not warn, it fails to start.
+
+**The majors do not line up, and assuming they do is the trap.**
+`actions/upload-artifact@v5` is **still node20** -- it predates the move --
+so bumping each action to "the next one" fixes two thirds of the problem and
+looks finished. The pins are `checkout@v6`, `setup-python@v7`,
+`upload-artifact@v7`; check `runs.using` in an action's own `action.yml`
+before trusting any version number. Two things were checked before pinning
+them: no input this workflow passes was removed (setup-python v7 dropped
+`pip-install`, unused here), and upload-artifact v6+ needs Actions Runner
+>= 2.327.1, which the hosted images have and a self-hosted one might not.
+Note also that `upload-artifact@v7`'s new `archive: false` is **not** a
+replacement for the tar step below -- a file mode can only travel inside an
+archive that carries one.
+
+**Two mechanisms now notice the next one of these, because three have
+already been missed.** `macos-13` retired, `macos-14` silently meaning
+arm64, and this Node removal all surfaced on the reception Mac rather than
+in CI, and they share one cause: this workflow is `workflow_dispatch`-only,
+correctly, so nothing exercises it between releases and the breakage always
+lands on the day somebody urgently needs a binary.
+
+- **`.github/dependabot.yml`** opens one grouped PR when an action
+  publishes a new version -- months of warning for the Node 24 majors. It
+  costs no Actions minutes, running on GitHub's own infrastructure.
+- **The `canary` job** runs monthly (`0 7 1 * *`, UTC) and does only the
+  fragile half: check out, prove the runner label still means the
+  architecture the matrix claims, set Python up and confirm it is 3.11,
+  upload something. No PyInstaller and no smoke test, so about a minute of
+  wall clock -- roughly 20-40 billed minutes a month across two
+  architectures at the 10x multiplier, one to two percent of the free-tier
+  quota. `"0 7 1 */3 *"` makes it quarterly, at the price of a blind window
+  three times as wide.
+
+  It runs on the **real macOS labels** rather than a 1x ubuntu runner
+  deliberately: a canary not using the same labels cannot catch a retired
+  or redefined one, which is the failure that has actually happened twice.
+  `build` carries `if: github.event_name != 'schedule'` so a cron can never
+  trigger the expensive build -- which would also arrive with no `backend`
+  input, since a scheduled event carries none. The canary's runner list is
+  a second copy of `build`'s matrix, the same deliberate double as the
+  `.env` parser: **keep the two in step.** If they drift the canary fails
+  with "no runner matching the labels", which points at the drift rather
+  than hiding it.
+
+  GitHub disables scheduled workflows in a repository that has seen no
+  activity for around 60 days, mailing the owner. This repository is quiet
+  between terms, so if the canary goes silent that is the first thing to
+  check -- it is re-enabled from the Actions tab.
 
 **The artifact is a `.tar.gz`, not the bare binary, and that is not
 packaging taste.** `upload-artifact` builds the zip itself and its own docs
@@ -1673,6 +1732,13 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       almost all of it round-trip latency at ~100ms a call. It is opt-in
       (`MB_TEST_MONGO_URI`) for that reason. A local replica set would be
       faster if this starts getting run often.
+- [ ] Dated deadlines this repository is carrying, so they are in one
+      place: **GitHub drops the x86_64 macOS runner in August 2027**, which
+      just removes a row from `build-macos.yml`'s matrix (and ends Intel Mac
+      support with it). Node 20 was removed from the runners on 23 September
+      2026 and is already handled -- see the deprecation note in the Files
+      section. `.github/dependabot.yml` plus the monthly canary job are what
+      should surface the next one without it being on this list first.
 - [ ] Auto-start on boot, and disable laptop sleep / lid-close suspend.
 - [ ] Key rotation: single secret. Changing it kills every printed card at once.
       Needs an accepted-keys list with an overlap window.
