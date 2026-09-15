@@ -1,0 +1,50 @@
+# What notices the next deprecation in time.
+#
+# This repository has been caught three times by something changing under
+# .github/workflows/build-macos.yml -- `macos-13` retired, `macos-14`
+# silently meaning arm64, and Node 20 removed from the runner images on 23
+# September 2026 -- and every one of them surfaced on the reception Mac
+# rather than in CI. They share a cause: that workflow is
+# `workflow_dispatch`-only (correctly, since macOS minutes bill at 10x), so
+# nothing exercises it until somebody urgently needs a release binary. The
+# gap between "GitHub changed something" and "we found out" is however long
+# that happens to be.
+#
+# Dependabot closes half of that gap: it opens a pull request when an action
+# publishes a new version, which for the Node 24 majors was months before
+# the deadline. The other half is the monthly canary job in
+# build-macos.yml, which proves the workflow still runs on a day nobody
+# needed it to.
+#
+# It costs no Actions minutes -- Dependabot runs on GitHub's own
+# infrastructure, not on a runner.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One pull request for all of them rather than three. A major bump here
+    # is a five-second read of the diff; three separate PRs for it is the
+    # kind of noise that trains you to ignore the thing you set up to be
+    # noticed.
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 3
+
+  # Python is deliberately NOT here. requirements.txt pins what a build
+  # embeds in the binary reception runs, and an unattended bump to pillow,
+  # pymongo or pydantic is a change to the business record's software with
+  # nobody watching -- the suite runs on a developer's machine, not on a
+  # push. Upgrade those by hand, with `pytest` and a real card scan after.
+  #
+  # npm is not here either, for a stronger reason: the frontend is built
+  # once by hand and its output committed (see CLAUDE.md, Stack). A PR that
+  # bumps a package in frontend/package.json without running `npm run
+  # build` and committing static/app/ ships nothing at all -- the change is
+  # invisible until someone rebuilds, which is exactly the silent no-op
+  # that section warns about.
