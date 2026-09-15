@@ -17,6 +17,7 @@ from datetime import date, datetime, timedelta, time as _t
 
 import db
 import images
+import phones
 import tokens
 
 # Only plans of this size or larger may be frozen. Short packs are meant to be
@@ -289,6 +290,83 @@ def can_freeze(sub) -> tuple:
     if sub["frozen_on"]:
         return False, "already frozen"
     return True, ""
+
+
+# ---------------------------------------------------------------- identity
+def phone_required(phone) -> str | None:
+    """
+    The sentence to refuse with when there is no usable number, or None.
+
+    The mobile number identifies the client, so it is mandatory — a client
+    with no number cannot be told apart from the next client with no number,
+    and phone_conflict() below has nothing to compare, which means two of
+    them are not duplicates of each other and never will be. Making it
+    required is what closes that.
+
+    "Usable" is doing work here. A required field that accepts "n/a" is not
+    required in any sense that matters: it would be satisfied by something
+    carrying no identity, and several clients could hold the same placeholder
+    without any of them conflicting. phones.looks_like_a_number() is the
+    test, and phones.MIN_DIGITS records where the line is and why.
+
+    The seed does **not** go through this. `seed.py` inserts clients
+    directly, and it must: the roster sheets are the business record, and
+    refusing to import a student because nobody wrote her number down would
+    lose her. So a seeded database can legitimately hold a client with no
+    number, and editing that client from the profile is where reception is
+    asked for one.
+    """
+    if not str(phone or "").strip():
+        return "A mobile number is required — it is what identifies a client."
+    if not phones.looks_like_a_number(phone):
+        return ("That does not look like a mobile number. It identifies the "
+                "client, so it has to be the real one.")
+    return None
+
+
+def phone_conflict(repo, phone, exclude_id=None) -> str | None:
+    """
+    The sentence to refuse a client with, or None if the number is free.
+
+    The mobile number is what identifies a client — the seed has always
+    merged the roster sheets on it rather than on the spelling of a name,
+    and this is the same rule applied to a client typed in by hand. Two
+    profiles for one person is not a tidiness problem: their sessions,
+    their plans and their cards divide between the two records, so a card
+    scans against a balance that is only half of what they bought.
+
+    Like can_freeze(), it is the single answer to the question, so the form
+    and the endpoint cannot drift apart — both refuse with this sentence.
+
+    A blank number is never a conflict — there is nothing to compare, so
+    two of them are not duplicates of each other. That is exactly why
+    phone_required() exists and why both routes call it *first*: this
+    function alone cannot make a number the identity, it can only stop one
+    being used twice. The clause stays because a caller reaching here with a
+    blank must get a defensible answer rather than an exception, and because
+    seeded clients without numbers are real (see phone_required()).
+
+    `exclude_id` is the client being edited: their own number is not a
+    duplicate of itself.
+    """
+    key = phones.key(phone)
+    if not key:
+        return None
+    others = [c for c in repo.clients_by_phone_key(key) if c["id"] != exclude_id]
+    if not others:
+        return None
+    c = others[0]
+    who = f"{c['name_en']}, member {c['id']}"
+    if not c["active"]:
+        # Archived, so the number is on somebody who was deliberately put
+        # away rather than somebody on the list. Saying "already exists"
+        # would send reception looking for a client they cannot find, and
+        # the only way out of that is a second profile for one person —
+        # which is the thing this refusal is here to prevent.
+        return (f"That mobile number belongs to {who}, who is archived. "
+                f"Restore them from the Archived list instead of adding "
+                f"them again.")
+    return f"That mobile number already belongs to {who}."
 
 
 # ---------------------------------------------------------------- auto-absent

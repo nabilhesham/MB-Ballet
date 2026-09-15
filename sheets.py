@@ -212,14 +212,6 @@ def phone_of(v) -> str | None:
     return digits
 
 
-def phone_key(p: str | None) -> str | None:
-    """Identity for a phone: the last 10 digits, so 011... and 11... match."""
-    if not p:
-        return None
-    digits = re.sub(r"\D", "", p)
-    return digits[-10:] if len(digits) >= 10 else digits
-
-
 def name_key(n: str) -> str:
     return re.sub(r"\s+", " ", n).strip().lower()
 

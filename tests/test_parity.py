@@ -208,6 +208,15 @@ def test_the_port_methods_agree(built):
         ("class_sessions", lambda r: r.class_sessions(a.ballet, 10)),
         ("search_clients", lambda r: r.search_clients(1, "")),
         ("search_clients q", lambda r: r.search_clients(1, "an")),
+        # The duplicate-number lookup. Both backends compare in Python
+        # rather than in a filter, so this is the only thing holding them
+        # to the same answer -- including on the archived client, whom the
+        # active-only searches above never see.
+        ("clients_by_phone_key", lambda r: r.clients_by_phone_key("1111111111")),
+        ("clients_by_phone_key archived",
+         lambda r: r.clients_by_phone_key("1111111116")),
+        ("clients_by_phone_key miss",
+         lambda r: r.clients_by_phone_key("9999999999")),
         ("client_cards", lambda r: r.client_cards(a.dual)),
         ("client_upcoming", lambda r: r.client_upcoming(a.dual, db.now())),
         ("client_history", lambda r: r.client_history(a.dual, db.now(), 100)),
