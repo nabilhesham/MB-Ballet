@@ -16,6 +16,8 @@ NULL and Mongo's is no group at all; normalising in both places is what stops
 that difference reaching a caller.
 """
 
+import phones
+
 from ..ports import (AccessPort, BookingsPort, ClassesPort, ClientsPort,
                      EventsPort, InstructorsPort, PlansPort, SessionsPort)
 from . import schema
@@ -393,6 +395,16 @@ class MongoClients(ClientsPort, _Helpers):
         rows = self._rows("clients", flt)
         rows.sort(key=lambda r: (r["name_en"] or "", r["id"]))
         return rows
+
+    def clients_by_phone_key(self, key):
+        # Same comparison as the SQLite side, for the same reason: the last
+        # ten digits are not something either backend can filter on. See
+        # repo/sqlite/ports.py.
+        rows = [r for r in self._rows("clients", {})
+                if r.get("phone") and phones.key(r["phone"]) == key]
+        rows.sort(key=lambda r: r["id"])
+        return [{"id": r["id"], "name_en": r["name_en"], "phone": r["phone"],
+                 "active": r["active"]} for r in rows]
 
     def card_counts_bulk(self, client_ids):
         out = {c: 0 for c in client_ids}

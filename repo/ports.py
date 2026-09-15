@@ -146,6 +146,25 @@ class ClientsPort(ABC):
         """
 
     @abstractmethod
+    def clients_by_phone_key(self, key: str) -> list:
+        """
+        Everyone whose mobile number is this one, archived clients included.
+
+        `key` is phones.key() — the last ten digits — because the same person
+        is written down three ways and only that part is common to all of
+        them. Neither backend can express "last ten digits of a column" as a
+        filter, so both compare in Python; that is the point of it being a
+        named question rather than something a caller builds out of the
+        filter dialect.
+
+        Archived rows come back too, and on purpose: a number belonging to an
+        archived client means restore them, not add them a second time, and a
+        lookup that hid them would make the second one the easy path.
+
+        Returns id, name_en, phone and active, ordered by id.
+        """
+
+    @abstractmethod
     def card_counts_bulk(self, client_ids: list) -> dict:
         """How many live cards each client holds. One round trip."""
 

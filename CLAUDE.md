@@ -187,6 +187,12 @@ repo/             The data-access interface and its two implementations.
 db.py             Schema + connection helpers + db.tx(). All tables live
                   here, and the indexes live in a *second* string applied
                   after migrate() -- see the note under Files below.
+phones.py         What counts as a mobile number, and as the same mobile
+                  number -- MIN_DIGITS and the last ten digits. Its own
+                  module, because access.py, both repository backends and
+                  seed.py all need the same answers and a second copy would
+                  drift. No I/O, imports nothing, so it sits under all of
+                  them.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
 cards.py          Member card PNG generation.
@@ -694,7 +700,8 @@ system and everything else follows from it:
   instructor. `api/classes.py`'s `update_class` is the one place that
   cascade happens; `create_session`/`repeat_sessions` are the two places the
   fallback is read. Past and cancelled sessions are never touched by either.
-- **clients** carry `age` as **REAL, not INTEGER** — the roster sheets hold
+- **clients** are identified by their **mobile number**, not their name --
+  see the rule below, and `phones.key()`. They carry `age` as **REAL, not INTEGER** — the roster sheets hold
   "4.8" and "12.5" for the youngest children, and rounding a four-year-old up
   to five loses the distinction the class placement is made on. The whole
   path is float: `sheets.py` parses it with `number()` (deliberately without
@@ -790,6 +797,85 @@ Class membership is derived from bookings. There is no enrolment list, which is
 why the class page shows "students with a booking" rather than a roster.
 
 ### Rules the model enforces
+
+**A client is their mobile number**, which makes it two rules rather than
+one. `POST /api/clients` and `PUT /api/clients/{id}` both refuse a client
+with **no** usable number (400, `access.phone_required()`) and a number
+another client already **holds** (409, `access.phone_conflict()`) — in that
+order, because a blank number has nothing to compare and checking
+uniqueness first would let it straight through. Each is the single answer
+to its question, so the form and the endpoint cannot drift: the same
+sentence the modal shows is the one the endpoint returns, the way
+`can_freeze()` works.
+
+Two profiles for one person is not an untidiness problem: their sessions,
+plans and cards divide between the two records, so a card scans against a
+balance that is half what they bought, and the missing half is invisible
+because the other profile looks perfectly healthy. A client with no number
+at all is the same failure one step earlier — there is nothing to tell them
+apart from the next client with no number, and `phone_conflict()` cannot
+help, because two blanks are not duplicates of each other and never would
+be.
+
+**"Usable" is doing work in that first rule.** A required field that
+accepts `n/a` is not required in any sense that matters: it is satisfied by
+something carrying no identity, and several clients could hold the same
+placeholder without any of them conflicting.
+`phones.looks_like_a_number()` is the test and `phones.MIN_DIGITS` (eight)
+records where the line sits — low enough to admit any real number anywhere,
+an Egyptian mobile being eleven digits and ten without its leading zero,
+high enough to exclude a placeholder or a half-typed one. The field stays
+`Optional[str]` on `ClientIn` **on purpose**: a required pydantic field
+answers a missing key with a 422 whose `detail` is a list of dicts, and a
+refusal here has to be a sentence a receptionist can read.
+
+**The seed does not go through either rule**, and must not. `seed.py`
+inserts clients directly, the roster sheets are the business record, and
+refusing to import a student because nobody wrote her number down would
+lose her. So a seeded database can legitimately hold a client with no
+number — and editing that client from the profile is then the one moment
+the missing number is actually askable, with them on the screen. The cost,
+written where reception meets it: an unrelated edit to such a profile asks
+for the number too.
+
+**The comparison is `phones.key()` — the last ten digits — and is
+deliberately not what gets stored.** The academy's sheets hold one student
+as `1129200365` (Excel ate the leading zero), `01129200365` and
+`+201129200365`. No normalising reconciles the third with the other two,
+because deleting a country code from what somebody wrote down is inventing
+data; the last ten digits reconcile all three and leave the stored text
+exactly as typed, which is what reception reads back and dials. This is the
+same `phones.key()` the seed has always merged the roster sheets on (see
+"Clients are identified by phone" below), and that is the point — a number
+the importer treats as one person must not become two the moment reception
+types it in by hand.
+
+**Neither backend can express "the last ten digits of a column" as a
+filter**, so `clients_by_phone_key()` is a port method and both
+implementations compare in Python. That costs one query, and it is charged
+only when a client is created or their number edited — never on a page
+reception waits for.
+
+**The lookup includes archived clients**, answering with "belongs to Karim
+Nour, who is archived — restore them from the Archived list instead of
+adding them again": a bare "already exists" would send reception looking
+for somebody who is not on the list, and the only way out of that is a
+second profile, which is the thing being prevented.
+
+**Editing is covered as well as creating, and has to be, for both rules.**
+Refusing a duplicate at creation and then allowing the number to be typed
+over somebody else's a minute later leaves exactly the state the refusal
+exists to prevent; demanding a number at creation and then allowing it to
+be *cleared* a minute later gives back the client with no identity that
+requiring it removed. `exclude_id` is what stops a client being a duplicate
+of themselves.
+
+The rule governs new writes only — **it does not retrofit**. A database
+seeded before this shipped can still hold two rows with one number (the
+seed merges on the key, so the sheets themselves will not have produced
+one, but a client typed in twice by hand before now will have). Nothing
+sweeps those up; merging two profiles means deciding which plans, bookings
+and cards survive, which is a decision, not a migration.
 
 **Every plan slot must be assigned to a real session before the plan saves.**
 `POST /api/clients/{id}/plan` rejects a mismatch between `sessions_total` and
@@ -1118,7 +1204,9 @@ their own figure on the dashboard.
 **Clients are identified by phone, not by name.** The same student is "rodaina
 hesham" on one sheet and "rodina hesham" on another. Merging on the last ten
 digits of the mobile is what gives her one profile and two cards rather than
-two half-profiles.
+two half-profiles. `phones.key()` is that comparison, and the admin refuses a
+duplicate client on the same one — see "A client is their mobile number"
+above.
 
 **Attendance on a day the group does not normally meet still creates a
 session.** Those are makeup classes and they really happened. The weekly grid
