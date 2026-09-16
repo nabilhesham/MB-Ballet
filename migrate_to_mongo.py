@@ -46,6 +46,7 @@ from repo.sqlite import SqliteRepo           # noqa: E402
 ORDER = ("instructors", "classes", "sessions", "clients",
          "subscriptions", "freezes", "bookings", "credentials",
          "instructor_hours", "instructor_hour_adjustments", "access_events",
+         "appointments",
          # Last: the photos and cards are the bulkiest rows and the only ones
          # nothing else points at, so an interrupted run leaves a database
          # that is whole apart from its pictures.

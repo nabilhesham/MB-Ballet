@@ -37,7 +37,7 @@ def list_classes(status: str = "active"):
     repo = data.connect()
     try:
         active = 0 if status == "archived" else 1
-        return repo.classes_with_counts(active)
+        return repo.classes_with_counts(active, access.lapsed_cutoff())
     finally:
         repo.close()
 
@@ -90,7 +90,9 @@ def get_class(clid: int):
         if not c:
             raise HTTPException(404, "no such class")
         c["sessions"] = repo.class_sessions(clid, 80)
-        c["students"] = repo.class_students(clid)
+        # A month after their last plan here ran out, a client stops being
+        # a student of this class. Nothing is deleted — see repo/ports.py.
+        c["students"] = repo.class_students(clid, access.lapsed_cutoff())
         return c
     finally:
         repo.close()

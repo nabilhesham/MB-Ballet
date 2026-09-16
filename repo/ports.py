@@ -69,7 +69,7 @@ class SessionsPort(ABC):
 class ClassesPort(ABC):
 
     @abstractmethod
-    def classes_with_counts(self, active: int) -> list:
+    def classes_with_counts(self, active: int, lapsed_before: str) -> list:
         """
         The class list: each class with its default instructor named, how
         many sessions are still ahead of it, and how many distinct clients
@@ -78,6 +78,10 @@ class ClassesPort(ABC):
         Membership is derived from bookings — there is no enrolment list,
         which is why this counts "students with a booking" rather than a
         roster.
+
+        `lapsed_before` applies the same cutoff class_students() does, and
+        has to: a list saying 12 students beside a page showing 8 is worse
+        than either number on its own.
         """
 
     @abstractmethod
@@ -85,10 +89,22 @@ class ClassesPort(ABC):
         """A class's sessions, newest first, with instructor and counts."""
 
     @abstractmethod
-    def class_students(self, class_id: int) -> list:
+    def class_students(self, class_id: int, lapsed_before: str) -> list:
         """
-        Everyone with a booking in this class, with how many slots they have
-        had and how many they attended.
+        Who is currently a student of this class, with how many slots they
+        have had and how many they attended.
+
+        `lapsed_before` is an ISO date from access.lapsed_cutoff(): a client
+        whose every plan in this class ended before it has stopped being a
+        student and is left out. A plan's end is the later of its
+        `expires_on` and the last session it pays for (access.plan_end), and
+        a booking with no plan behind it falls back to its own session's
+        date — the same fallback _decide() makes.
+
+        It filters a read and deletes nothing: the bookings and the
+        attendance stay exactly where they are, which is what keeps this
+        reversible and keeps the history intact. A client with a live or
+        recently-ended plan in the class is unaffected.
         """
 
 
@@ -150,9 +166,11 @@ class ClientsPort(ABC):
         """
         Everyone whose mobile number is this one, archived clients included.
 
-        `key` is phones.key() — the last ten digits — because the same person
-        is written down three ways and only that part is common to all of
-        them. Neither backend can express "last ten digits of a column" as a
+        `key` is identity.phone_key() — the last ten digits — because the
+        same person is written down three ways and only that part is common
+        to all of them. Deliberately phone only: the caller compares the
+        name (see access.duplicate_client), because a shared mobile is
+        ordinary here and several rows legitimately come back. Neither backend can express "last ten digits of a column" as a
         filter, so both compare in Python; that is the point of it being a
         named question rather than something a caller builds out of the
         filter dialect.

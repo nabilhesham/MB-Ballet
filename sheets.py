@@ -212,10 +212,6 @@ def phone_of(v) -> str | None:
     return digits
 
 
-def name_key(n: str) -> str:
-    return re.sub(r"\s+", " ", n).strip().lower()
-
-
 def weekdays_in(t: str) -> list[int]:
     """Weekday numbers named in "sunday - thursday", in calendar order."""
     found = {WEEKDAYS[w] for w in WEEKDAYS if re.search(rf"\b{w}\b", t, re.I)}

@@ -56,3 +56,29 @@ export async function fetchAnyClassSessions(clientId) {
  */
 export const earliestUpcoming = (sessions, n) =>
   sessions.filter(s => !isPast(s)).slice(0, n).map(s => s.id);
+
+/**
+ * The sessions still choosable once an end date has been typed in.
+ *
+ * "Ends on the 20th" and "pays for a session on the 25th" cannot both be
+ * true, so once reception states an end date the list stops offering dates
+ * past it. Inclusive of the day itself — a plan is valid *through* its last
+ * session, so a session on the end date is exactly the normal case.
+ *
+ * `keep` is the ids that must stay visible whatever the date says: in
+ * EditPlan, sessions already marked present or absent are attendance
+ * history and can never be dropped from a plan, so hiding one would leave a
+ * row counted in the total with nothing on screen to explain it.
+ *
+ * Only ever applied when the end date was *typed*, never when it is the
+ * auto-filled one — see the note at its call sites. The auto-fill derives
+ * the date from the picks, so capping on it would mean picking a session
+ * could remove every later session from the list, and the last pick could
+ * never be moved outwards again.
+ */
+export function withinEndDate(sessions, endsOn, keep = []) {
+  if (!endsOn) return sessions;
+  const limit = new Date(`${endsOn}T23:59:59`).getTime() / 1000;
+  if (Number.isNaN(limit)) return sessions;
+  return sessions.filter(s => s.starts_at <= limit || keep.includes(s.id));
+}

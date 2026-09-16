@@ -56,6 +56,10 @@ FIELDS = {
         "expires_on": None, "active": 1, "created_at": None,
         "frozen_on": None, "frozen_until": None, "frozen_days": 0,
     },
+    "appointments": {
+        "name": None, "phone": None, "age": None, "on_date": None,
+        "notes": None, "created_at": None,
+    },
     "freezes": {
         "subscription_id": None, "from_date": None, "until_date": None,
         "ended_on": None, "days_added": None, "released": 0, "reason": None,
@@ -110,6 +114,7 @@ INDEXES = {
     "bookings": [(["client_id", "session_id"], True), (["client_id"], False),
                  (["session_id"], False), (["subscription_id"], False)],
     "freezes": [(["subscription_id"], False)],
+    "appointments": [(["on_date"], False)],
     "instructor_hours": [(["instructor_id", "work_date"], True),
                          (["work_date"], False)],
     "instructor_hour_adjustments": [(["instructor_id", "adjustment_date"], False)],
