@@ -35,6 +35,14 @@ def client(academy):
         yield c
 
 
+# A lapsed cutoff that excludes nobody, for the tests below that are about
+# what deleting a plan does to class membership rather than about the
+# month-after-expiry cutoff. Passing the real access.lapsed_cutoff() here
+# would mix the two rules into one assertion. The cutoff has its own tests
+# in test_lapsed_students.py.
+OLD = "1970-01-01"
+
+
 def at(day_offset: int, hour: int, minute: int = 0) -> int:
     d = date.today() + timedelta(days=day_offset)
     return int(datetime.combine(d, time(hour, minute)).timestamp())
@@ -399,11 +407,11 @@ def test_deleting_a_plan_takes_the_client_off_the_class(client):
     repo.insert("bookings", {
         "client_id": a.dual, "session_id": ahead["id"], "subscription_id": old_plan,
         "status": "booked", "created_at": db.now()})
-    assert any(s["id"] == a.dual for s in repo.class_students(a.ballet))
+    assert any(s["id"] == a.dual for s in repo.class_students(a.ballet, OLD))
 
     r = client.delete(f"/api/plans/{a.dual_ballet_plan}").json()
     assert r["released"] == 1
-    assert not any(s["id"] == a.dual for s in repo.class_students(a.ballet)), \
+    assert not any(s["id"] == a.dual for s in repo.class_students(a.ballet, OLD)), \
         "still listed as a student of a class they were just removed from"
     # The slot went back to the plan that paid for it rather than vanishing.
     assert access.plan_state(repo, old_plan)["unassigned"] == 4
@@ -413,7 +421,7 @@ def test_the_other_class_keeps_its_student(client):
     """Deleting the ballet plan says nothing about flexibility."""
     a = client.academy
     client.delete(f"/api/plans/{a.dual_ballet_plan}")
-    assert any(s["id"] == a.dual for s in a.repo.class_students(a.flex))
+    assert any(s["id"] == a.dual for s in a.repo.class_students(a.flex, OLD))
 
 
 def test_a_live_plan_in_the_class_keeps_them_in_it(client):
@@ -436,7 +444,7 @@ def test_a_live_plan_in_the_class_keeps_them_in_it(client):
 
     r = client.delete(f"/api/plans/{a.dual_ballet_plan}").json()
     assert r["released"] == 0 and r["cards_revoked"] == 0
-    assert any(s["id"] == a.dual for s in repo.class_students(a.ballet))
+    assert any(s["id"] == a.dual for s in repo.class_students(a.ballet, OLD))
 
 
 def test_attendance_in_the_class_is_never_released(client):

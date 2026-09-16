@@ -36,6 +36,7 @@ from api.sessions import router as sessions_router
 from api.access_routes import router as access_router
 from api.dashboard import router as dashboard_router
 from api.images import router as images_router
+from api.appointments import router as appointments_router
 
 # --------------------------------------------------------------------------
 # Paths.
@@ -70,6 +71,7 @@ app.include_router(sessions_router)
 app.include_router(access_router)
 app.include_router(dashboard_router)
 app.include_router(images_router)
+app.include_router(appointments_router)
 
 
 @app.on_event("startup")

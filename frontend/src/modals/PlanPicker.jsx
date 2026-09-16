@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { api } from '../api';
 import { isoDay, todayISO } from '../lib/format';
-import { earliestUpcoming, fetchPlanSessions } from '../lib/planSessions';
+import { earliestUpcoming, fetchPlanSessions, withinEndDate } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import ClassPick from '../components/ClassPick';
@@ -55,6 +55,23 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       (m, s) => (chosen.includes(s.id) && s.starts_at > m ? s.starts_at : m), 0);
     setEndsOn(last ? isoDay(last) : '');
   }, [chosen, sessions, endsTouched]);
+
+  // Sessions past a *typed* end date are not offered: "ends on the 20th" and
+  // "pays for a session on the 25th" cannot both be true. Deliberately not
+  // applied to the auto-filled date — that one follows the picks, so capping
+  // on it would let one pick hide every later session and make the last pick
+  // impossible to move outwards again.
+  const offered = endsTouched ? withinEndDate(sessions, endsOn) : sessions;
+
+  // Anything the cap just excluded is unticked rather than left counted-but-
+  // invisible: "12 of 12 chosen" beside a list that cannot show 12 is the
+  // kind of disagreement nobody can debug from the screen.
+  useEffect(() => {
+    if (!endsTouched) return;
+    const ok = new Set(offered.map(s => s.id));
+    setChosen(c => (c.every(id => ok.has(id)) ? c : c.filter(id => ok.has(id))));
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [endsOn, endsTouched, sessions]);
 
   const onClassChange = id => {
     setClassId(id);
@@ -137,7 +154,11 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
           <label>ENDS ON</label>
           <input type="date" value={endsOn}
                  onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
-          <div className="hint">Follows the sessions picked — type over it to override, until they change again.</div>
+          <div className="hint">
+            {endsTouched
+              ? 'Only sessions on or before this date are offered below.'
+              : 'Follows the sessions picked — type over it to override, until they change again.'}
+          </div>
         </div>
       </div>
       <div className="fieldrow">
@@ -162,10 +183,10 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>{hint}</div>
       <div className="row" style={{ marginBottom: 8 }}>
-        <button className="sm" onClick={() => setChosen(earliestUpcoming(sessions, need))}>Auto-fill earliest</button>
+        <button className="sm" onClick={() => setChosen(earliestUpcoming(offered, need))}>Auto-fill earliest</button>
         <button className="sm" onClick={() => setChosen([])}>Clear</button>
       </div>
-      <SessionPickList sessions={sessions} chosen={chosen} onToggle={toggle} />
+      <SessionPickList sessions={offered} chosen={chosen} onToggle={toggle} />
 
       <div className="acts">
         <button onClick={close}>Cancel</button>

@@ -69,20 +69,23 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
       <div className="fieldrow">
         <div>
           <label>FULL NAME</label>
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Ahmed Hassan" />
+          <input value={name} onChange={e => { setName(e.target.value); setErr(''); }}
+                 placeholder="Ahmed Hassan" />
         </div>
         <div>
           <label>MOBILE NUMBER</label>
-          {/* Identity, not just a contact detail: two clients may share a
-              name but never a number, and a client with none cannot be told
-              apart from the next client with none. Required for that reason
-              — including when editing, or it could be cleared a minute after
-              being demanded. Unmarked, like FULL NAME above: this form has
-              never carried required-field markers and adding one to half the
-              required fields would read as the other half being optional. */}
+          {/* Identity is this AND the name together, so a shared number is
+              fine — a parent enrols two children on one — and the same name
+              on the same number is one person entered twice. Still required
+              on its own: a client with no number cannot be told apart from
+              the next client with no number. Unmarked, like FULL NAME above:
+              this form has never carried required-field markers, and adding
+              one to half the required fields would read as the other half
+              being optional. */}
           <input type="tel" inputMode="tel" value={phone}
                  onChange={e => { setPhone(e.target.value); setErr(''); }}
                  placeholder="01001234567" />
+          <div className="hint">Two clients may share a number — siblings on a parent's mobile.</div>
         </div>
       </div>
       <div className="fieldrow">

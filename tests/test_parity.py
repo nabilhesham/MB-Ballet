@@ -203,8 +203,18 @@ def test_the_port_methods_agree(built):
     a = acs[0]
     checks = [
         ("sessions_in_range", lambda r: r.sessions_in_range(*access.day_bounds())),
-        ("classes_with_counts", lambda r: r.classes_with_counts(1)),
-        ("class_students", lambda r: r.class_students(a.ballet)),
+        ("classes_with_counts", lambda r: r.classes_with_counts(1, "1970-01-01")),
+        # The lapsed cutoff actually filtering, not disabled. Both backends
+        # compute a plan's end in their own way -- a CTE on one, two reads
+        # joined in Python on the other -- so this is the only thing holding
+        # them to the same answer about who is still a student.
+        ("classes_with_counts lapsed",
+         lambda r: r.classes_with_counts(1, access.lapsed_cutoff())),
+        ("class_students lapsed",
+         lambda r: r.class_students(a.ballet, access.lapsed_cutoff())),
+        ("class_students all lapsed",
+         lambda r: r.class_students(a.ballet, "2999-01-01")),
+        ("class_students", lambda r: r.class_students(a.ballet, "1970-01-01")),
         ("class_sessions", lambda r: r.class_sessions(a.ballet, 10)),
         ("search_clients", lambda r: r.search_clients(1, "")),
         ("search_clients q", lambda r: r.search_clients(1, "an")),

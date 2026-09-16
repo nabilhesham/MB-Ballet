@@ -187,9 +187,11 @@ repo/             The data-access interface and its two implementations.
 db.py             Schema + connection helpers + db.tx(). All tables live
                   here, and the indexes live in a *second* string applied
                   after migrate() -- see the note under Files below.
-phones.py         What counts as a mobile number, and as the same mobile
-                  number -- MIN_DIGITS and the last ten digits. Its own
-                  module, because access.py, both repository backends and
+identity.py       What makes two client records the same person: the mobile
+                  number AND the name. MIN_DIGITS, the last ten digits
+                  (phone_key) and how a name is folded (name_key). Its own
+                  module -- it was phones.py until the name became half the
+                  rule -- because access.py, both repository backends and
                   seed.py all need the same answers and a second copy would
                   drift. No I/O, imports nothing, so it sits under all of
                   them.
@@ -202,7 +204,7 @@ server.py         FastAPI app, paths, startup, cache policy, static mounts.
 api/              One router module per resource, wired into server.py with
                   ordinary static imports (clients.py, plans.py,
                   classes.py, instructors.py, sessions.py, access_routes.py,
-                  dashboard.py, images.py).
+                  dashboard.py, images.py, appointments.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
 seed.py           Wipes academy.db and rebuilds it from sheets/. --force
                   required. Always SQLite, whatever MB_DB_BACKEND says —
@@ -211,16 +213,17 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                   for the build-once-commit-the-output model.
   src/views/       One file per route: Dashboard, Calendar, Classes,
                    ClassDetail, Instructors, InstructorDetail, Cards, Sessions,
-                   SessionDetail, Clients, ClientDetail.
+                   SessionDetail, Clients, ClientDetail, Appointments.
   src/modals/      Every modal, one file each, imported by the view(s) that
                    open it. There is no AddStudents: booking is done from
                    the client's profile, not the session — see below.
   src/components/  Shell (sidebar/topbar/drawer), DataTable, Modal/ConfirmModal,
                    Toast, Avatar, Pill, Empty, ClassPick (the searchable
                    class list both plan pickers choose from).
-  src/lib/         format.js (timestamp -> what a receptionist reads) and
-                   planSessions.js (the window a plan's slots are filled
-                   from — see the three-weeks-back rule below).
+  src/lib/         format.js (timestamp -> what a receptionist reads, and
+                   fmtISODay for a calendar-day column) and planSessions.js
+                   (the window a plan's slots are filled from — see the
+                   three-weeks-back rule and the ENDS ON cap below).
 static/app/       Committed build output of frontend/ — what server.py
                   actually serves at `/`. Regenerate with `npm run build`
                   after any `frontend/src/` change; see Stack above.
@@ -759,8 +762,8 @@ system and everything else follows from it:
   instructor. `api/classes.py`'s `update_class` is the one place that
   cascade happens; `create_session`/`repeat_sessions` are the two places the
   fallback is read. Past and cancelled sessions are never touched by either.
-- **clients** are identified by their **mobile number**, not their name --
-  see the rule below, and `phones.key()`. They carry `age` as **REAL, not INTEGER** — the roster sheets hold
+- **clients** are identified by their **mobile number and their name
+  together**, not by either alone -- see the rule below, and `identity.py`. They carry `age` as **REAL, not INTEGER** — the roster sheets hold
   "4.8" and "12.5" for the youngest children, and rounding a four-year-old up
   to five loses the distinction the class placement is made on. The whole
   path is float: `sheets.py` parses it with `number()` (deliberately without
@@ -827,6 +830,21 @@ system and everything else follows from it:
   is not a claim of an extra day worked.
 - **credentials** carry a `class_id`. A client taking two classes holds two
   cards; scanning the Ballet card looks only for a Ballet session.
+- **appointments** are enquiries, and are deliberately **not** clients and
+  carry **no foreign key** onto them. Most are strangers who rang up, and
+  the whole value of the list is the people who have *not* been written down
+  as clients yet — so the row holds its own `name`, `phone` and `age`
+  (`REAL`, for the same reason `clients.age` is), which is all reception has
+  when the phone rings. `on_date` is an ISO day, not a timestamp: reception
+  writes "Tuesday" down, not 16:30, and a day column is what makes the
+  list's date range need no end-of-day arithmetic (contrast the Sessions
+  list, where it does). If the person turns up and enrols, a client is
+  created separately and this row stays as the record of the enquiry.
+
+  **None of the client identity rules reach it**, and that is a decision
+  rather than an omission: the mobile is optional and may repeat, because
+  the same family rings twice about two children and the same person
+  reschedules. There is no uniqueness rule here at all.
 
 **The class is the spine.** A plan is bought for one class, may only be
 assigned to that class's sessions, and is proved by that class's card:
@@ -857,30 +875,43 @@ why the class page shows "students with a booking" rather than a roster.
 
 ### Rules the model enforces
 
-**A client is their mobile number**, which makes it two rules rather than
-one. `POST /api/clients` and `PUT /api/clients/{id}` both refuse a client
-with **no** usable number (400, `access.phone_required()`) and a number
-another client already **holds** (409, `access.phone_conflict()`) — in that
-order, because a blank number has nothing to compare and checking
-uniqueness first would let it straight through. Each is the single answer
-to its question, so the form and the endpoint cannot drift: the same
-sentence the modal shows is the one the endpoint returns, the way
-`can_freeze()` works.
+**A client is their mobile number *and* their name, together**, which makes
+it two rules rather than one. `POST /api/clients` and `PUT
+/api/clients/{id}` both refuse a client with **no** usable number (400,
+`access.phone_required()`) and a **name-plus-number pair** another client
+already holds (409, `access.duplicate_client()`) — in that order, because a
+blank number has nothing to compare and checking the pair first would let it
+straight through. Each is the single answer to its question, so the form and
+the endpoint cannot drift: the same sentence the modal shows is the one the
+endpoint returns, the way `can_freeze()` works.
 
-Two profiles for one person is not an untidiness problem: their sessions,
+**The pairing is the point: a shared mobile is not a duplicate.** A parent
+enrols two children on one number, which at a children's ballet academy is
+the ordinary case rather than the exception — so the number alone was the
+wrong thing to make unique. (It was, briefly. The refusal now names what to
+do about it: "a different person on the same number is fine — change the
+name if this is a second client".)
+
+What a duplicate still is: the same name on the same number, which is one
+person entered twice. That is not an untidiness problem — their sessions,
 plans and cards divide between the two records, so a card scans against a
 balance that is half what they bought, and the missing half is invisible
 because the other profile looks perfectly healthy. A client with no number
-at all is the same failure one step earlier — there is nothing to tell them
-apart from the next client with no number, and `phone_conflict()` cannot
-help, because two blanks are not duplicates of each other and never would
-be.
+at all is the same failure one step earlier: nothing tells them apart from
+the next client with no number, and `duplicate_client()` cannot help,
+because two blanks are not duplicates of each other and never would be.
+
+**Names are compared through `identity.name_key()`** — whitespace
+collapsed, case folded, and deliberately nothing cleverer. "Dana Halim" and
+"dana  halim" are one person typed twice; "Mohamed" and "Mohammed" are left
+as two, because a rule that folded those would also fold two real cousins.
+Reception can see both rows and decide.
 
 **"Usable" is doing work in that first rule.** A required field that
 accepts `n/a` is not required in any sense that matters: it is satisfied by
 something carrying no identity, and several clients could hold the same
 placeholder without any of them conflicting.
-`phones.looks_like_a_number()` is the test and `phones.MIN_DIGITS` (eight)
+`identity.looks_like_a_number()` is the test and `identity.MIN_DIGITS` (8)
 records where the line sits — low enough to admit any real number anywhere,
 an Egyptian mobile being eleven digits and ten without its leading zero,
 high enough to exclude a placeholder or a half-typed one. The field stays
@@ -897,23 +928,24 @@ the missing number is actually askable, with them on the screen. The cost,
 written where reception meets it: an unrelated edit to such a profile asks
 for the number too.
 
-**The comparison is `phones.key()` — the last ten digits — and is
-deliberately not what gets stored.** The academy's sheets hold one student
+**The number is compared as `identity.phone_key()` — the last ten digits —
+and that is deliberately not what gets stored.** The academy's sheets hold one student
 as `1129200365` (Excel ate the leading zero), `01129200365` and
 `+201129200365`. No normalising reconciles the third with the other two,
 because deleting a country code from what somebody wrote down is inventing
 data; the last ten digits reconcile all three and leave the stored text
 exactly as typed, which is what reception reads back and dials. This is the
-same `phones.key()` the seed has always merged the roster sheets on (see
-"Clients are identified by phone" below), and that is the point — a number
-the importer treats as one person must not become two the moment reception
-types it in by hand.
+same `identity.phone_key()` the seed merges the roster sheets on (see
+"Clients are identified by phone" below) — though the seed stops there,
+matching on the number alone, which is the divergence recorded under that
+heading.
 
 **Neither backend can express "the last ten digits of a column" as a
 filter**, so `clients_by_phone_key()` is a port method and both
-implementations compare in Python. That costs one query, and it is charged
-only when a client is created or their number edited — never on a page
-reception waits for.
+implementations compare in Python. It matches on the **phone only** and
+returns every row sharing the number — several legitimately do now — and the
+caller compares the names. That costs one query, charged only when a client
+is created or their number edited, never on a page reception waits for.
 
 **The lookup includes archived clients**, answering with "belongs to Karim
 Nour, who is archived — restore them from the Archived list instead of
@@ -929,12 +961,56 @@ be *cleared* a minute later gives back the client with no identity that
 requiring it removed. `exclude_id` is what stops a client being a duplicate
 of themselves.
 
-The rule governs new writes only — **it does not retrofit**. A database
-seeded before this shipped can still hold two rows with one number (the
-seed merges on the key, so the sheets themselves will not have produced
-one, but a client typed in twice by hand before now will have). Nothing
-sweeps those up; merging two profiles means deciding which plans, bookings
-and cards survive, which is a decision, not a migration.
+The rule governs new writes only — **it does not retrofit.** Nothing sweeps
+up a pair already in the database; merging two profiles means deciding which
+plans, bookings and cards survive, which is a decision, not a migration.
+
+**The seed still merges on the number alone, and the two rules now
+disagree.** `seed.py`'s `_identity` has to: the roster sheets write one
+student as "rodaina hesham" in one block and "rodina hesham" in another, and
+matching on the name as well would split her back into two half-profiles,
+which is the failure that key exists to prevent. The cost, now that a shared
+mobile is legitimate, is the mirror image — **two real siblings on one
+parent's number arrive from the sheets as one client.** That is
+pre-existing rather than new, and neither answer is free. If the workbooks
+ever start carrying siblings on one number, fix it there, with a reported
+warning rather than a silent guess (see "Every guess is reported").
+
+**A client stops being a student of a class one month after their last plan
+for it ends.** Class membership is derived from bookings and bookings are
+never deleted, so without a cutoff a client who stopped coming last year
+stays on the class page for ever and the roster slowly stops describing who
+actually attends. `access.lapsed_cutoff()` is that date — one *calendar*
+month back, because "a month after it ran out" is what reception means and a
+month is what the plans are sold in, with the day clamped so 31 March
+answers 28 February rather than raising.
+
+A plan's end is `access.plan_end()`: the **later** of its `expires_on` and
+the last session it pays for. `refresh_expiry()` normally keeps those equal,
+so this matters in exactly one case — an ENDS ON typed *earlier* than a
+session the plan still funds. A plan cannot have finished before a session it
+is paying for, so the session wins.
+
+**It is a read filter and deletes nothing.** `class_students()` and
+`classes_with_counts()` both take a `lapsed_before` date and leave it out of
+the answer; every booking and every attendance mark stays exactly where it
+is, so the client's own profile and payment history still show the class and
+selling them another plan puts them straight back. Both port methods take
+the same date and must: a Classes list saying 12 students beside a class
+page showing 8 is worse than either number on its own.
+
+The rule is "*every* plan of theirs in this class has lapsed", not "their
+first one did" — a client who took the class two years ago, stopped, and came
+back is a student. A booking with no plan behind it (older rows,
+`subscription_id` NULL) falls back to its own session's date, the same
+fallback `_decide()` makes. `tests/test_lapsed_students.py` holds the
+boundary, both fallbacks, and that nothing is deleted.
+
+**The date bound is passed in rather than read inside the port**, the same
+shape `sessions_in_range(start, end)` and `settle_absences(now, …)` already
+use. That is what keeps `LAPSED_GRACE_MONTHS` in `access.py` where the
+business rules live, instead of a constant inside the data layer that
+`repo/` would have to import `access` to reach.
 
 **Every plan slot must be assigned to a real session before the plan saves.**
 `POST /api/clients/{id}/plan` rejects a mismatch between `sessions_total` and
@@ -961,6 +1037,28 @@ three write paths (`add_plan`, `edit_plan`, `book`) already book a finished
 session straight to `absent`, so the list marks past rows and says why, and
 "auto-fill earliest" skips them: creating absences is a decision to make one
 date at a time, never in bulk.
+
+**A typed ENDS ON narrows that window from the other end.** "Ends on the
+20th" and "pays for a session on the 25th" cannot both be true, so once
+reception states an end date the list stops offering dates past it —
+`lib/planSessions.js`'s `withinEndDate()`, inclusive of the day itself
+(a plan is valid *through* its last session, so a session on the end date is
+the normal case).
+
+**Only when the date was typed, never when it is the auto-filled one.**
+`ENDS ON` follows the sessions picked until somebody overrides it, and
+capping on the derived value would mean one pick removed every later session
+from the list — after which the last pick could never be moved outwards
+again. `endsTouched` is the switch, and the field's hint changes to say which
+of the two is in force.
+
+Two things it must not do. It **unticks** whatever it excludes rather than
+leaving it counted-but-invisible, because "12 of 12 chosen" beside a list
+that cannot show twelve is a disagreement nobody can debug from the screen.
+And in `EditPlan` it **keeps every already-attended session** whatever the
+date says (`withinEndDate`'s `keep` argument): those are attendance history,
+the server refuses any edit that drops one, and hiding one would leave a row
+counted in the total with nothing on screen to explain where it went.
 
 **A session can only be booked against the plan that pays for its class.**
 `access.book()` refuses when the client has no active plan in that session's
@@ -1263,9 +1361,14 @@ their own figure on the dashboard.
 **Clients are identified by phone, not by name.** The same student is "rodaina
 hesham" on one sheet and "rodina hesham" on another. Merging on the last ten
 digits of the mobile is what gives her one profile and two cards rather than
-two half-profiles. `phones.key()` is that comparison, and the admin refuses a
-duplicate client on the same one — see "A client is their mobile number"
-above.
+two half-profiles. `identity.phone_key()` is that comparison.
+
+**The admin no longer agrees with it**, and the difference is written down
+under "A client is their mobile number *and* their name" above: a shared
+mobile is legitimate there, so the seed merging on the number alone turns two
+real siblings into one client. Neither rule can have it both ways — matching
+the name here would split "rodaina"/"rodina" — so the divergence stands until
+the sheets force the question.
 
 **Attendance on a day the group does not normally meet still creates a
 session.** Those are makeup classes and they really happened. The weekly grid

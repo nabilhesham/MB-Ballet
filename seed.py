@@ -32,7 +32,7 @@ import access                                   # noqa: E402
 import cards                                    # noqa: E402
 import db                                       # noqa: E402
 import images                                   # noqa: E402
-import phones                                   # noqa: E402
+import identity                                 # noqa: E402
 import sheets                                   # noqa: E402
 from repo.sqlite import SqliteRepo              # noqa: E402
 
@@ -229,11 +229,17 @@ def _identity(student):
     the flexibility sheet and "rodina hesham" on the ballet one, and merging
     them is what makes her two cards belong to one client rather than two.
 
-    phones.key() is the same comparison the admin refuses a duplicate client
-    on, deliberately — a number the seed treats as one person must not be two
-    people the moment reception types it in by hand.
+    Note this merges on the number ALONE, where the admin now refuses a
+    duplicate only on the number *and* the name together (see
+    access.duplicate_client). The two differ on purpose and the difference
+    has a cost worth knowing: two real siblings sharing a parent's mobile
+    arrive from the sheets as one client. Matching on the name as well would
+    split "rodaina"/"rodina" back into two half-profiles, which is the
+    failure this key exists to prevent, so neither answer is free. If the
+    sheets ever start carrying siblings on one number, that is the moment to
+    fix it here -- with a reported warning rather than a silent guess.
     """
-    return phones.key(student.phone) or f"name:{sheets.name_key(student.name)}"
+    return identity.phone_key(student.phone) or f"name:{identity.name_key(student.name)}"
 
 
 def _plan(student, family):
