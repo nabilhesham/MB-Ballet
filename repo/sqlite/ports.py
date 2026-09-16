@@ -8,7 +8,7 @@ tests check directly.
 """
 
 import db
-import phones
+import identity
 
 from ..ports import (AccessPort, BookingsPort, ClassesPort, ClientsPort,
                      EventsPort, InstructorsPort, PlansPort, SessionsPort)
@@ -77,15 +77,42 @@ class SqliteSessions(SessionsPort):
 
 class SqliteClasses(ClassesPort):
 
-    def classes_with_counts(self, active):
+    # The last day each plan covers: the later of its own expires_on and the
+    # last session it pays for. Shared by the two membership queries below,
+    # which must agree about who is still a student -- see ports.py.
+    # access.plan_end() is the same rule for one plan, in Python.
+    _PLAN_END = (
+        " WITH plan_end AS ("
+        "   SELECT sub.id AS sub_id,"
+        "          MAX(COALESCE(sub.expires_on, ''),"
+        "              COALESCE((SELECT MAX(date(s2.starts_at,'unixepoch','localtime'))"
+        "                          FROM bookings b2"
+        "                          JOIN sessions s2 ON s2.id = b2.session_id"
+        "                         WHERE b2.subscription_id = sub.id), '')) AS ends"
+        "     FROM subscriptions sub)")
+
+    # A booking's end: its plan's, or -- with no plan behind it (older rows,
+    # subscription_id NULL) -- its own session's day, the same fallback
+    # _decide() makes. Kept as one string so the two queries cannot drift.
+    _BOOKING_END = ("COALESCE(NULLIF(pe.ends, ''),"
+                    " date(s.starts_at,'unixepoch','localtime'))")
+
+    def classes_with_counts(self, active, lapsed_before):
         return [dict(r) for r in self.conn.execute(
-            "SELECT c.*, i.name AS instructor_name,"
+            self._PLAN_END +
+            " SELECT c.*, i.name AS instructor_name,"
             "  (SELECT COUNT(*) FROM sessions s WHERE s.class_id=c.id"
             "     AND s.starts_at > ? AND s.status='scheduled') AS upcoming,"
-            "  (SELECT COUNT(DISTINCT b.client_id) FROM bookings b"
-            "     JOIN sessions s ON s.id=b.session_id WHERE s.class_id=c.id) AS students"
+            "  (SELECT COUNT(*) FROM ("
+            "     SELECT b.client_id FROM bookings b"
+            "       JOIN sessions s ON s.id=b.session_id"
+            "       LEFT JOIN plan_end pe ON pe.sub_id = b.subscription_id"
+            "      WHERE s.class_id=c.id"
+            "      GROUP BY b.client_id"
+            f"     HAVING MAX({self._BOOKING_END}) >= ?)) AS students"
             " FROM classes c LEFT JOIN instructors i ON i.id = c.instructor_id"
-            " WHERE c.active=? ORDER BY c.name, c.id", (db.now(), active)).fetchall()]
+            " WHERE c.active=? ORDER BY c.name, c.id",
+            (db.now(), lapsed_before, active)).fetchall()]
 
     def class_sessions(self, class_id, limit):
         return [dict(r) for r in self.conn.execute(
@@ -97,15 +124,19 @@ class SqliteClasses(ClassesPort):
             " WHERE s.class_id=? ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
             (class_id, limit)).fetchall()]
 
-    def class_students(self, class_id):
+    def class_students(self, class_id, lapsed_before):
         return [dict(r) for r in self.conn.execute(
-            "SELECT cl.id, cl.name_en, cl.phone, cl.photo_path,"
+            self._PLAN_END +
+            " SELECT cl.id, cl.name_en, cl.phone, cl.photo_path,"
             "       COUNT(b.id) AS slots,"
             "       SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) AS attended"
             "  FROM bookings b JOIN sessions s ON s.id=b.session_id"
             "  JOIN clients cl ON cl.id=b.client_id"
+            "  LEFT JOIN plan_end pe ON pe.sub_id = b.subscription_id"
             " WHERE s.class_id=? AND cl.active=1"
-            " GROUP BY cl.id ORDER BY cl.name_en, cl.id", (class_id,)).fetchall()]
+            " GROUP BY cl.id"
+            f" HAVING MAX({self._BOOKING_END}) >= ?"
+            " ORDER BY cl.name_en, cl.id", (class_id, lapsed_before)).fetchall()]
 
 
 class SqliteBookings(BookingsPort):
@@ -192,7 +223,7 @@ class SqliteClients(ClientsPort):
         rows = self.conn.execute(
             "SELECT id, name_en, phone, active FROM clients"
             " WHERE phone IS NOT NULL AND phone != '' ORDER BY id").fetchall()
-        return [dict(r) for r in rows if phones.key(r["phone"]) == key]
+        return [dict(r) for r in rows if identity.phone_key(r["phone"]) == key]
 
     def card_counts_bulk(self, client_ids):
         out = {c: 0 for c in client_ids}

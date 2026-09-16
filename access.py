@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, time as _t
 
 import db
 import images
-import phones
+import identity
 import tokens
 
 # Only plans of this size or larger may be frozen. Short packs are meant to be
@@ -299,15 +299,15 @@ def phone_required(phone) -> str | None:
 
     The mobile number identifies the client, so it is mandatory — a client
     with no number cannot be told apart from the next client with no number,
-    and phone_conflict() below has nothing to compare, which means two of
+    and duplicate_client() below has nothing to compare, which means two of
     them are not duplicates of each other and never will be. Making it
     required is what closes that.
 
     "Usable" is doing work here. A required field that accepts "n/a" is not
     required in any sense that matters: it would be satisfied by something
     carrying no identity, and several clients could hold the same placeholder
-    without any of them conflicting. phones.looks_like_a_number() is the
-    test, and phones.MIN_DIGITS records where the line is and why.
+    without any of them conflicting. identity.looks_like_a_number() is the
+    test, and identity.MIN_DIGITS records where the line is and why.
 
     The seed does **not** go through this. `seed.py` inserts clients
     directly, and it must: the roster sheets are the business record, and
@@ -318,55 +318,104 @@ def phone_required(phone) -> str | None:
     """
     if not str(phone or "").strip():
         return "A mobile number is required — it is what identifies a client."
-    if not phones.looks_like_a_number(phone):
+    if not identity.looks_like_a_number(phone):
         return ("That does not look like a mobile number. It identifies the "
                 "client, so it has to be the real one.")
     return None
 
 
-def phone_conflict(repo, phone, exclude_id=None) -> str | None:
+def duplicate_client(repo, name, phone, exclude_id=None) -> str | None:
     """
-    The sentence to refuse a client with, or None if the number is free.
+    The sentence to refuse a client with, or None if this pair is free.
 
-    The mobile number is what identifies a client — the seed has always
-    merged the roster sheets on it rather than on the spelling of a name,
-    and this is the same rule applied to a client typed in by hand. Two
-    profiles for one person is not a tidiness problem: their sessions,
-    their plans and their cards divide between the two records, so a card
-    scans against a balance that is only half of what they bought.
+    Identity is the **mobile number and the name together**. A shared mobile
+    is not a duplicate: a parent enrols two children on one number, which at
+    a children's ballet academy is the ordinary case rather than the
+    exception. What is a duplicate is the same name on the same number --
+    the same person entered twice.
+
+    That matters because two profiles for one person is not an untidiness
+    problem: their sessions, plans and cards divide between the two records,
+    so a card scans against a balance that is half what they bought, and the
+    missing half is invisible because the other profile looks healthy.
 
     Like can_freeze(), it is the single answer to the question, so the form
-    and the endpoint cannot drift apart — both refuse with this sentence.
+    and the endpoint cannot drift -- both refuse with this sentence.
 
-    A blank number is never a conflict — there is nothing to compare, so
-    two of them are not duplicates of each other. That is exactly why
-    phone_required() exists and why both routes call it *first*: this
-    function alone cannot make a number the identity, it can only stop one
-    being used twice. The clause stays because a caller reaching here with a
-    blank must get a defensible answer rather than an exception, and because
-    seeded clients without numbers are real (see phone_required()).
+    Names are compared through identity.name_key(): whitespace collapsed,
+    case folded, and deliberately nothing cleverer. Reception can see two
+    rows and decide; a rule that decided "Mohamed" and "Mohammed" were one
+    person would also decide two real cousins were.
 
-    `exclude_id` is the client being edited: their own number is not a
-    duplicate of itself.
+    A blank number is never a conflict -- there is nothing to compare, and
+    two blanks are not duplicates of each other. That is why
+    phone_required() exists and why both routes call it *first*.
+
+    `exclude_id` is the client being edited: they are not a duplicate of
+    themselves.
     """
-    key = phones.key(phone)
+    key = identity.phone_key(phone)
     if not key:
         return None
-    others = [c for c in repo.clients_by_phone_key(key) if c["id"] != exclude_id]
-    if not others:
+    want = identity.name_key(name)
+    same = [c for c in repo.clients_by_phone_key(key)
+            if c["id"] != exclude_id and identity.name_key(c["name_en"]) == want]
+    if not same:
         return None
-    c = others[0]
+    c = same[0]
     who = f"{c['name_en']}, member {c['id']}"
     if not c["active"]:
-        # Archived, so the number is on somebody who was deliberately put
-        # away rather than somebody on the list. Saying "already exists"
-        # would send reception looking for a client they cannot find, and
-        # the only way out of that is a second profile for one person —
-        # which is the thing this refusal is here to prevent.
-        return (f"That mobile number belongs to {who}, who is archived. "
+        # Archived, so the match is somebody deliberately put away rather
+        # than somebody on the list. "Already exists" would send reception
+        # looking for a client they cannot find, and the only way out of
+        # that is a second profile -- the thing this refusal prevents.
+        return (f"{who}, already has this mobile number and is archived. "
                 f"Restore them from the Archived list instead of adding "
                 f"them again.")
-    return f"That mobile number already belongs to {who}."
+    return (f"{who}, already has this name and this mobile number. "
+            f"A different person on the same number is fine -- change the "
+            f"name if this is a second client.")
+
+
+# ---------------------------------------------------------------- lapsed
+# How long after a plan ends a client still counts as a student of that
+# class. Membership is derived from bookings and bookings are never deleted,
+# so without this a client who stopped coming last year stays on the class
+# page for ever and the roster slowly stops describing who actually attends.
+LAPSED_GRACE_MONTHS = 1
+
+
+def lapsed_cutoff(when: date = None) -> str:
+    """
+    The ISO date a plan must have ended on or after to still count.
+
+    One calendar month back, not thirty days: "a month after it ran out" is
+    what reception means, and a month is what the plans are sold in. The day
+    is clamped to the shorter month, so 31 March answers 28 February rather
+    than raising.
+    """
+    import calendar
+    d = when or date.today()
+    y, m = d.year, d.month - LAPSED_GRACE_MONTHS
+    while m < 1:
+        y -= 1
+        m += 12
+    return date(y, m, min(d.day, calendar.monthrange(y, m)[1])).isoformat()
+
+
+def plan_end(repo, sub) -> str:
+    """
+    The last day a plan covers: the later of its `expires_on` and the date
+    of the last session it pays for.
+
+    refresh_expiry() normally keeps those two equal, so this matters in
+    exactly one case -- a date typed into ENDS ON that sits *earlier* than a
+    session the plan still funds. The plan cannot have finished before a
+    session it is paying for, so the session wins. Whichever is later is
+    what the lapsed cutoff is measured from.
+    """
+    last = last_session_date(repo, sub["id"])
+    return max(x for x in (sub.get("expires_on"), last, "") if x is not None)
 
 
 # ---------------------------------------------------------------- auto-absent

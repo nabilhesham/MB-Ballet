@@ -15,6 +15,7 @@ import Clients from './views/Clients';
 import ClientDetail from './views/ClientDetail';
 import ArchivedClients from './views/ArchivedClients';
 import Calendar from './views/Calendar';
+import Appointments from './views/Appointments';
 import NotBuilt from './views/NotBuilt';
 
 export default function App() {
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="/clients/archived" element={<ArchivedClients />} />
         <Route path="/client/:id" element={<ClientDetail />} />
         <Route path="/calendar" element={<Calendar />} />
+        <Route path="/appointments" element={<Appointments />} />
         {/* Everything else is ported in phase 3; see NotBuilt.jsx. */}
         <Route path="*" element={<NotBuilt />} />
       </Routes>

@@ -141,7 +141,7 @@ class SqliteRepo(SqliteAccess, SqliteSessions, SqliteBookings,
     # exact false answer this method exists to stop giving.
     TABLES = ("instructors", "classes", "sessions", "clients", "subscriptions",
               "freezes", "bookings", "credentials", "instructor_hours",
-              "instructor_hour_adjustments", "access_events")
+              "instructor_hour_adjustments", "access_events", "appointments")
 
     def init_schema(self):
         self.conn.executescript(db.SCHEMA)

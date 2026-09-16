@@ -1,11 +1,14 @@
 """
-What counts as the same mobile number.
+What makes two client records the same person.
 
-The phone is the client's identity — not the name. The academy's own roster
-sheets write one student as "rodaina hesham" in one block and "rodina
-hesham" in another, and the seed has always merged those two rows on the
-number rather than the spelling. Creating a client through the admin now
-answers to the same rule.
+Identity is the mobile number **and** the name together, and the pairing is
+deliberate: a parent enrols two children on one number, so a shared mobile
+is an ordinary thing at this academy rather than a duplicate. What is a
+duplicate is the same name on the same number. (The seed is the one place that still merges on
+the number alone -- the academy's roster sheets write one student as
+"rodaina hesham" in one block and "rodina hesham" in another, and matching
+those two on the spelling would split her into two profiles. See seed.py's
+_identity, and the note in CLAUDE.md about what that now costs.)
 
 `key()` is the comparison, and it is deliberately not the same thing as the
 number that gets stored. The sheets hold one person as 1129200365 (Excel ate
@@ -44,7 +47,7 @@ def looks_like_a_number(phone) -> bool:
     return len(digits(phone)) >= MIN_DIGITS
 
 
-def key(phone) -> str | None:
+def phone_key(phone) -> str | None:
     """
     The identity of a phone number: its last ten digits, nothing else.
 
@@ -61,3 +64,17 @@ def key(phone) -> str | None:
     if not d:
         return None
     return d[-10:] if len(d) >= 10 else d
+
+
+def name_key(name) -> str:
+    """
+    A name folded for comparison: collapsed whitespace, lower case.
+
+    "Dana Halim", "dana  halim" and " Dana Halim " are one person typed
+    three ways, and refusing the second while accepting the third would be
+    a rule nobody could predict. It is deliberately no cleverer than that --
+    no transliteration, no nickname table, no fuzzy distance. Reception can
+    see both rows and decide; a rule that guesses "Mohamed" and "Mohammed"
+    are the same person would also guess two real cousins are.
+    """
+    return re.sub(r"\s+", " ", str(name or "")).strip().lower()

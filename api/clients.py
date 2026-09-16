@@ -108,18 +108,21 @@ def list_clients(q: str = "", status: str = "all"):
 @router.post("/api/clients")
 def create_client(body: ClientIn):
     """
-    The mobile number is the client's identity, which makes it two refusals
-    rather than one: it is required (access.phone_required()), and a number
-    another client already holds is a refusal rather than a second profile
-    (access.phone_conflict()). In that order — a blank number has nothing to
-    compare, so checking uniqueness first would let it through.
+    Two refusals rather than one: the mobile number is required
+    (access.phone_required()), and the name-plus-number pair must not
+    already belong to somebody (access.duplicate_client()). In that order —
+    a blank number has nothing to compare, so checking the pair first would
+    let it through.
+
+    A shared mobile on its own is fine: a parent enrols two children on one
+    number. It is the same name on the same number that is one person twice.
     """
     missing = access.phone_required(body.phone)
     if missing:
         raise HTTPException(400, missing)
     repo = data.connect()
     try:
-        clash = access.phone_conflict(repo, body.phone)
+        clash = access.duplicate_client(repo, body.name_en, body.phone)
         if clash:
             raise HTTPException(409, clash)
         return {"id": repo.insert("clients", {
@@ -218,7 +221,7 @@ def plan_sessions(cid: int, pid: int):
 def update_client(cid: int, body: ClientIn):
     """
     Same two rules as create_client(), excluding this client — their own
-    number is not a duplicate of itself. Editing had to be covered too or
+    name and number are not a duplicate of themselves. Editing had to be covered too or
     neither rule would be more than half true: refusing at creation and then
     allowing the number to be typed over somebody else's a minute later
     leaves exactly the two-profiles-one-person state the refusal exists to
@@ -237,7 +240,8 @@ def update_client(cid: int, body: ClientIn):
         raise HTTPException(400, missing)
     repo = data.connect()
     try:
-        clash = access.phone_conflict(repo, body.phone, exclude_id=cid)
+        clash = access.duplicate_client(repo, body.name_en, body.phone,
+                                        exclude_id=cid)
         if clash:
             raise HTTPException(409, clash)
         repo.update("clients", cid, {

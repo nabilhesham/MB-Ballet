@@ -216,6 +216,28 @@ CREATE TABLE IF NOT EXISTS images (
     updated_at INTEGER NOT NULL
 );
 
+-- An enquiry: somebody who has asked to come in on a date and is not a client
+-- yet. Deliberately NOT a foreign key onto clients -- most of these are
+-- strangers who rang up, and the whole point of the list is the ones who have
+-- not been written down as clients. They carry their own name, age and mobile
+-- because that is all reception has when the phone rings; if the person turns
+-- up and enrols, a client is created separately and this row stays as the
+-- record of the enquiry.
+--
+-- No uniqueness rule either, on the number or on anything else: the same
+-- family rings twice about two children, and the same person reschedules.
+CREATE TABLE IF NOT EXISTS appointments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    phone       TEXT,
+    age         REAL,
+    -- ISO YYYY-MM-DD, like every other calendar day in this schema. A day,
+    -- not a timestamp: reception writes "Tuesday" down, not 16:30.
+    on_date     TEXT NOT NULL,
+    notes       TEXT,
+    created_at  INTEGER NOT NULL
+);
+
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
 CREATE TABLE IF NOT EXISTS settings (
@@ -264,6 +286,7 @@ CREATE INDEX IF NOT EXISTS ix_frz_sub     ON freezes(subscription_id);
 CREATE INDEX IF NOT EXISTS ix_ih_date     ON instructor_hours(work_date);
 CREATE INDEX IF NOT EXISTS ix_cli_joined  ON clients(joined_on);
 CREATE INDEX IF NOT EXISTS ix_sub_starts  ON subscriptions(starts_on);
+CREATE INDEX IF NOT EXISTS ix_appt_date  ON appointments(on_date);
 """
 
 
