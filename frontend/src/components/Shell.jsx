@@ -26,6 +26,9 @@ const NAV = [
     group: 'PEOPLE',
     items: [
       { to: '/clients', icon: '◉', label: 'Clients' },
+      // An enquiry is a person who is not a client yet, so it belongs beside
+      // Clients rather than under TEACHING with the timetable.
+      { to: '/appointments', icon: '◎', label: 'Appointments' },
       { to: '/cards', icon: '▢', label: 'Cards & renewals' },
     ],
   },

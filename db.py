@@ -190,7 +190,53 @@ CREATE TABLE IF NOT EXISTS instructor_hour_adjustments (
     note            TEXT,
     created_at      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_iha_date ON instructor_hour_adjustments(instructor_id, adjustment_date);
+
+-- Every image the app holds: client and instructor photos, and the printed
+-- member cards. Base64 text rather than a BLOB, because the same rows have to
+-- live in MongoDB too and base64 is the one encoding both stores and the
+-- repository interface's plain dicts carry without a per-backend special case.
+--
+-- In the database rather than in photos/ and cards/ on purpose. Those folders
+-- were the one part of the academy's record that a backup of the database did
+-- not contain, and on the hosted backend they were worse than that: the data
+-- lived on Atlas and the faces lived on whichever laptop happened to upload
+-- them.
+--
+-- `kind` is what the image is of, `owner_id` who, and `variant` which one of
+-- theirs -- the class slug for a card, since a client holds one per class.
+-- The three together are unique: an upload or a reissue replaces, never
+-- accumulates.
+CREATE TABLE IF NOT EXISTS images (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind       TEXT NOT NULL,
+    owner_id   INTEGER NOT NULL,
+    variant    TEXT NOT NULL DEFAULT '',
+    mime       TEXT NOT NULL,
+    data       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+-- An enquiry: somebody who has asked to come in on a date and is not a client
+-- yet. Deliberately NOT a foreign key onto clients -- most of these are
+-- strangers who rang up, and the whole point of the list is the ones who have
+-- not been written down as clients. They carry their own name, age and mobile
+-- because that is all reception has when the phone rings; if the person turns
+-- up and enrols, a client is created separately and this row stays as the
+-- record of the enquiry.
+--
+-- No uniqueness rule either, on the number or on anything else: the same
+-- family rings twice about two children, and the same person reschedules.
+CREATE TABLE IF NOT EXISTS appointments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    phone       TEXT,
+    age         REAL,
+    -- ISO YYYY-MM-DD, like every other calendar day in this schema. A day,
+    -- not a timestamp: reception writes "Tuesday" down, not 16:30.
+    on_date     TEXT NOT NULL,
+    notes       TEXT,
+    created_at  INTEGER NOT NULL
+);
 
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
@@ -214,8 +260,21 @@ CREATE TABLE IF NOT EXISTS access_events (
     source        TEXT NOT NULL DEFAULT 'scan'
 );
 
-CREATE INDEX IF NOT EXISTS ix_cred_token  ON credentials(token);
+"""
 
+# Applied *after* migrate(), never with the tables above.
+#
+# CREATE TABLE IF NOT EXISTS is a no-op on a database that already has the
+# table, so a column added to this file later does not appear in an existing
+# one until migrate() ALTERs it in -- but an index over that column was in the
+# same script and ran first, failing with "no such column" and taking the
+# whole executescript with it. migrate() then never ran at all. That is not
+# hypothetical: the academy's own database predates sessions.ends_at, and
+# `ix_sess_ends` made the app unable to open it.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_iha_date    ON instructor_hour_adjustments(instructor_id, adjustment_date);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_img_owner ON images(kind, owner_id, variant);
+CREATE INDEX IF NOT EXISTS ix_cred_token  ON credentials(token);
 CREATE INDEX IF NOT EXISTS ix_ev_time     ON access_events(scanned_at);
 CREATE INDEX IF NOT EXISTS ix_sess_start  ON sessions(starts_at);
 CREATE INDEX IF NOT EXISTS ix_sess_ends   ON sessions(ends_at);
@@ -227,6 +286,7 @@ CREATE INDEX IF NOT EXISTS ix_frz_sub     ON freezes(subscription_id);
 CREATE INDEX IF NOT EXISTS ix_ih_date     ON instructor_hours(work_date);
 CREATE INDEX IF NOT EXISTS ix_cli_joined  ON clients(joined_on);
 CREATE INDEX IF NOT EXISTS ix_sub_starts  ON subscriptions(starts_on);
+CREATE INDEX IF NOT EXISTS ix_appt_date  ON appointments(on_date);
 
 -- Added for the joins that already existed but had nothing to stand on. Each
 -- one backs a query in repo/sqlite/ports.py that was scanning without it;
@@ -319,8 +379,13 @@ def init(path: str = None) -> None:
     try:
         # executescript commits whatever is open before it runs, so this is
         # deliberately not inside a tx() — the schema is its own unit.
+        #
+        # Three steps, in this order and not two: the tables, then the
+        # columns an older database is missing, then the indexes — which may
+        # be over a column migrate() has only just added. See INDEXES.
         conn.executescript(SCHEMA)
         migrate(conn)
+        conn.executescript(INDEXES)
     finally:
         # sqlite3's connection context manager commits but does not close, so
         # `with connect(...) as conn:` leaked a handle on every call.

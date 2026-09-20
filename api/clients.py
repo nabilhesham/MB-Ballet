@@ -1,8 +1,6 @@
 """/api/clients/* — client profiles, their plans and cards."""
 
-import glob
 import os
-import shutil
 from datetime import date
 from typing import Optional
 
@@ -12,6 +10,7 @@ from pydantic import BaseModel
 import access
 import cards
 import db
+import images
 import repo as data
 
 
@@ -21,6 +20,11 @@ router = APIRouter()
 # ---------------------------------------------------------------- models
 class ClientIn(BaseModel):
     name_en: str
+    # Mandatory — the mobile number is what identifies a client — but
+    # deliberately still Optional here so the refusal is ours. A required
+    # pydantic field answers a missing key with a 422 whose detail is a list
+    # of dicts, and this project's rule is that a refusal is a sentence a
+    # receptionist can read. access.phone_required() is that sentence.
     phone: Optional[str] = None
     # Float, not int: the roster sheets carry "4.8" and reception needs to
     # type 3.5 for the youngest children. An int field here does not round a
@@ -103,8 +107,24 @@ def list_clients(q: str = "", status: str = "all"):
 
 @router.post("/api/clients")
 def create_client(body: ClientIn):
+    """
+    Two refusals rather than one: the mobile number is required
+    (access.phone_required()), and the name-plus-number pair must not
+    already belong to somebody (access.duplicate_client()). In that order —
+    a blank number has nothing to compare, so checking the pair first would
+    let it through.
+
+    A shared mobile on its own is fine: a parent enrols two children on one
+    number. It is the same name on the same number that is one person twice.
+    """
+    missing = access.phone_required(body.phone)
+    if missing:
+        raise HTTPException(400, missing)
     repo = data.connect()
     try:
+        clash = access.duplicate_client(repo, body.name_en, body.phone)
+        if clash:
+            raise HTTPException(409, clash)
         return {"id": repo.insert("clients", {
             "name_en": body.name_en, "phone": body.phone, "age": body.age,
             "school": body.school,
@@ -145,16 +165,37 @@ def get_client(cid: int):
             for p in c["active_plans"] if p["class_id"]]
 
         c["cards"] = repo.client_cards(cid)
-        # The PNG the card was written to, so the profile can offer it for
-        # download and print without guessing at the filename in the browser.
+        # Where the stored card can be fetched, so the profile can offer it
+        # for download and print.
         #
-        # ?v=issued_at is not decoration. Reissuing overwrites the same path,
-        # so the browser kept serving the card it had already cached and an
-        # edited end date never appeared on it — the file was right and the
-        # picture was old. The stamp changes on every issue, which is exactly
-        # when the image changes.
+        # ?v=issued_at is not decoration. The URL is derived from the client
+        # and the class, so reissuing hands back the same one and the browser
+        # kept serving the card it had already cached — an edited end date
+        # never appeared on it, the stored image being right and the picture
+        # old. The stamp changes on every issue, which is exactly when the
+        # image changes.
+        #
+        # `card_url` is None when no image is stored, and the profile offers
+        # Reissue in place of Download/Print rather than two links that 404.
+        # A credential can outlive its picture: one issued before cards moved
+        # into the database, on an install whose cards/ folder was not beside
+        # academy.db when it first started, or one carried across a backend
+        # migration without its images. Regenerating the PNG here instead
+        # would be worse -- the card is a print snapshot of what plan_state()
+        # said at issue time, and a silently redrawn one would carry today's
+        # figures under the old issue date.
+        #
+        # One query for every card this client has a picture for, not an
+        # exists() each: a client holds one per class, and against a networked
+        # backend each of those is a round trip on a page that already has a
+        # budget (tests/test_query_budget.py).
+        stored = {r["variant"] for r in repo.find(
+            "images", {"kind": images.CARD, "owner_id": cid}, fields=["variant"])}
         for cd in c["cards"]:
-            cd["card_url"] = f"/{cards.card_path(cid, cd['class_name'])}?v={cd['issued_at']}"
+            slug = cards.class_slug(cd["class_name"])
+            cd["card_url"] = (
+                images.url(images.CARD, cid, variant=slug, stamp=cd["issued_at"])
+                if slug in stored else None)
 
         now = db.now()
         c["upcoming"] = repo.client_upcoming(cid, now)
@@ -178,8 +219,31 @@ def plan_sessions(cid: int, pid: int):
 
 @router.put("/api/clients/{cid}")
 def update_client(cid: int, body: ClientIn):
+    """
+    Same two rules as create_client(), excluding this client — their own
+    name and number are not a duplicate of themselves. Editing had to be covered too or
+    neither rule would be more than half true: refusing at creation and then
+    allowing the number to be typed over somebody else's a minute later
+    leaves exactly the two-profiles-one-person state the refusal exists to
+    prevent, and allowing it to be *cleared* a minute later gives back the
+    client with no identity that requiring it removed.
+
+    The one cost, written down because it is what reception will meet: a
+    client seeded from a roster sheet that never carried a number cannot be
+    saved from this form until somebody types one in. That is deliberate —
+    it is the moment the missing number is actually askable, with the client
+    on the screen — but it does mean an unrelated edit to such a profile
+    asks for the number too.
+    """
+    missing = access.phone_required(body.phone)
+    if missing:
+        raise HTTPException(400, missing)
     repo = data.connect()
     try:
+        clash = access.duplicate_client(repo, body.name_en, body.phone,
+                                        exclude_id=cid)
+        if clash:
+            raise HTTPException(409, clash)
         repo.update("clients", cid, {
             "name_en": body.name_en, "phone": body.phone, "age": body.age,
             "school": body.school, "joined_on": body.joined_on,
@@ -191,26 +255,29 @@ def update_client(cid: int, body: ClientIn):
 
 @router.post("/api/clients/{cid}/photo")
 async def upload_photo(cid: int, file: UploadFile = File(...)):
+    """
+    The photo goes into the database, not into photos/ — see images.py.
+
+    `photo_path` still holds the thing an `<img src>` points at, so nothing
+    that renders a face had to change; what it holds is now a URL this app
+    answers rather than a file on the disk. It is stamped with the upload
+    time for the reason it always was: the URL is derived from who the photo
+    belongs to, so without the stamp a re-upload leaves the browser showing
+    the picture it already had and the new one looks like it never saved.
+    """
     ext = os.path.splitext(file.filename or "")[1].lower() or ".jpg"
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "use jpg, png or webp")
-    # A fresh filename per upload. Writing back to the same path meant the
-    # browser kept serving the cached old picture after a re-upload, so a new
-    # photo looked like it had not saved at all — reloading the profile did
-    # not help, because the URL had not changed. The previous files are
-    # removed so the folder does not fill up with every photo ever taken.
-    path = f"photos/client_{cid:05d}_{db.now()}{ext}"
-    for old in glob.glob(f"photos/client_{cid:05d}*"):
-        try:
-            os.remove(old)
-        except OSError:
-            pass
-    with open(path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+    blob, mime = images.shrink(await file.read(),
+                               file.content_type or "image/jpeg")
     repo = data.connect()
     try:
-        repo.update("clients", cid, {"photo_path": "/" + path})
-        return {"photo_path": "/" + path}
+        now = db.now()
+        with repo.begin():
+            images.store(repo, images.CLIENT_PHOTO, cid, blob, mime, now=now)
+            url = images.url(images.CLIENT_PHOTO, cid, stamp=now)
+            repo.update("clients", cid, {"photo_path": url})
+        return {"photo_path": url}
     finally:
         repo.close()
 
@@ -244,14 +311,17 @@ def issue_card(cid: int, body: CardIn):
             raise HTTPException(r.get("status", 400), r["error"])
         # Drawing the PNG is file I/O and presentation, so it stays here
         # rather than in access.py.
-        path = cards.build_card(cid, r["client_name"], r["token"],
-                                r["sessions_total"], r["expires_on"],
-                                class_name=r["class_name"],
-                                colour=r["class_colour"])
-        # Stamped with the issue time: card_path() gives one stable filename
-        # per client per class, so a reissue overwrites a URL the browser has
-        # already cached and the old picture keeps being shown.
-        return {"token": r["token"], "card_url": f"/{path}?v={db.now()}",
+        png = cards.build_card(cid, r["client_name"], r["token"],
+                               r["sessions_total"], r["expires_on"],
+                               class_name=r["class_name"],
+                               colour=r["class_colour"])
+        # Stamped with the issue time, for the reason get_client gives above.
+        now = db.now()
+        slug = cards.class_slug(r["class_name"])
+        images.store(repo, images.CARD, cid, png, "image/png",
+                     variant=slug, now=now)
+        return {"token": r["token"],
+                "card_url": images.url(images.CARD, cid, variant=slug, stamp=now),
                 "revoked": r["revoked"]}
     finally:
         repo.close()

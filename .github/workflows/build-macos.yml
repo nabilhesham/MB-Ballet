@@ -16,39 +16,150 @@ name: Build macOS binary
 
 on:
   workflow_dispatch:
+    inputs:
+      backend:
+        description: "Which database the binary should talk to"
+        type: choice
+        default: sqlite
+        options: [sqlite, mongo]
+  # For the `canary` job at the bottom, never for `build` -- which carries
+  # an `if:` refusing scheduled runs, because a 10x-billed two-architecture
+  # PyInstaller build once a month is not what this is for.
+  #
+  # 07:00 UTC on the 1st. Cron here is always UTC, never Cairo.
+  schedule:
+    - cron: "0 7 1 * *"
+
+# Nothing here reads or writes the repository beyond checking it out.
+permissions:
+  contents: read
+
+# ------------------------------------------------------------------ actions
+#
+# Every `uses:` below is pinned to a major that declares `runs.using: node24`,
+# and that is a deadline, not a preference. GitHub removed Node 20 from the
+# runner images on **23 September 2026**; from 16 June 2026 runners had
+# already been forcing node20 actions onto Node 24 and printing a deprecation
+# warning, which is the only notice this workflow ever got. An action still
+# declaring node20 after that date does not warn -- it fails to start.
+#
+# The versions do NOT line up, and assuming they do is the trap here:
+#
+#     actions/checkout         v4 node20 -> v5 node24 -> v6   (pinned v6)
+#     actions/setup-python     v5 node20 -> v6 node24 -> v7   (pinned v7)
+#     actions/upload-artifact  v4 node20 -> v5 STILL node20
+#                                        -> v6 node24 -> v7   (pinned v7)
+#
+# upload-artifact skips a major: v5 predates the Node 24 move and is still
+# node20, so bumping each action to "the next one" fixes two thirds of the
+# problem and looks finished. Check `runs.using` in the action's own
+# action.yml before trusting a version number here.
+#
+# Two things checked before pinning these: no input this workflow passes was
+# removed (setup-python v7 dropped `pip-install`, which is not used here),
+# and upload-artifact v6+ needs Actions Runner >= 2.327.1, which the
+# GitHub-hosted images have and a self-hosted runner might not.
+#
+# upload-artifact v7's new `archive: false` is NOT a replacement for the tar
+# step further down. The tar exists so the executable bit survives, and a
+# mode can only travel inside an archive that carries one -- a raw
+# single-file upload has nowhere to put it.
+#
+# `.github/dependabot.yml` is what notices the next one of these in time.
 
 jobs:
   build:
-    # Intel (x86_64) runner, deliberately NOT macos-latest/macos-14 (Apple
-    # Silicon/arm64). academy.spec's target_arch=None just builds for
-    # whatever the host is, and an x86_64 build runs natively on Intel Macs
-    # AND on Apple Silicon Macs via Rosetta 2 — the reverse isn't true,
-    # there's no way to run arm64 code on an Intel Mac. The reception Mac's
-    # exact hardware isn't known, so this is the strictly safer choice.
-    # Do not bump this to macos-latest without knowing that tradeoff.
-    runs-on: macos-14
+    # BOTH architectures, one job each, because guessing wrong produces a
+    # binary that cannot start and says almost nothing about why:
+    #
+    #     zsh: bad CPU type in executable: /…/MB Ballet Academy
+    #
+    # academy.spec's target_arch=None builds for whatever the host is, so the
+    # runner label *is* the choice of target. That label has been wrong twice
+    # already -- `macos-13` (retired by GitHub in December 2025) and then
+    # `macos-14`, which is arm64 and silently inverted a comment that still
+    # claimed Intel. A universal2 build would avoid the question, but it needs
+    # every wheel to be universal2 and pydantic-core and pymongo ship
+    # per-architecture ones, so it is not available here.
+    #
+    # Building both and naming each artifact after its architecture is what
+    # settles it instead: download the one matching `uname -m` on the Mac and
+    # it runs natively, with no Rosetta 2 and nothing to work out. x86_64 is
+    # the one with a deadline -- GitHub drops it in August 2027, and that
+    # just removes a row from this matrix.
+    strategy:
+      # One architecture failing must not cancel the other: a broken Intel
+      # build should still hand over a working Apple Silicon one.
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64          # Apple Silicon: M1 and later
+          - runner: macos-15-intel
+            arch: x86_64         # Intel Macs
+    runs-on: ${{ matrix.runner }}
+    name: ${{ matrix.arch }}
+    # The schedule above exists for `canary` only. Without this, every cron
+    # would run two full macOS PyInstaller builds at a 10x billing
+    # multiplier, and it would also run them with no `backend` input --
+    # a scheduled event carries none, so the .env step would write an empty
+    # MB_DB_BACKEND and the binary would be for a database nobody chose.
+    if: github.event_name != 'schedule'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - name: Check the runner is the architecture we asked for
+        # The guard that would have caught the macos-14 bug on the run that
+        # introduced it, rather than on the reception Mac weeks later. A
+        # runner label is GitHub's to redefine, and this build's only way of
+        # choosing a target is which machine it runs on.
+        run: |
+          got=$(uname -m)
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "Runner ${{ matrix.runner }} reports $got, not ${{ matrix.arch }}."
+            echo "GitHub has changed what that label means. Fix the matrix"
+            echo "rather than shipping a binary for the wrong architecture."
+            exit 1
+          fi
+          echo "${{ matrix.runner }} is $got, as expected."
+
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.11'
+          # macOS minutes cost 10x, so the dependency download is worth
+          # caching even though it is the cheap half of this job.
+          cache: 'pip'
 
       - name: Install build tool and dependencies
         run: |
           python3 -m pip install --upgrade pip pyinstaller
           python3 -m pip install -r requirements.txt
 
-      - name: Write .env from the repository secret
-        # academy.spec bakes this project's .env into the binary and refuses
-        # to build without an ENTRY_SECRET — that value signs every member
-        # card, and a build that invents its own cannot verify a single card
-        # already printed. A checkout has no .env (it is never committed), so
-        # CI is handed the same secret through Settings -> Secrets and
-        # variables -> Actions. It must match the one in the local .env, or
-        # the binary this produces will reject every existing card.
+      - name: Write the .env this build bakes in
+        # THE CHECKOUT HAS NO .env. It is gitignored and always will be -- it
+        # holds ENTRY_SECRET and, now, an Atlas password. So "make the build
+        # use my .env" cannot mean reading the file: CI has never seen it.
+        # academy.spec bakes whatever .env is in the tree at build time, and
+        # this step is what puts one there.
+        #
+        # That is why a build came out talking to SQLite while the developer's
+        # own .env said mongo. Nothing was broken -- the settings simply were
+        # not given to CI, and the backend fell back to its default in
+        # silence. Two changes stop that: the backend is a **choice made when
+        # you press Run workflow**, printed in the log and the summary, so a
+        # run always says which database its binary is for; and choosing
+        # mongo without the URI secret fails the build here instead of
+        # producing a binary that raises on the reception Mac.
+        #
+        # The backend is an input rather than a fourth secret because it is
+        # not one -- it is a decision, and one visible switch beats two
+        # sources of truth that can disagree. The URI and database name stay
+        # secrets, because the URI carries the password.
         env:
           ENTRY_SECRET: ${{ secrets.ENTRY_SECRET }}
+          MB_MONGO_URI: ${{ secrets.MB_MONGO_URI }}
+          MB_MONGO_DB: ${{ secrets.MB_MONGO_DB }}
+          BACKEND: ${{ inputs.backend }}
         run: |
           if [ -z "$ENTRY_SECRET" ]; then
             echo "The ENTRY_SECRET repository secret is not set."
@@ -58,14 +169,310 @@ jobs:
           fi
           printf 'ENTRY_SECRET=%s\n' "$ENTRY_SECRET" > .env
 
-      - name: Package
-        # static/app/ (the built React interface) is used exactly as
+          if [ "$BACKEND" = "mongo" ]; then
+            if [ -z "$MB_MONGO_URI" ]; then
+              echo "You chose the mongo backend, but the MB_MONGO_URI secret"
+              echo "is not set. The binary would start up and raise rather"
+              echo "than quietly fall back to SQLite, so this fails here."
+              echo
+              echo "Add MB_MONGO_URI (and MB_MONGO_DB if it is not mb_ballet)"
+              echo "under Settings -> Secrets and variables -> Actions, set to"
+              echo "the same values as your local .env."
+              exit 1
+            fi
+            printf 'MB_DB_BACKEND=mongo\n'   >> .env
+            printf 'MB_MONGO_URI=%s\n' "$MB_MONGO_URI" >> .env
+            [ -n "$MB_MONGO_DB" ] && printf 'MB_MONGO_DB=%s\n' "$MB_MONGO_DB" >> .env
+            echo "Baking: MongoDB. MB_MONGO_URI is set${MB_MONGO_DB:+, database $MB_MONGO_DB}."
+          else
+            echo "Baking: SQLite, an academy.db beside the binary."
+            echo "Re-run with the backend input set to 'mongo' for a hosted build."
+          fi
+          # The keys only -- the URI carries the password and this is a log.
+          echo "Baked keys: $(cut -d= -f1 .env | tr '\n' ' ')"
+
+      - name: Check the committed interface is there
+        # static/app/ is the built React admin and is used exactly as
         # committed — no npm/Node step here, the same "already built, just
-        # use it" fallback the local build scripts take when Node isn't
-        # installed. The hidden imports live in academy.spec, not here.
+        # use it" fallback the local build scripts take when Node is absent.
+        # Which means a checkout missing it packages a binary that serves
+        # nothing at `/`, and the first person to find out is whoever opens
+        # the release. See the build-once-commit-the-output note in CLAUDE.md.
+        run: |
+          test -f static/app/index.html || {
+            echo "static/app/index.html is missing."
+            echo "Run 'cd frontend && npm run build' and commit static/app/."
+            exit 1
+          }
+
+      - name: Package
+        # The hidden imports live in academy.spec, not here.
         run: python3 -m PyInstaller academy.spec --clean --noconfirm
 
-      - uses: actions/upload-artifact@v4
+      - name: Check the binary is the architecture we asked for
+        # Belt and braces over the runner check: this asks the file itself,
+        # which is the thing that actually reaches the Mac.
+        run: |
+          got=$(lipo -archs "dist/MB Ballet Academy")
+          echo "dist/MB Ballet Academy is: $got"
+          [ "$got" = "${{ matrix.arch }}" ] || {
+            echo "Expected ${{ matrix.arch }}."; exit 1; }
+
+      - name: Smoke-test the binary
+        # The one failure this build has actually produced, more than once,
+        # is a missing hidden import: uvicorn and starlette load modules by
+        # string name, so static analysis cannot see them, and the symptom is
+        # a window that "opens and shuts" with nothing to go on. It costs a
+        # few seconds to prove the thing starts and answers, and an untested
+        # binary is the whole reason run_app.py has to write error.log.
+        #
+        # Three URLs rather than one: /reception is the screen the laptop
+        # exists for, / is the React admin out of static/app, and
+        # /api/dashboard proves the routers and the database came up. The
+        # frozen app creates its own empty academy.db in dist/ and needs no
+        # photos/ or cards/ folder beside it — pictures are rows now, and a
+        # missing mount directory used to raise at import time.
+        run: |
+          cd dist
+          "./MB Ballet Academy" > run.log 2>&1 &
+          pid=$!
+
+          # The port comes out of the binary's own banner, not assumed: when
+          # something else holds 8000 run_app.py deliberately moves to the
+          # next free one, so a hardcoded 8000 would either miss the binary
+          # or, worse, pass by talking to whatever else was listening.
+          base=""
+          for _ in $(seq 1 60); do
+            base=$(sed -n 's|.*The system is running at *\(http://[^ ]*\).*|\1|p' run.log | head -1)
+            [ -n "$base" ] && break
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 2
+          done
+
+          ok=""
+          if [ -n "$base" ]; then
+            for _ in $(seq 1 30); do
+              # -s without -S: a retry that has not come up yet is expected,
+              # and sixty "Failed to connect" lines bury the real failure.
+              curl -fs -o /dev/null "$base/reception" && { ok=1; break; }
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 2
+            done
+          fi
+
+          if [ -z "$ok" ]; then
+            echo "The packaged binary never came up${base:+ at $base}."
+            echo "--- stdout/stderr ---"; cat run.log || true
+            echo "--- error.log ---";     cat error.log 2>/dev/null || true
+            exit 1
+          fi
+          echo "Answering at $base"
+          curl -fsS -o /dev/null "$base/" || {
+            echo "The admin interface did not load — check static/app/."; exit 1; }
+          curl -fsS -o /dev/null "$base/api/dashboard" || {
+            echo "The API did not answer — the database did not come up."; exit 1; }
+          kill "$pid" 2>/dev/null || true
+          echo "The ${{ matrix.arch }} binary starts natively on a ${{ matrix.arch }} Mac,"
+          echo "serves the kiosk and the admin, and answers the API."
+
+      - name: Pack it so it arrives executable
+        # upload-artifact builds the zip itself and its own docs say "file
+        # permissions are not maintained ... all files will have 644". A
+        # 644 binary is not a broken download, it just refuses to run:
+        #
+        #     zsh: permission denied: ./MB Ballet Academy
+        #
+        # which is a second mystifying error after the CPU-type one, and the
+        # workaround the action recommends is to tar first. tar carries the
+        # mode, so the file comes out of the archive already executable and
+        # there is no chmod to remember -- a step that gets skipped exactly
+        # when it matters. macOS unarchives .tar.gz on a double-click, so
+        # this costs no Terminal either.
+        run: |
+          chmod +x "dist/MB Ballet Academy"
+          tar -czf "mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz" \
+              -C dist "MB Ballet Academy"
+          ls -l "mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz"
+
+      - uses: actions/upload-artifact@v7
         with:
-          name: mb-ballet-academy-macos
-          path: dist/MB Ballet Academy
+          # The architecture is in the name on purpose. Two downloads that
+          # look identical is how the wrong one ends up on the Mac, and the
+          # error it gives there names no cause you can act on.
+          name: mb-ballet-academy-macos-${{ matrix.arch }}
+          path: mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz
+
+      - name: Say what this is and how to run it
+        # The same notes build_mac.sh prints at the end of a local build, put
+        # where whoever downloads this actually looks. Every one of these is
+        # an error someone has already hit with nothing to go on: the wrong
+        # architecture, a 644 binary, Gatekeeper, and Rosetta 2 not being
+        # installed on a Mac that needs it.
+        run: |
+          {
+            echo "## ${{ matrix.arch }} build"
+            echo
+            echo 'Take this one if `uname -m` on the Mac says `${{ matrix.arch }}`.'
+            echo
+            case "${{ matrix.arch }}" in
+              arm64)  echo '- Apple Silicon (M1 and later). On an Intel Mac it cannot run at all.' ;;
+              x86_64) echo '- Intel Macs, natively. On Apple Silicon it needs Rosetta 2, which is'
+                      echo '  **not installed by default** and is not offered when you launch from'
+                      echo '  Terminal — you just get `bad CPU type in executable`. Install it once:'
+                      echo '  `softwareupdate --install-rosetta --agree-to-license`' ;;
+            esac
+            echo
+            echo '```bash'
+            echo 'tar -xzf mb-ballet-academy-macos-${{ matrix.arch }}.tar.gz'
+            echo 'mkdir -p ~/"MB Ballet" && mv "MB Ballet Academy" ~/"MB Ballet"/'
+            echo 'cd ~/"MB Ballet" && ./"MB Ballet Academy"'
+            echo '```'
+            echo
+            echo 'It comes out of the tar already executable, so there is no `chmod` step.'
+            echo
+            echo 'It is unsigned, so the first run needs one right-click (or Control-click)'
+            echo 'on the file in Finder and **Open** to clear Gatekeeper.'
+            echo
+            echo "### Database"
+            echo
+            if [ "${{ inputs.backend }}" = "mongo" ]; then
+              echo 'This binary talks to **MongoDB**. The connection string is baked'
+              echo 'into it, so it needs no `.env` and no configuration on the Mac —'
+              echo 'and it needs internet. Its startup banner names the database and'
+              echo 'host it connected to; check that line on the first run.'
+              echo
+              echo 'It also means **this artifact contains the Atlas credentials**.'
+              echo 'Anyone who can download it can read them, so treat it like the'
+              echo 'password itself: keep the repository private, and scope the Atlas'
+              echo 'user and IP access list to what reception actually needs.'
+            else
+              echo 'This binary uses **SQLite** and creates `academy.db` beside itself,'
+              echo 'which is what reception should run — it is the only backend that'
+              echo 'keeps working with no internet. Put the binary in its own folder,'
+              echo 'not loose on the Desktop, and back that folder up.'
+              echo
+              echo 'For a MongoDB build, re-run this workflow with the `backend` input'
+              echo 'set to `mongo` — a local `.env` saying so has no effect here,'
+              echo 'because the checkout has no `.env` at all.'
+            fi
+            echo
+            echo
+            echo 'If it starts and then exits, an `error.log` appears next to it. If it'
+            echo 'says `bad CPU type in executable` it never started, so there is no'
+            echo '`error.log` — that is the architecture note above.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Logs, if it went wrong
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs-${{ matrix.arch }}
+          path: |
+            dist/run.log
+            dist/error.log
+          if-no-files-found: ignore
+
+  # ================================================================ canary
+  #
+  # The cheap monthly proof that the job above still *can* run, on a day
+  # nobody needed it to.
+  #
+  # Three things have now changed under this workflow while nobody was
+  # looking -- `macos-13` retired, `macos-14` silently meaning arm64, and
+  # Node 20 removed from the runner images on 23 September 2026 -- and all
+  # three surfaced on the reception Mac rather than here. One cause:
+  # `build` is manual-only, correctly, so nothing exercises it between
+  # releases and the breakage always lands on the day somebody urgently
+  # needs a binary.
+  #
+  # So this runs the fragile half and stops: check out, prove the runner
+  # label still means the architecture the matrix claims, set Python up,
+  # upload something. No PyInstaller, no smoke test -- about a minute of
+  # wall clock, which at the 10x multiplier across two architectures is
+  # roughly 20-40 billed minutes a month, one to two percent of the
+  # free-tier quota. Change the cron to "0 7 1 */3 *" for quarterly if even
+  # that is unwanted; the cost of quarterly is a blind window three times
+  # as wide.
+  #
+  # Deliberately on the real macOS labels rather than ubuntu, even though
+  # ubuntu would bill at 1x: a canary that does not use the same runner
+  # labels cannot catch a retired or redefined label, which is the failure
+  # that has actually happened twice.
+  #
+  # WHAT IT DOES NOT COVER: `academy.spec`'s hidden imports, PyInstaller
+  # itself, and whether the binary starts. Those need the real build --
+  # which is what the smoke test in `build` is for. This only says the
+  # scaffolding still holds.
+  #
+  # NOTE the runner list below is a second copy of `build`'s matrix. The
+  # same deliberate double as the .env parser in config.py and
+  # academy.spec -- KEEP THE TWO IN STEP. If they drift, this job fails
+  # with "no runner matching the labels", which points straight at the
+  # drift rather than hiding it, so the failure mode is loud.
+  canary:
+    if: github.event_name == 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    name: canary ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check the runner is the architecture we asked for
+        # The same guard `build` carries, which is most of the point of
+        # running this on the real labels.
+        run: |
+          got=$(uname -m)
+          if [ "$got" != "${{ matrix.arch }}" ]; then
+            echo "Runner ${{ matrix.runner }} reports $got, not ${{ matrix.arch }}."
+            echo "GitHub has changed what that label means. Fix the matrix in"
+            echo "BOTH jobs in this file before cutting another release --"
+            echo "a build from here would be for the wrong architecture and"
+            echo "would fail on the Mac with 'bad CPU type in executable'."
+            exit 1
+          fi
+          echo "${{ matrix.runner }} is $got, as expected."
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Prove Python is the version the build assumes
+        # If '3.11' ever stops being available on the image, the real build
+        # would either fail here or quietly embed something else in the
+        # binary reception runs.
+        run: |
+          python3 -VV
+          python3 -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
+
+      - name: Upload something, to exercise the artifact path
+        # upload-artifact is the action whose majors do not line up with the
+        # others (see the note at the top), so it is the one most worth
+        # actually invoking rather than assuming.
+        run: echo "canary ${{ matrix.arch }} $(date -u +%FT%TZ)" > canary.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: canary-${{ matrix.arch }}
+          path: canary.txt
+          retention-days: 1
+
+      - name: Say what this run proved
+        run: |
+          {
+            echo "### Canary — ${{ matrix.arch }}"
+            echo
+            echo "\`${{ matrix.runner }}\` is still $(uname -m), it carries"
+            echo "$(python3 -V), and checkout / setup-python /"
+            echo "upload-artifact all still start. Cutting a release from"
+            echo "this workflow should work."
+            echo
+            echo "This did **not** build or run a binary. See the \`build\`"
+            echo "job for that."
+          } >> "$GITHUB_STEP_SUMMARY"

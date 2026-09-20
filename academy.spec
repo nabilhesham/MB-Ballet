@@ -124,7 +124,7 @@ hiddenimports = [
     "sqlite3",
     # local modules, imported normally but listed so a rename cannot break
     # the build silently
-    "server", "access", "cards", "config", "db", "tokens",
+    "server", "access", "cards", "config", "db", "images", "tokens",
     "repo", "repo.base", "repo.ports", "repo.errors", "repo.filters",
     "repo.sqlite", "repo.sqlite.filters", "repo.sqlite.ports",
     # The Mongo backend is imported lazily by repo/__init__.py, so a build
@@ -138,8 +138,13 @@ hiddenimports = [
     # above. dnspython is only needed for mongodb+srv:// URIs.
     "pymongo", "pymongo._cmessage", "bson", "bson._cbson",
     "dns", "dns.resolver",
+    # The CA bundle Atlas is verified against. PyInstaller's own hook
+    # collects certifi's cacert.pem as a data file; naming the module here is
+    # what makes sure the hook runs at all.
+    "certifi",
     "api", "api.clients", "api.plans", "api.classes",
     "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
+    "api.images",
 ]
 
 a = Analysis(

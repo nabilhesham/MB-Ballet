@@ -27,6 +27,19 @@ export const isoDay = ts => {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+/* An ISO day "YYYY-MM-DD" as what a receptionist reads, the other direction
+   from isoDay() above. Split rather than handed to `new Date(iso)`, which
+   parses a bare date as UTC midnight and so prints the day before in any
+   timezone behind it — the same trap isoDay() exists to avoid, and one this
+   app must not reintroduce for a column that is only ever a calendar day. */
+export const fmtISODay = iso => {
+  if (!iso) return '';
+  const [y, m, d] = iso.split('-').map(Number);
+  if (!y || !m || !d) return iso;
+  return new Date(y, m - 1, d).toLocaleDateString(
+    [], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+};
+
 /* The local calendar month "YYYY-MM-DD" -> "YYYY-MM-DD" bounds of today's
    month — mirrors access.month_bounds() so the instructor view's date
    inputs show real dates immediately, before the first response arrives. */

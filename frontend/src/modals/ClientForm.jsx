@@ -20,9 +20,28 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
   const [joined, setJoined] = useState(existing?.joined_on || todayISO());
   const [school, setSchool] = useState(existing?.school || '');
   const [notes, setNotes] = useState(existing?.notes || '');
+  // A save that failed, kept on screen rather than only in a toast. The one
+  // that matters is the duplicate-number refusal: it names the client the
+  // number already belongs to and their member number, which reception has
+  // to read and go and look up. A message that fades while they are still
+  // reaching for it is no message at all.
+  const [err, setErr] = useState('');
 
   const save = async () => {
+    setErr('');
     if (!name.trim()) return toast('Name is required', 'bad');
+    // Checked here as well as server-side, the same split every other rule
+    // in this app uses: the form answers without a round trip, the endpoint
+    // refuses independently. The sentences are kept identical to
+    // access.phone_required()'s, so reception never sees the rule worded two
+    // ways for one mistake.
+    if (!phone.trim()) {
+      return setErr('A mobile number is required — it is what identifies a client.');
+    }
+    if (phone.replace(/\D/g, '').length < 8) {
+      return setErr('That does not look like a mobile number. It identifies the '
+                    + 'client, so it has to be the real one.');
+    }
     const body = {
       name_en: name, phone, age: age === '' ? null : Number(age),
       school, joined_on: joined, notes,
@@ -39,22 +58,34 @@ export default function ClientForm({ existing, onSaved, onCreated }) {
         toast('Client created');
         onCreated(r.id);
       }
-    } catch (e) { toast(e.message, 'bad'); }
+    } catch (e) { setErr(e.message); toast(e.message, 'bad'); }
   };
 
   return (
     <>
       <h3>{existing ? 'Edit client' : 'New client'}</h3>
       {!existing && <div className="mh">Add their plan next — that is where sessions get assigned.</div>}
+      {err && <div className="mh bad">{err}</div>}
       <div className="fieldrow">
         <div>
           <label>FULL NAME</label>
-          <input value={name} onChange={e => setName(e.target.value)} placeholder="Ahmed Hassan" />
+          <input value={name} onChange={e => { setName(e.target.value); setErr(''); }}
+                 placeholder="Ahmed Hassan" />
         </div>
         <div>
           <label>MOBILE NUMBER</label>
-          <input type="tel" inputMode="tel" value={phone} onChange={e => setPhone(e.target.value)}
+          {/* Identity is this AND the name together, so a shared number is
+              fine — a parent enrols two children on one — and the same name
+              on the same number is one person entered twice. Still required
+              on its own: a client with no number cannot be told apart from
+              the next client with no number. Unmarked, like FULL NAME above:
+              this form has never carried required-field markers, and adding
+              one to half the required fields would read as the other half
+              being optional. */}
+          <input type="tel" inputMode="tel" value={phone}
+                 onChange={e => { setPhone(e.target.value); setErr(''); }}
                  placeholder="01001234567" />
+          <div className="hint">Two clients may share a number — siblings on a parent's mobile.</div>
         </div>
       </div>
       <div className="fieldrow">

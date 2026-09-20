@@ -76,3 +76,55 @@ def test_ids_are_autoincrement_and_never_reused(academy):
     for table in ("clients", "sessions", "subscriptions", "bookings",
                   "credentials", "classes", "instructors"):
         assert "AUTOINCREMENT" in sql[table].upper(), table
+
+
+# ------------------------------------------------------- opening an old file
+
+def test_a_database_older_than_ends_at_still_opens(tmp_path):
+    """
+    The academy's own database predates `sessions.ends_at`, and `db.init()`
+    could not open it: CREATE TABLE IF NOT EXISTS is a no-op on a table that
+    exists, so the column stayed missing, and `ix_sess_ends` -- in the same
+    executescript, running before migrate() -- failed with "no such column"
+    and took the whole script down with it. migrate() never ran at all, so
+    the app would not start on the one database that matters.
+    """
+    import sqlite3
+
+    import db
+
+    path = str(tmp_path / "old.db")
+    old = sqlite3.connect(path)
+    old.executescript("""
+        CREATE TABLE sessions (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_id       INTEGER NOT NULL,
+            instructor_id  INTEGER,
+            starts_at      INTEGER NOT NULL,
+            duration_hours REAL NOT NULL DEFAULT 1,
+            status         TEXT NOT NULL DEFAULT 'scheduled',
+            notes          TEXT);
+        INSERT INTO sessions (class_id, starts_at, duration_hours)
+             VALUES (1, 1700000000, 1.5);
+    """)
+    old.commit()
+    old.close()
+
+    db.init(path)
+
+    conn = db.connect(path)
+    try:
+        assert "ends_at" in cols(conn, "sessions")
+        # Backfilled, not left NULL: a NULL there is invisible to
+        # slot_conflict() and to the absent sweep, which is a wrong answer
+        # with nothing on screen to suggest it.
+        row = conn.execute("SELECT starts_at, ends_at FROM sessions").fetchone()
+        assert row["ends_at"] == row["starts_at"] + int(1.5 * 3600)
+        # And the index that used to blow up is there.
+        names = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        assert "ix_sess_ends" in names
+        assert "images" in {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+    finally:
+        conn.close()

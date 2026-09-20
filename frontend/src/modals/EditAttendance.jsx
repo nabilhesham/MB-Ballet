@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { api } from '../api';
 import { fmtFull } from '../lib/format';
+import { fetchAnyClassSessions } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import { StatusPill } from '../components/Pill';
@@ -17,12 +18,11 @@ import SessionPickTable from './SessionPickTable';
  * different class — it moves the booking there and marks it present in one
  * step.
  *
- * That second list is the last week plus everything still to come, not the
- * whole timetable: a correction is made within days of the session, and
- * offering two hundred rows to find one buries it.
+ * That second list is the same three-weeks-back-plus-upcoming window every
+ * other screen that picks a session for a client uses (lib/planSessions.js),
+ * rather than the whole timetable: a correction is made within weeks of the
+ * session, and offering two hundred rows to find one buries it.
  */
-const BACK_DAYS = 7;
-const FORWARD_DAYS = 180;
 export default function EditAttendance({ clientId, sessionId, className, status, ts, onSaved }) {
   const { close } = useModal();
   const toast = useToast();
@@ -42,10 +42,7 @@ export default function EditAttendance({ clientId, sessionId, className, status,
 
   const startPicking = async () => {
     setPicking(true);
-    const now = Math.floor(Date.now() / 1000);
-    const list = await api(`/sessions?start=${now - BACK_DAYS * 86400}`
-      + `&end=${now + FORWARD_DAYS * 86400}&available_for=${clientId}`);
-    setSessions(list.filter(s => s.status !== 'cancelled'));
+    setSessions(await fetchAnyClassSessions(clientId));
   };
 
   const savePresent = async () => {

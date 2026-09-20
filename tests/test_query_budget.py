@@ -237,8 +237,10 @@ def test_a_client_profile_costs_a_fixed_number_of_queries(client):
         r = client.get(f"/api/clients/{client.academy.dual}")
     assert r.status_code == 200
     assert len(r.json()["plans"]) == 2
-    # Was 16, before plan_states() became one call.
-    assert len(counted) <= 10, counted.report()
+    # Was 16, before plan_states() became one call; 11 rather than 10 since
+    # the profile began reading which card images exist -- one find for all
+    # of them, which is the right shape and a legitimate extra call.
+    assert len(counted) <= 11, counted.report()
 
 
 def test_attendance_counts_is_one_query_for_many_sessions(academy):

@@ -56,6 +56,10 @@ FIELDS = {
         "expires_on": None, "active": 1, "created_at": None,
         "frozen_on": None, "frozen_until": None, "frozen_days": 0,
     },
+    "appointments": {
+        "name": None, "phone": None, "age": None, "on_date": None,
+        "notes": None, "created_at": None,
+    },
     "freezes": {
         "subscription_id": None, "from_date": None, "until_date": None,
         "ended_on": None, "days_added": None, "released": 0, "reason": None,
@@ -64,6 +68,10 @@ FIELDS = {
     "bookings": {
         "client_id": None, "session_id": None, "subscription_id": None,
         "status": "booked", "checked_in_at": None, "created_at": None,
+    },
+    "images": {
+        "kind": None, "owner_id": None, "variant": "", "mime": None,
+        "data": None, "updated_at": None,
     },
     "credentials": {
         "client_id": None, "class_id": None, "token": None, "kind": "card",
@@ -95,6 +103,7 @@ NULLABLE = {coll: {f for f, default in fields.items() if default is None}
 # only idempotent because they exist, and without them seed.py would
 # silently duplicate every booking it re-imports.
 INDEXES = {
+    "images": [(["kind", "owner_id", "variant"], True)],
     "credentials": [(["token"], True), (["client_id", "class_id"], False)],
     "access_events": [(["scanned_at"], False), (["client_id"], False),
                       (["session_id"], False)],
@@ -108,6 +117,7 @@ INDEXES = {
                  # list, and runs before every read that touches attendance.
                  (["status", "session_id"], False)],
     "freezes": [(["subscription_id"], False)],
+    "appointments": [(["on_date"], False)],
     "instructor_hours": [(["instructor_id", "work_date"], True),
                          (["work_date"], False)],
     "instructor_hour_adjustments": [(["instructor_id", "adjustment_date"], False)],

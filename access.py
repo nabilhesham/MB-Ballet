@@ -16,6 +16,8 @@ import time
 from datetime import date, datetime, timedelta, time as _t
 
 import db
+import images
+import identity
 import tokens
 
 # Only plans of this size or larger may be frozen. Short packs are meant to be
@@ -394,6 +396,132 @@ def can_freeze(sub) -> tuple:
     if sub["frozen_on"]:
         return False, "already frozen"
     return True, ""
+
+
+# ---------------------------------------------------------------- identity
+def phone_required(phone) -> str | None:
+    """
+    The sentence to refuse with when there is no usable number, or None.
+
+    The mobile number identifies the client, so it is mandatory — a client
+    with no number cannot be told apart from the next client with no number,
+    and duplicate_client() below has nothing to compare, which means two of
+    them are not duplicates of each other and never will be. Making it
+    required is what closes that.
+
+    "Usable" is doing work here. A required field that accepts "n/a" is not
+    required in any sense that matters: it would be satisfied by something
+    carrying no identity, and several clients could hold the same placeholder
+    without any of them conflicting. identity.looks_like_a_number() is the
+    test, and identity.MIN_DIGITS records where the line is and why.
+
+    The seed does **not** go through this. `seed.py` inserts clients
+    directly, and it must: the roster sheets are the business record, and
+    refusing to import a student because nobody wrote her number down would
+    lose her. So a seeded database can legitimately hold a client with no
+    number, and editing that client from the profile is where reception is
+    asked for one.
+    """
+    if not str(phone or "").strip():
+        return "A mobile number is required — it is what identifies a client."
+    if not identity.looks_like_a_number(phone):
+        return ("That does not look like a mobile number. It identifies the "
+                "client, so it has to be the real one.")
+    return None
+
+
+def duplicate_client(repo, name, phone, exclude_id=None) -> str | None:
+    """
+    The sentence to refuse a client with, or None if this pair is free.
+
+    Identity is the **mobile number and the name together**. A shared mobile
+    is not a duplicate: a parent enrols two children on one number, which at
+    a children's ballet academy is the ordinary case rather than the
+    exception. What is a duplicate is the same name on the same number --
+    the same person entered twice.
+
+    That matters because two profiles for one person is not an untidiness
+    problem: their sessions, plans and cards divide between the two records,
+    so a card scans against a balance that is half what they bought, and the
+    missing half is invisible because the other profile looks healthy.
+
+    Like can_freeze(), it is the single answer to the question, so the form
+    and the endpoint cannot drift -- both refuse with this sentence.
+
+    Names are compared through identity.name_key(): whitespace collapsed,
+    case folded, and deliberately nothing cleverer. Reception can see two
+    rows and decide; a rule that decided "Mohamed" and "Mohammed" were one
+    person would also decide two real cousins were.
+
+    A blank number is never a conflict -- there is nothing to compare, and
+    two blanks are not duplicates of each other. That is why
+    phone_required() exists and why both routes call it *first*.
+
+    `exclude_id` is the client being edited: they are not a duplicate of
+    themselves.
+    """
+    key = identity.phone_key(phone)
+    if not key:
+        return None
+    want = identity.name_key(name)
+    same = [c for c in repo.clients_by_phone_key(key)
+            if c["id"] != exclude_id and identity.name_key(c["name_en"]) == want]
+    if not same:
+        return None
+    c = same[0]
+    who = f"{c['name_en']}, member {c['id']}"
+    if not c["active"]:
+        # Archived, so the match is somebody deliberately put away rather
+        # than somebody on the list. "Already exists" would send reception
+        # looking for a client they cannot find, and the only way out of
+        # that is a second profile -- the thing this refusal prevents.
+        return (f"{who}, already has this mobile number and is archived. "
+                f"Restore them from the Archived list instead of adding "
+                f"them again.")
+    return (f"{who}, already has this name and this mobile number. "
+            f"A different person on the same number is fine -- change the "
+            f"name if this is a second client.")
+
+
+# ---------------------------------------------------------------- lapsed
+# How long after a plan ends a client still counts as a student of that
+# class. Membership is derived from bookings and bookings are never deleted,
+# so without this a client who stopped coming last year stays on the class
+# page for ever and the roster slowly stops describing who actually attends.
+LAPSED_GRACE_MONTHS = 1
+
+
+def lapsed_cutoff(when: date = None) -> str:
+    """
+    The ISO date a plan must have ended on or after to still count.
+
+    One calendar month back, not thirty days: "a month after it ran out" is
+    what reception means, and a month is what the plans are sold in. The day
+    is clamped to the shorter month, so 31 March answers 28 February rather
+    than raising.
+    """
+    import calendar
+    d = when or date.today()
+    y, m = d.year, d.month - LAPSED_GRACE_MONTHS
+    while m < 1:
+        y -= 1
+        m += 12
+    return date(y, m, min(d.day, calendar.monthrange(y, m)[1])).isoformat()
+
+
+def plan_end(repo, sub) -> str:
+    """
+    The last day a plan covers: the later of its `expires_on` and the date
+    of the last session it pays for.
+
+    refresh_expiry() normally keeps those two equal, so this matters in
+    exactly one case -- a date typed into ENDS ON that sits *earlier* than a
+    session the plan still funds. The plan cannot have finished before a
+    session it is paying for, so the session wins. Whichever is later is
+    what the lapsed cutoff is measured from.
+    """
+    last = last_session_date(repo, sub["id"])
+    return max(x for x in (sub.get("expires_on"), last, "") if x is not None)
 
 
 # ---------------------------------------------------------------- auto-absent
@@ -1209,8 +1337,24 @@ def delete_plan(repo, sub_id: int) -> dict:
     plan that keeps the record. So the counts are taken before the delete and
     returned, and the confirm dialog says what will go rather than what did.
 
-    No refresh_expiry() here, unlike the other bulk booking deletes: the plan
-    whose expiry would be recomputed is itself gone.
+    Deleting the last live plan for a class also takes the client **out of
+    that class**, which is what a receptionist means by deleting a plan: the
+    class page lists "students with a booking", so a slot of theirs still
+    sitting on a date next week left them on the roster of a class they had
+    just been removed from. Only slots still ahead of them go, and only when
+    no other live plan of theirs stands behind that class. Those slots are
+    usually funded by an older, already-renewed plan, so each one is given
+    back to whatever plan paid for it -- which is why this branch *does* call
+    refresh_expiry(), on the other plans rather than on this one.
+
+    Attendance in the class is never touched, even though this is the one
+    deletion that takes attendance with it: what it takes is *this plan's*,
+    because a plan's bookings are its attendance. A session another plan
+    already paid for and the client already attended belongs to that plan's
+    history, and is on screen in the payment list underneath.
+
+    No refresh_expiry() for the deleted plan itself, unlike the other bulk
+    booking deletes: the plan whose expiry would be recomputed is gone.
     """
     with repo.begin():
         sub = repo.get("subscriptions", sub_id)
@@ -1225,7 +1369,7 @@ def delete_plan(repo, sub_id: int) -> dict:
         repo.delete_where("bookings", {"subscription_id": sub_id})
         repo.delete("subscriptions", sub_id)
 
-        revoked = 0
+        revoked = released = 0
         if sub["class_id"]:
             still = repo.exists("subscriptions",
                                 {"client_id": sub["client_id"],
@@ -1236,9 +1380,51 @@ def delete_plan(repo, sub_id: int) -> dict:
                     {"client_id": sub["client_id"], "class_id": sub["class_id"],
                      "revoked_at": None},
                     {"revoked_at": db.now()})
+                released = release_from_class(repo, sub["client_id"],
+                                              sub["class_id"])
         return {"ok": True, "bookings": total,
                 "upcoming": total - attended,
-                "attended": attended, "cards_revoked": revoked}
+                "attended": attended, "cards_revoked": revoked,
+                "released": released}
+
+
+def release_from_class(repo, client_id: int, class_id: int) -> int:
+    """
+    Take a client off a class's upcoming sessions. Returns how many slots.
+
+    Membership is derived from bookings, so this is what "remove them from
+    the class" actually consists of. Only what is still ahead of them: a
+    booking already marked present or absent is the record of a session that
+    happened, and belongs to the plan that paid for it.
+
+    Every slot goes back to its own plan as unassigned, which is why the
+    expiry of each one is refreshed -- these bookings are deleted directly
+    rather than through unbook(), the same rule delete_session and
+    delete_class follow.
+
+    Not called on its own anywhere yet; delete_plan is its one caller. It is
+    a named function rather than an inline block because "which bookings put
+    someone in a class" is a question two screens already ask differently,
+    and a third phrasing of it would eventually disagree with both.
+    """
+    theirs = [b for b in repo.find("bookings",
+                                   {"client_id": client_id, "status": "booked"},
+                                   fields=["id", "session_id", "subscription_id"])]
+    if not theirs:
+        return 0
+    # The session's class, not the plan's: this is about who is standing in
+    # the room, which is the same question the class page's student list asks.
+    ahead = {x["id"] for x in repo.find(
+        "sessions",
+        {"id": {"in": [b["session_id"] for b in theirs]}, "class_id": class_id,
+         "status": "scheduled", "starts_at": {"gt": db.now()}}, fields=["id"])}
+    drop = [b for b in theirs if b["session_id"] in ahead]
+    if not drop:
+        return 0
+    repo.delete_where("bookings", {"id": {"in": [b["id"] for b in drop]}})
+    for sub_id in {b["subscription_id"] for b in drop if b["subscription_id"]}:
+        refresh_expiry(repo, sub_id)
+    return len(drop)
 
 
 def delete_client(repo, client_id: int, hard: bool = False) -> dict:
@@ -1279,6 +1465,12 @@ def delete_client(repo, client_id: int, hard: bool = False) -> dict:
             # Ordered by hand to respect the foreign keys.
             for coll in ("bookings", "credentials", "subscriptions", "access_events"):
                 repo.delete_where(coll, {"client_id": client_id})
+            # Their photo and every card ever printed for them. These used to
+            # be files nothing ever removed, so a hard delete left them on the
+            # disk; now they are rows, and rows nobody can reach are the
+            # bulkiest thing in the database.
+            images.drop(repo, images.CLIENT_PHOTO, client_id)
+            images.drop(repo, images.CARD, client_id)
             repo.delete("clients", client_id)
             return {"ok": True, "action": "delete"}
 

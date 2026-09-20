@@ -11,8 +11,8 @@ nothing here is a module constant: every value is a function, read when it is
 asked for.
 
 The frozen/APP_DIR block was also copied into both `server.py` and
-`run_app.py`. It is here once instead, because "the database, photos and
-cards live next to the exe" is the same fact in both. `.env` is not in that
+`run_app.py`. It is here once instead, because "the database lives
+next to the exe" is the same fact in both. `.env` is not in that
 list: there is one of those, in the source folder, and a packaged build
 carries its values rather than reading a second copy — see load_env().
 
@@ -37,7 +37,8 @@ _env_loaded = False
 
 def app_dir() -> str:
     """
-    The folder the academy's own files live in: academy.db, photos, cards.
+    The folder the academy's own files live in — academy.db, and nothing
+    else since the photos and cards moved into it (see images.py).
 
     Not `.env`. In a source checkout this is the folder holding it anyway; in
     a packaged build the settings are baked into the binary and nothing looks
@@ -92,8 +93,7 @@ def load_env() -> None:
     exe, so a build would look there, find nothing, and mint a fresh random
     ENTRY_SECRET into a second `.env` nobody knew about; every card already
     printed then stopped verifying, with a build that looked like it worked.
-    The chdir stays either way: academy.db, photos/ and cards/ still live
-    beside the exe.
+    The chdir stays either way: academy.db still lives beside the exe.
 
     The file is read unconditionally. It used to be read only when
     ENTRY_SECRET was unset — so on a machine where the secret was exported in
@@ -181,6 +181,25 @@ def sqlite_path() -> str:
     return os.environ.get("MB_SQLITE_PATH") or "academy.db"
 
 
+def legacy_media_dir() -> str:
+    """
+    Where an install older than images.py left its photos/ and cards/.
+
+    Beside the SQLite database, always, and deliberately not a function of
+    MB_DB_BACKEND: those folders only ever existed next to `academy.db`,
+    since they predate there being a second backend at all. In an ordinary
+    install this is app_dir() anyway -- sqlite_path() defaults to
+    "academy.db" and load_env() has chdir'd there.
+
+    Branching on backend() here was wrong, and wrong in the one place it
+    mattered. `migrate_to_mongo.py` reads SQLite whatever the backend is set
+    to, so with MB_DB_BACKEND=mongo this answered app_dir() while the
+    pictures sat beside the source file: it found nothing to read in and
+    migrated the paths instead of the pictures, silently.
+    """
+    return os.path.dirname(os.path.abspath(sqlite_path()))
+
+
 def mongo_uri() -> str:
     """
     The Atlas connection string.
@@ -208,6 +227,22 @@ def describe() -> str:
     """One line for the startup banner, with no secret in it."""
     if backend() == SQLITE:
         return f"SQLite  {os.path.join(app_dir(), sqlite_path())}"
-    # Never print the URI: it carries the password.
-    host = mongo_uri().split("@")[-1].split("/")[0]
-    return f"MongoDB  {mongo_db()} at {host}"
+    return f"MongoDB  {mongo_db()} at {mongo_hosts()}"
+
+
+def mongo_hosts() -> str:
+    """
+    The host part of the URI, with any credentials removed.
+
+    Never the URI itself: it carries the password, and this line goes on the
+    startup banner. Splitting on "@" alone was not enough -- a URI with no
+    credentials in it has no "@" to split on, so the whole thing survived and
+    the next split on "/" returned the *scheme*, printing "at mongodb:". That
+    is the one line telling reception which database the app is talking to,
+    and the direct multi-host form .env.example documents for networks that
+    filter SRV lookups is exactly the shape that has no credentials.
+    """
+    uri = mongo_uri()
+    _, _, rest = uri.partition("://")          # drop mongodb:// or mongodb+srv://
+    rest = rest.rpartition("@")[2] or rest     # drop user:pass@ if present
+    return rest.split("/")[0].split("?")[0] or "an unnamed host"

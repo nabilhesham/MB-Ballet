@@ -79,17 +79,29 @@ class MoveIn(BaseModel):
 # ---------------------------------------------------------------- routes
 @router.get("/api/sessions")
 def list_sessions(start: int = 0, end: int = 0, class_id: int = 0, available_for: int = 0):
+    """
+    The timetable, optionally windowed.
+
+    Leaving `start` and `end` off means **no date bound at all** — every
+    session there is. It used to mean a default window of last week plus
+    four, which nothing ever asked for and which made "no range" quietly mean
+    "some range": the Sessions screen carried its own hardcoded window
+    instead, the calendar asked for whatever month you turned to, and the two
+    disagreed about what existed. A session outside the list's range still
+    showed in the calendar and still held its slot against `slot_conflict()`,
+    so scheduling over it was refused by something the list gave no way to
+    find or delete.
+
+    0 is how a query string spells "not given", so it is what None means here.
+    """
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
-        if not start:
-            start = db.now() - 7 * 86400
-        if not end:
-            end = start + 28 * 86400
         # Half-open, where this was BETWEEN ... AND. `available_for` drops
         # sessions the client already holds a slot in.
-        return repo.sessions_in_range(start, end + 1, class_id=class_id,
-                                      not_booked_by=available_for)
+        return repo.sessions_in_range(
+            start or None, (end + 1) if end else None,
+            class_id=class_id, not_booked_by=available_for)
     finally:
         repo.close()
 

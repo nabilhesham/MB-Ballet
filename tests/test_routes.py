@@ -11,6 +11,7 @@ lives in these handlers rather than in access.py, and all of it is about to
 be moved behind a repository interface. This is the net under that.
 """
 
+import re
 from datetime import date, datetime, time, timedelta
 
 import pytest
@@ -32,6 +33,14 @@ def client(academy):
     with TestClient(server.app) as c:
         c.academy = academy
         yield c
+
+
+# A lapsed cutoff that excludes nobody, for the tests below that are about
+# what deleting a plan does to class membership rather than about the
+# month-after-expiry cutoff. Passing the real access.lapsed_cutoff() here
+# would mix the two rules into one assertion. The cutoff has its own tests
+# in test_lapsed_students.py.
+OLD = "1970-01-01"
 
 
 def at(day_offset: int, hour: int, minute: int = 0) -> int:
@@ -332,10 +341,32 @@ def test_the_card_url_is_stamped_so_a_reissue_is_not_cached(client):
     a = client.academy
     url = client.post(f"/api/clients/{a.dual}/card",
                       json={"class_id": a.ballet}).json()["card_url"]
-    assert "?v=" in url, "one stable filename per client per class, so it needs a stamp"
+    # The stamp, wherever in the query string it lands — the card URL now
+    # carries the class as ?variant= too, so the version can be the second
+    # parameter. What matters is that it is there and that it moves: the URL
+    # is derived from the client and the class, so without it a reissue hands
+    # back a URL the browser already has a picture for.
+    assert re.search(r"[?&]v=\d+", url), "a reissue needs a new URL"
+    again = client.post(f"/api/clients/{a.dual}/card",
+                        json={"class_id": a.ballet}).json()["card_url"]
+    assert again.split("v=")[0] == url.split("v=")[0]
 
 
 # ---------------------------------------------------------------- deleting
+
+def free_ballet_session(repo, a):
+    """A ballet session still ahead that the dual client is not booked into.
+
+    One booking per client per session is a unique index, so a second plan's
+    leftover slot has to land on a date their main plan did not take."""
+    taken = {b["session_id"] for b in repo.find("bookings", {"client_id": a.dual})}
+    ahead = [s for s in repo.find("sessions", {"class_id": a.ballet},
+                                  sort=[("starts_at", 1)])
+             if s["starts_at"] > db.now() and s["status"] == "scheduled"
+             and s["id"] not in taken]
+    assert ahead, "the fixture has no spare ballet session ahead"
+    return ahead[0]
+
 
 def test_deleting_a_plan_takes_its_bookings_with_it(client):
     a = client.academy
@@ -355,6 +386,87 @@ def test_deleting_a_plan_revokes_that_classs_card(client):
     assert client.delete(f"/api/plans/{a.dual_ballet_plan}").json()["cards_revoked"] == 1
     assert access.verify(a.repo, a.dual_ballet_card)["granted"] is False
     assert access.verify(a.repo, a.dual_flex_card) is not None, "the other class is unaffected"
+
+
+def test_deleting_a_plan_takes_the_client_off_the_class(client):
+    """
+    "Delete the plan" means "they are not in this class any more", and class
+    membership is derived from bookings — so a slot of theirs still sitting
+    on a date next week left them on the roster of a class they had just been
+    taken out of. The leftover is normally an older, renewed plan's.
+    """
+    a = client.academy
+    repo = a.repo
+    # A renewal: the old plan is deactivated but keeps its bookings, one of
+    # them on a session still ahead.
+    old_plan = repo.insert("subscriptions", {
+        "client_id": a.dual, "class_id": a.ballet, "plan": "4 sessions",
+        "sessions_total": 4, "starts_on": "2020-01-01",
+        "expires_on": "2020-03-01", "active": 0, "created_at": db.now()})
+    ahead = free_ballet_session(repo, a)
+    repo.insert("bookings", {
+        "client_id": a.dual, "session_id": ahead["id"], "subscription_id": old_plan,
+        "status": "booked", "created_at": db.now()})
+    assert any(s["id"] == a.dual for s in repo.class_students(a.ballet, OLD))
+
+    r = client.delete(f"/api/plans/{a.dual_ballet_plan}").json()
+    assert r["released"] == 1
+    assert not any(s["id"] == a.dual for s in repo.class_students(a.ballet, OLD)), \
+        "still listed as a student of a class they were just removed from"
+    # The slot went back to the plan that paid for it rather than vanishing.
+    assert access.plan_state(repo, old_plan)["unassigned"] == 4
+
+
+def test_the_other_class_keeps_its_student(client):
+    """Deleting the ballet plan says nothing about flexibility."""
+    a = client.academy
+    client.delete(f"/api/plans/{a.dual_ballet_plan}")
+    assert any(s["id"] == a.dual for s in a.repo.class_students(a.flex, OLD))
+
+
+def test_a_live_plan_in_the_class_keeps_them_in_it(client):
+    """
+    One plan per class is what makes active_plan() answer, so this is the
+    case where reception deletes a plan entered by mistake and a real one is
+    still standing behind the class.
+    """
+    a = client.academy
+    repo = a.repo
+    spare = repo.insert("subscriptions", {
+        "client_id": a.dual, "class_id": a.ballet, "plan": "4 sessions",
+        "sessions_total": 4, "starts_on": date.today().isoformat(),
+        "expires_on": (date.today() + timedelta(days=60)).isoformat(),
+        "active": 1, "created_at": db.now()})
+    ahead = free_ballet_session(repo, a)
+    repo.insert("bookings", {
+        "client_id": a.dual, "session_id": ahead["id"], "subscription_id": spare,
+        "status": "booked", "created_at": db.now()})
+
+    r = client.delete(f"/api/plans/{a.dual_ballet_plan}").json()
+    assert r["released"] == 0 and r["cards_revoked"] == 0
+    assert any(s["id"] == a.dual for s in repo.class_students(a.ballet, OLD))
+
+
+def test_attendance_in_the_class_is_never_released(client):
+    """
+    This deletion takes *this plan's* attendance, because a plan's bookings
+    are its attendance. A session another plan already paid for and the
+    client already sat through belongs to that plan's history.
+    """
+    a = client.academy
+    repo = a.repo
+    old_plan = repo.insert("subscriptions", {
+        "client_id": a.dual, "class_id": a.ballet, "plan": "4 sessions",
+        "sessions_total": 4, "starts_on": "2020-01-01",
+        "expires_on": "2020-03-01", "active": 0, "created_at": db.now()})
+    past = [s for s in repo.find("sessions", {"class_id": a.ballet})
+            if s["starts_at"] < db.now()][0]
+    repo.insert("bookings", {
+        "client_id": a.dual, "session_id": past["id"], "subscription_id": old_plan,
+        "status": "present", "created_at": db.now()})
+
+    assert client.delete(f"/api/plans/{a.dual_ballet_plan}").json()["released"] == 0
+    assert access.plan_state(repo, old_plan)["present"] == 1
 
 
 def test_deleting_an_unknown_plan_is_a_404(client):

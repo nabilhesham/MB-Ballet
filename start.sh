@@ -18,8 +18,8 @@ printf "\n  %sMB BALLET ACADEMY%s\n  %s─────────────�
 
 # A virtual environment holds compiled, platform-specific binaries, so a single
 # .venv shared between Windows and Linux destroys itself every time the other
-# platform runs. Each platform gets its own; the database, .env, cards and
-# photos are plain files and stay shared.
+# platform runs. Each platform gets its own; the database and .env are plain
+# files and stay shared.
 case "$(uname -s)" in
   Linux*)                 VENVDIR=".venv-linux" ;;
   Darwin*)                VENVDIR=".venv-macos" ;;

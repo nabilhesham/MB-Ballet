@@ -7,7 +7,7 @@ REM  the reception laptop something with nothing to install at all. It produces
 REM  dist\MB Ballet Academy.exe — copy that single file to the reception
 REM  laptop and double-click it. No Python, no packages, no internet needed.
 REM
-REM  The database, photos and cards are created next to the .exe, so keep it
+REM  The database is created next to the .exe, so keep it
 REM  in its own folder rather than loose on the desktop. Settings are not:
 REM  this project's .env is baked into the .exe as it is built, and the
 REM  build refuses to run without one.
@@ -118,7 +118,7 @@ echo     Copy that file into an EMPTY FOLDER on the reception
 echo     laptop and double-click it. Nothing else is needed.
 echo.
 echo     Put it in its own folder, not loose on the desktop: it
-echo     creates academy.db, photos and cards beside itself.
+echo     creates academy.db beside itself.
 echo     Back up that whole folder, not just the file.
 echo.
 echo     It needs no .env: the settings and the card-signing

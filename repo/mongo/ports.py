@@ -16,6 +16,10 @@ NULL and Mongo's is no group at all; normalising in both places is what stops
 that difference reaching a caller.
 """
 
+from datetime import date as _date
+
+import identity
+
 from ..ports import (AccessPort, BookingsPort, ClassesPort, ClientsPort,
                      EventsPort, InstructorsPort, PlansPort, SessionsPort)
 from . import schema
@@ -65,8 +69,17 @@ class _Helpers:
 
 class MongoSessions(SessionsPort, _Helpers):
 
-    def sessions_in_range(self, start, end, class_id=None, not_booked_by=None):
-        flt = {"starts_at": {"$gte": start, "$lt": end}}
+    def sessions_in_range(self, start=None, end=None, class_id=None,
+                          not_booked_by=None):
+        # A bound left out is left off the query — see the note on the port.
+        # starts_at is declared and always written, so an absent filter here
+        # cannot be the null-matching trap compile_filter() guards against.
+        window = {}
+        if start is not None:
+            window["$gte"] = start
+        if end is not None:
+            window["$lt"] = end
+        flt = {"starts_at": window} if window else {}
         if class_id:
             flt["class_id"] = class_id
         sessions = [schema.normalise("sessions", d) for d in
@@ -117,11 +130,50 @@ class MongoSessions(SessionsPort, _Helpers):
 
 class MongoClasses(ClassesPort, _Helpers):
 
-    def classes_with_counts(self, active):
-        # Four round trips regardless of how many classes there are. It used
-        # to be three plus one per class for the instructor name, and the two
-        # collection-wide fetches below were unfiltered -- the whole sessions
-        # and bookings collections over the wire to count students.
+    def _plan_ends(self, sessions=None, bookings=None):
+        """
+        {subscription_id: the last day it covers} -- the later of its own
+        expires_on and the last session it pays for. The Python counterpart
+        of the SQLite _PLAN_END CTE; access.plan_end() is the same rule for
+        a single plan. Two reads, whatever the number of plans.
+
+        `sessions` and `bookings` are taken from a caller that has already
+        read them, rather than read again: classes_with_counts() holds both
+        by the time it gets here, and on a networked backend a second copy
+        of every session and every booking is two round trips and the whole
+        collection twice over the wire.
+        """
+        last = {}
+        if sessions is None:
+            sessions = self._rows("sessions")
+        if bookings is None:
+            bookings = self._rows("bookings")
+        starts = {s["id"]: s["starts_at"] for s in sessions}
+        for b in bookings:
+            sub, ts = b.get("subscription_id"), starts.get(b["session_id"])
+            if sub is None or ts is None:
+                continue
+            day = _date.fromtimestamp(ts).isoformat()
+            if day > last.get(sub, ""):
+                last[sub] = day
+        return {sub["id"]: max(x for x in (sub.get("expires_on"),
+                                           last.get(sub["id"]), "")
+                               if x is not None)
+                for sub in self._rows("subscriptions")}
+
+    def _booking_end(self, booking, plan_ends, starts):
+        """
+        One booking's end: its plan's, or -- with no plan behind it (older
+        rows, subscription_id NULL) -- its own session's day, the same
+        fallback _decide() makes.
+        """
+        end = plan_ends.get(booking.get("subscription_id")) or ""
+        if end:
+            return end
+        ts = starts.get(booking["session_id"])
+        return _date.fromtimestamp(ts).isoformat() if ts is not None else ""
+
+    def classes_with_counts(self, active, lapsed_before):
         import db as _db
         classes = self._rows("classes", {"active": active},
                              sort=[("name", 1), ("_id", 1)])
@@ -130,21 +182,33 @@ class MongoClasses(ClassesPort, _Helpers):
             {"$match": {"class_id": {"$in": ids}, "status": "scheduled",
                         "starts_at": {"$gt": _db.now()}}},
             {"$group": {"_id": "$class_id", "n": {"$sum": 1}}}])}
-        # Distinct clients with a booking in the class. Membership is derived
-        # from bookings -- there is no enrolment list. Driven from sessions
-        # rather than bookings so the $match lands on the class_id index; the
-        # $addToSet is what COUNT(DISTINCT b.client_id) means on the SQL side.
-        students = {r["_id"]: r["n"] for r in self._agg("sessions", [
-            {"$match": {"class_id": {"$in": ids}}},
-            {"$lookup": {"from": "bookings", "localField": "_id",
-                         "foreignField": "session_id", "as": "bk"}},
-            {"$unwind": "$bk"},
-            {"$group": {"_id": "$class_id",
-                        "clients": {"$addToSet": "$bk.client_id"}}},
-            {"$project": {"n": {"$size": "$clients"}}}])}
-        staff = self._by_id("instructors", [c["instructor_id"] for c in classes])
+        # Distinct clients still studying the class. Membership is derived
+        # from bookings -- there is no enrolment list -- and a client whose
+        # every plan here ended before `lapsed_before` has stopped being a
+        # student. Same cutoff as class_students(), which it has to be: a
+        # list saying 12 beside a page showing 8 is worse than either.
+        sessions = self._rows("sessions")
+        sess_class = {s["id"]: s["class_id"] for s in sessions}
+        starts = {s["id"]: s["starts_at"] for s in sessions}
+        bookings = self._rows("bookings")
+        plan_ends = self._plan_ends(sessions, bookings)
+        latest = {}
+        for b in bookings:
+            cid = sess_class.get(b["session_id"])
+            if cid is None:
+                continue
+            k = (cid, b["client_id"])
+            end = self._booking_end(b, plan_ends, starts)
+            if end > latest.get(k, ""):
+                latest[k] = end
+        students = {}
+        for (cid, client), end in latest.items():
+            if end >= lapsed_before:
+                students.setdefault(cid, set()).add(client)
+        staff = self._by_id("instructors",
+                            [c["instructor_id"] for c in classes])
         return [{**c, "upcoming": upcoming.get(c["id"], 0),
-                 "students": students.get(c["id"], 0),
+                 "students": len(students.get(c["id"], ())),
                  "instructor_name": (staff.get(c["instructor_id"]) or {}).get("name")}
                 for c in classes]
 
@@ -161,20 +225,30 @@ class MongoClasses(ClassesPort, _Helpers):
             s.pop("colour", None)
         return decorated
 
-    def class_students(self, class_id):
-        mine = {s["id"] for s in self._rows("sessions", {"class_id": class_id})}
-        tally = {}
+    def class_students(self, class_id, lapsed_before):
+        mine = {s["id"]: s["starts_at"] for s in
+                self._rows("sessions", {"class_id": class_id})}
+        plan_ends = self._plan_ends()
+        tally, latest = {}, {}
         for b in self._rows("bookings", {"session_id": {"in": sorted(mine)}}):
             t = tally.setdefault(b["client_id"], {"slots": 0, "attended": 0})
             t["slots"] += 1
             if b["status"] == "present":
                 t["attended"] += 1
+            end = self._booking_end(b, plan_ends, mine)
+            if end > latest.get(b["client_id"], ""):
+                latest[b["client_id"]] = end
         people = self._by_id("clients", tally)
+        # The lapsed cutoff, exactly as the SQLite HAVING applies it: a
+        # client stays while ANY plan of theirs in this class ended on or
+        # after the cutoff, so one live plan keeps them whatever else of
+        # theirs has run out. Nothing is deleted -- see ports.py.
         rows = [{"id": cid, "name_en": people[cid]["name_en"],
                  "phone": people[cid]["phone"],
                  "photo_path": people[cid]["photo_path"], **t}
                 for cid, t in tally.items()
-                if cid in people and people[cid]["active"]]
+                if cid in people and people[cid]["active"]
+                and latest.get(cid, "") >= lapsed_before]
         rows.sort(key=lambda r: (r["name_en"] or "", r["id"]))
         return rows
 
@@ -394,6 +468,16 @@ class MongoClients(ClientsPort, _Helpers):
         # NULL on both backends, so there is no null-ordering difference to
         # reconcile -- and the id tiebreak is what keeps the two in step.
         return self._rows("clients", flt, sort=[("name_en", 1), ("_id", 1)])
+
+    def clients_by_phone_key(self, key):
+        # Same comparison as the SQLite side, for the same reason: the last
+        # ten digits are not something either backend can filter on. See
+        # repo/sqlite/ports.py.
+        rows = [r for r in self._rows("clients", {})
+                if r.get("phone") and identity.phone_key(r["phone"]) == key]
+        rows.sort(key=lambda r: r["id"])
+        return [{"id": r["id"], "name_en": r["name_en"], "phone": r["phone"],
+                 "active": r["active"]} for r in rows]
 
     def card_counts_bulk(self, client_ids):
         out = {c: 0 for c in client_ids}

@@ -50,35 +50,57 @@ function sessionColumns(selected, toggle) {
   ];
 }
 
+/* A day as the epoch seconds it spans. The list holds `starts_at` as a
+   timestamp, so a typed date has to become one to compare against it — and
+   the TO bound is the *end* of that day, or picking the same date for both
+   would match nothing but midnight. */
+function dayStart(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).getTime() / 1000;
+}
+function dayEnd(iso) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d, 23, 59, 59).getTime() / 1000;
+}
+
 export default function Sessions() {
-  // Frozen at mount, the same way the dashboard and the instructor page
-  // freeze their default period -- and for a sharper reason here, because
-  // this one feeds the request path.
-  //
-  // Recomputed every render, it made the page fetch itself forever: useApi
-  // keys its effect on the path string, the path carries `now`, and `now`
-  // changes once a second. Any request slower than a second therefore lands,
-  // re-renders, moves `now` on, builds a different path and fires again --
-  // and since every run sets loading=true, the `if (loading)` below means the
-  // rows it just fetched are never drawn. A silent loop that only appears
-  // once the backend is slow enough to cross a second, which SQLite never is
-  // and a networked one always is.
-  //
-  // The window is three weeks back to six weeks forward, so second-level
-  // precision in it never meant anything anyway.
-  const [now] = useState(() => Math.floor(Date.now() / 1000));
-  const { data: list, loading, error, reload } = useApi(`/sessions?start=${now - 21 * 86400}&end=${now + 42 * 86400}`);
+  const now = Math.floor(Date.now() / 1000);
+  // Every session, not a window. This list is the one place a session can be
+  // deleted, so anything it cannot show is a session nobody can remove — and
+  // the calendar was still showing those, and slot_conflict() was still
+  // refusing to schedule over them. Repeat weekly writes twelve weeks at a
+  // time, so half of every batch used to land outside the old nine-week
+  // window the moment it was created.
+  const { data: list, loading, error, reload } = useApi('/sessions');
   const { open } = useModal();
   const confirm = useConfirm();
   const toast = useToast();
   const nav = useNavigate();
   const [selected, setSelected] = useState(() => new Set());
+  // Two states, not one: `draft` is what the date inputs hold and `range` is
+  // what the tables are filtered by. A date input fires on every edit, so
+  // binding the filter straight to it empties the list while a year is still
+  // half typed — the same reason the instructor page's range applies on a
+  // button. See CLAUDE.md.
+  const [draft, setDraft] = useState({ from: '', to: '' });
+  const [range, setRange] = useState({ from: '', to: '' });
 
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
 
-  const upcoming = list.filter(s => s.starts_at >= now - 3600);
-  const past = list.filter(s => s.starts_at < now - 3600).slice().reverse();
+  // The one thing this list could not be searched by. DataTable's search box
+  // matches the row's own values, and a session's date is an epoch integer
+  // in there, so typing "12 Sep" found nothing — on the one screen that
+  // shows the whole timetable and is the only place a session can be
+  // deleted from. The text box stays for class, instructor and status.
+  const dirty = draft.from !== range.from || draft.to !== range.to;
+  const inRange = s => (!range.from || s.starts_at >= dayStart(range.from))
+    && (!range.to || s.starts_at <= dayEnd(range.to));
+  const shown = list.filter(inRange);
+  const filtered = range.from || range.to;
+
+  const upcoming = shown.filter(s => s.starts_at >= now - 3600);
+  const past = shown.filter(s => s.starts_at < now - 3600).slice().reverse();
 
   const openRepeat = async () => {
     const [classes, instructors] = await Promise.all([api('/classes'), api('/instructors')]);
@@ -134,10 +156,41 @@ export default function Sessions() {
   return (
     <>
       <div className="head">
-        <div><h1>Sessions</h1><div className="sub">{upcoming.length} upcoming</div></div>
+        <div>
+          <h1>Sessions</h1>
+          <div className="sub">
+            {upcoming.length} upcoming · {past.length} past
+            {filtered
+              ? <> — {shown.length} of {list.length} sessions, in the dates picked</>
+              : <> — the whole timetable, the same sessions the calendar shows</>}
+          </div>
+        </div>
         <div className="row">
           <button onClick={openRepeat}>Repeat weekly</button>
           <button className="pri" onClick={openSchedule}>Add session</button>
+        </div>
+      </div>
+
+      {/* Two .filterbar rows, the same shape the instructor page uses: the
+          dates together on their own line, the buttons acting on them under
+          it, both at the same height. */}
+      <div style={{ margin: '0 0 16px' }}>
+        <div className="filterbar">
+          <div>
+            <label>FROM</label>
+            <input type="date" value={draft.from}
+                   onChange={e => setDraft(d => ({ ...d, from: e.target.value }))} />
+          </div>
+          <div>
+            <label>TO</label>
+            <input type="date" value={draft.to}
+                   onChange={e => setDraft(d => ({ ...d, to: e.target.value }))} />
+          </div>
+        </div>
+        <div className="filterbar" style={{ marginTop: 10 }}>
+          <button className="pri" onClick={() => setRange(draft)} disabled={!dirty}>Apply</button>
+          <button onClick={() => { setDraft({ from: '', to: '' }); setRange({ from: '', to: '' }); }}
+                  disabled={!filtered && !draft.from && !draft.to}>Show all</button>
         </div>
       </div>
 
@@ -160,12 +213,12 @@ export default function Sessions() {
       <div className="box pad0 dt-host">
         <DataTable
           rows={upcoming} rowKey={r => r.id} search="Search by class, instructor or status…"
-          onRowClick={r => nav(`/session/${r.id}`)} empty="Nothing scheduled." columns={columns}
+          onRowClick={r => nav(`/session/${r.id}`)} empty={filtered ? "Nothing scheduled in those dates." : "Nothing scheduled."} columns={columns}
         />
       </div>
 
       <div className="row" style={{ justifyContent: 'space-between', alignItems: 'baseline' }}>
-        <h2>Past three weeks</h2>
+        <h2>Past</h2>
         {past.length > 0 && (
           <button className="sm" onClick={() => selectAll(past)}>Select all past</button>
         )}
@@ -173,7 +226,7 @@ export default function Sessions() {
       <div className="box pad0 dt-host">
         <DataTable
           rows={past} rowKey={r => r.id} search="Search by class, instructor or status…"
-          onRowClick={r => nav(`/session/${r.id}`)} empty="No past sessions." columns={columns}
+          onRowClick={r => nav(`/session/${r.id}`)} empty={filtered ? "No past sessions in those dates." : "No past sessions."} columns={columns}
         />
       </div>
     </>

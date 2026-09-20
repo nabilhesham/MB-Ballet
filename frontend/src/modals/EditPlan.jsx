@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { api } from '../api';
 import { isoDay } from '../lib/format';
-import { fetchPlanSessions } from '../lib/planSessions';
+import { fetchPlanSessions, withinEndDate } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import ClassPick from '../components/ClassPick';
@@ -73,6 +73,25 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
     setEndsOn(last ? isoDay(last) : plan.expires_on);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chosen, sessions, endsTouched, loaded]);
+
+  // Same cap PlanPicker applies, with one addition that matters here: an
+  // already-attended session is kept whatever the date says. It is
+  // attendance history, the server refuses any edit that drops one, and
+  // hiding it would leave a row counted in the total with nothing on screen
+  // to explain where it went.
+  const offered = endsTouched
+    ? withinEndDate(sessions, endsOn, locked)
+    : sessions;
+
+  // Untick what the cap excluded, so the "n of need chosen" pill never
+  // disagrees with the list under it. Locked ids cannot be reached by this:
+  // they are still in `offered`.
+  useEffect(() => {
+    if (!loaded || !endsTouched) return;
+    const ok = new Set(offered.map(s => s.id));
+    setChosen(c => (c.every(id => ok.has(id)) ? c : c.filter(id => ok.has(id))));
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
+  }, [endsOn, endsTouched, sessions, loaded]);
 
   const onClassChange = async id => {
     if (id === classId) return;
@@ -196,7 +215,11 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
           <label>ENDS ON</label>
           <input type="date" value={endsOn}
                  onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
-          <div className="hint">Follows the sessions picked below — type over it to override, until they change again.</div>
+          <div className="hint">
+            {endsTouched
+              ? 'Only sessions on or before this date are offered below — already-attended ones always stay.'
+              : 'Follows the sessions picked below — type over it to override, until they change again.'}
+          </div>
         </div>
         <div>
           <label>PAID ON</label>
@@ -224,7 +247,7 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
           Tick or untick a session below, or change the number back.
         </div>
       )}
-      <SessionPickList sessions={sessions} chosen={chosen} onToggle={toggle} locked={locked} />
+      <SessionPickList sessions={offered} chosen={chosen} onToggle={toggle} locked={locked} />
 
       <div className="acts">
         <button onClick={close}>Cancel</button>
