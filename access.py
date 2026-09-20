@@ -108,6 +108,92 @@ def slot_conflict(repo, starts_at: int, duration_hours: float, exclude_id: int =
                               exclude_id=exclude_id)
 
 
+def repeat_sessions(repo, class_id: int, instructor_id, candidates: list,
+                    duration_hours: float) -> dict:
+    """
+    Create a whole term's sessions, checking every candidate date against the
+    same two rules one-at-a-time creation uses, in three round trips instead
+    of three per date.
+
+    It used to be a loop of exists() + slot_conflict() + insert() per date --
+    up to ~288 round trips for a 96-session term, which against a networked
+    backend is minutes. The rules are unchanged; only the number of questions
+    asked is.
+
+    Three things the loop got for free and this has to do deliberately:
+
+    - **A date already holding this class's own session is skipped**, whatever
+      that session's status -- a cancelled one still counts as "already
+      entered", which is why the duplicate query carries no status filter
+      while the overlap query excludes cancelled.
+    - **Sessions created here conflict with each other.** Each insert used to
+      be visible to the next slot_conflict(); batched, nothing is written
+      until the end, so accepted slots are accumulated and tested against
+      alongside the pre-existing ones. Without this a term could lay two
+      sessions over each other.
+    - **A clash skips one date, never the batch.** One taken evening in week
+      seven must not cost the other eleven.
+    """
+    if not candidates:
+        return {"created": 0, "skipped": []}
+    span_from = min(candidates)
+    span_to = max(candidates) + int(duration_hours * 3600)
+
+    # 1. This class's own sessions on any of the candidate dates. No status
+    #    filter: see the docstring.
+    taken = {r["starts_at"] for r in repo.find(
+        "sessions", {"class_id": class_id, "starts_at": {"in": candidates}},
+        fields=["id", "starts_at"])}
+
+    # 2. Everything that could overlap the span, academy-wide. Same predicate
+    #    as repo.slot_conflict(), widened from one slot to the whole term.
+    #    The ends_at comparison picks up filters.py's automatic null guard,
+    #    so a NULL ends_at occupies nothing here exactly as it does there.
+    existing = repo.find("sessions", {"status": {"ne": "cancelled"},
+                                      "starts_at": {"lt": span_to},
+                                      "ends_at": {"gt": span_from}})
+
+    occupied = [(r["starts_at"], ends_at_of(r["starts_at"], r["duration_hours"]),
+                 r["id"], r["class_id"]) for r in existing]
+    made, clashes = [], []
+    for ts in candidates:
+        if ts in taken:
+            continue
+        end = ends_at_of(ts, duration_hours)
+        # Half-open, matching repo.slot_conflict().
+        hits = [o for o in occupied if o[0] < end and o[1] > ts]
+        if hits:
+            # Earliest wins, which is what repo.slot_conflict() would have
+            # returned for this slot. The id is the tiebreak and must be an
+            # int for a not-yet-inserted session too, or a tie between one of
+            # those and a stored row would compare None with an int.
+            clash = min(hits, key=lambda o: (o[0], o[2]))
+            clashes.append({"starts_at": clash[0],
+                            "duration_hours": (clash[1] - clash[0]) / 3600,
+                            "class_id": clash[3]})
+            continue
+        occupied.append((ts, end, -1, class_id))
+        made.append({"class_id": class_id, "instructor_id": instructor_id,
+                     "starts_at": ts, "duration_hours": duration_hours,
+                     "ends_at": end})
+
+    # 3. One insert for the term. Mongo allocates the whole id block with a
+    #    single counter increment (repo/mongo/__init__.py).
+    if made:
+        repo.insert_many("sessions", made)
+
+    # Names for the message, one lookup rather than one per clash. A clash
+    # against a session created in this very batch carries class_id, so the
+    # id set covers it too.
+    names = {}
+    if clashes:
+        names = {c["id"]: c["name"] for c in repo.find(
+            "classes", {"id": {"in": sorted({c["class_id"] for c in clashes})}})}
+    return {"created": len(made),
+            "skipped": [slot_taken_message({**c, "class_name": names.get(c["class_id"])})
+                        for c in clashes]}
+
+
 def slot_taken_message(row) -> str:
     """One sentence a receptionist can act on, worded the same everywhere."""
     starts = time.localtime(row["starts_at"])
@@ -176,6 +262,29 @@ def refresh_expiry(repo, sub_id: int):
     return covers
 
 
+def refresh_expiries(repo, sub_ids):
+    """
+    refresh_expiry() for many plans, in two round trips rather than two or
+    three per plan.
+
+    The invariant is the one refresh_expiry() documents and must not weaken:
+    a plan whose bookings have gone entirely keeps whatever end date is
+    stored, because "no dates yet" is not the same as "expired". Here that
+    falls out of last_session_ts_bulk() omitting such a plan rather than
+    mapping it to None.
+    """
+    sub_ids = [s for s in dict.fromkeys(sub_ids) if s is not None]
+    if not sub_ids:
+        return {}
+    covers = repo.last_session_ts_bulk(sub_ids)
+    out = {}
+    for sub_id, t in covers.items():
+        day = _iso_day(t)
+        repo.update("subscriptions", sub_id, {"expires_on": day})
+        out[sub_id] = day
+    return out
+
+
 def plan_state(repo, sub_id: int) -> dict:
     """
     Where a plan stands. Used slots are counted from the bookings rather than
@@ -186,34 +295,31 @@ def plan_state(repo, sub_id: int) -> dict:
 
 def plan_states(repo, sub_ids) -> dict:
     """
-    The same for many plans, in three queries rather than three per plan.
+    The same for many plans, in **one** query rather than three per plan.
 
     The dashboard's attention list and the clients list both ask this of
-    every active client. On a local SQLite file the N+1 is free; against a
-    networked backend it is three round trips per client, which on a few
-    hundred of them is the whole page. There is one implementation and the
-    single-plan case goes through it, so the two cannot drift.
+    every active client, and the reception scan path asks it for one plan
+    with a client standing at the desk. On a local SQLite file the N+1 is
+    free; against a networked backend it was three round trips per call.
+    repo.plan_rows() answers the subscription, its class and its booking
+    counts together. There is one implementation and the single-plan case
+    goes through it, so the two cannot drift.
     """
     sub_ids = [s for s in dict.fromkeys(sub_ids) if s is not None]
     if not sub_ids:
         return {}
-    subs = {s["id"]: s for s in repo.find("subscriptions", {"id": {"in": sub_ids}})}
-    counts = repo.plan_counts_bulk(list(subs))
-    class_ids = sorted({s["class_id"] for s in subs.values() if s["class_id"]})
-    classes = {c["id"]: c for c in repo.find("classes", {"id": {"in": class_ids}})}
+    subs = repo.plan_rows(sub_ids)
 
     out = {}
     for sid, sub in subs.items():
-        c = counts[sid]
-        present, absent, assigned = c["present"], c["absent"], c["assigned"]
+        present, absent, assigned = sub["present"], sub["absent"], sub["assigned"]
         used = present + absent
-        klass = classes.get(sub["class_id"])
         allowed, why = can_freeze(sub)
         out[sid] = {
             "id": sub["id"], "plan": sub["plan"],
             "class_id": sub["class_id"],
-            "class_name": klass["name"] if klass else None,
-            "class_colour": klass["colour"] if klass else None,
+            "class_name": sub["class_name"],
+            "class_colour": sub["class_colour"],
             "can_freeze": allowed, "freeze_blocked_because": why,
             "sessions_total": sub["sessions_total"],
             "assigned": assigned,
@@ -1411,35 +1517,59 @@ def delete_sessions(repo, session_ids, force: bool = False) -> dict:
     access_events.session_id is nulled rather than cascaded: the row is the
     record that someone scanned, which stays true after the session is gone.
     """
-    with repo.begin():
-        deleted, released, blocked = 0, 0, []
-        for sid in session_ids:
-            full = repo.session_detail(sid)
-            if not full:
-                continue
-            row = {"id": full["id"], "starts_at": full["starts_at"],
-                   "class_name": full["class_name"]}
-            held = repo.count("bookings", {"session_id": sid,
-                                           "status": {"ne": "booked"}})
-            if held and not force:
-                blocked.append({**row, "attendance": held})
-                continue
+    session_ids = list(dict.fromkeys(session_ids))
+    if not session_ids:
+        return {"ok": True, "deleted": 0, "released": 0, "blocked": []}
 
-            n = repo.count("bookings", {"session_id": sid})
-            subs = {x for x in repo.distinct("bookings", "subscription_id",
-                                             {"session_id": sid}) if x is not None}
-            repo.delete_where("bookings", {"session_id": sid})
+    with repo.begin():
+        # A fixed number of round trips rather than seven-plus per session:
+        # clearing a 96-session term used to be several hundred. What each
+        # session is, and every booking across all of them, in two queries.
+        rows = {r["id"]: r for r in repo.find(
+            "sessions", {"id": {"in": session_ids}})}
+        names = {c["id"]: c["name"] for c in repo.find(
+            "classes", {"id": {"in": sorted({r["class_id"] for r in rows.values()})}})}
+        bookings = repo.find("bookings", {"session_id": {"in": session_ids}})
+
+        held, total, subs_by_session = {}, {}, {}
+        for b in bookings:
+            sid = b["session_id"]
+            total[sid] = total.get(sid, 0) + 1
+            # Anything that is no longer merely 'booked' is attendance.
+            if b["status"] != "booked":
+                held[sid] = held.get(sid, 0) + 1
+            if b["subscription_id"] is not None:
+                subs_by_session.setdefault(sid, set()).add(b["subscription_id"])
+
+        # Iterated in the order asked for, so `blocked` reads the same way it
+        # always did.
+        doomed, blocked, released = [], [], 0
+        for sid in session_ids:
+            r = rows.get(sid)
+            if not r:
+                continue
+            if held.get(sid) and not force:
+                blocked.append({"id": sid, "starts_at": r["starts_at"],
+                                "class_name": names.get(r["class_id"]),
+                                "attendance": held[sid]})
+                continue
+            doomed.append(sid)
+            released += total.get(sid, 0)
+
+        if doomed:
+            repo.delete_where("bookings", {"session_id": {"in": doomed}})
             # Nulled rather than cascaded: the event records that someone
             # scanned, which stays true after the session is gone.
-            repo.update_where("access_events", {"session_id": sid},
+            repo.update_where("access_events", {"session_id": {"in": doomed}},
                               {"session_id": None})
-            repo.delete("sessions", sid)
-            for sub_id in subs:
-                refresh_expiry(repo, sub_id)
-            deleted += 1
-            released += n
+            repo.delete_where("sessions", {"id": {"in": doomed}})
+            # Only the plans that actually lost a booking -- a plan behind a
+            # session held back by `force` still runs through its own date.
+            refresh_expiries(repo, {sub for sid in doomed
+                                    for sub in subs_by_session.get(sid, ())})
 
-        return {"ok": True, "deleted": deleted, "released": released, "blocked": blocked}
+        return {"ok": True, "deleted": len(doomed), "released": released,
+                "blocked": blocked}
 
 
 def delete_class(repo, class_id: int, hard: bool = False) -> dict:
@@ -1482,8 +1612,7 @@ def delete_class(repo, class_id: int, hard: bool = False) -> dict:
             repo.delete_where("bookings", {"session_id": {"in": mine}})
             repo.delete_where("sessions", {"class_id": class_id})
             repo.delete("classes", class_id)
-            for sub_id in subs:
-                refresh_expiry(repo, sub_id)
+            refresh_expiries(repo, subs)
             return {"ok": True, "action": "delete",
                     "released_sessions": None, "released_bookings": None}
 
@@ -1500,8 +1629,7 @@ def delete_class(repo, class_id: int, hard: bool = False) -> dict:
                                            {"session_id": {"in": upcoming}})
             repo.delete_where("bookings", {"session_id": {"in": upcoming}})
             repo.delete_where("sessions", {"id": {"in": upcoming}})
-            for sub_id in subs:
-                refresh_expiry(repo, sub_id)
+            refresh_expiries(repo, subs)
         repo.update("classes", class_id, {"active": 0})
         return {"ok": True, "action": "archive",
                 "released_sessions": len(upcoming),
@@ -1509,7 +1637,14 @@ def delete_class(repo, class_id: int, hard: bool = False) -> dict:
 
 
 def expected_today(repo) -> dict:
-    settle_past_sessions(repo)
+    """
+    Today's expected/arrived/absent counts.
+
+    Deliberately does NOT settle: it used to, and its only route caller
+    (api/dashboard.py) already settles at the top of the request, so the
+    landing page paid for two full sweeps -- each one a pair of
+    collection-wide updates -- to answer one question. Callers settle.
+    """
     start, end = day_bounds()
     r = repo.day_attendance_totals(start, end)
     expected, arrived, absent = r["expected"], r["arrived"], r["absent"]
@@ -1572,7 +1707,8 @@ def date_range_ts(period_from: str, period_to: str) -> tuple:
     return start, end
 
 
-def logged_hours(repo, instructor_id: int, period_from: str, period_to: str) -> dict:
+def logged_hours(repo, instructor_id: int, period_from: str, period_to: str,
+                 rate: float = None) -> dict:
     """
     Hours the salary sheet recorded for this instructor within a period, plus
     any manual corrections layered on top (see instructor_hour_adjustments) --
@@ -1581,8 +1717,12 @@ def logged_hours(repo, instructor_id: int, period_from: str, period_to: str) -> 
     correction is not a claim of an extra day worked.
     """
     sheet = repo.salary_hours(instructor_id, period_from, period_to)
-    who = repo.get("instructors", instructor_id)
-    rate = (who["hourly_rate"] or 0) if who else 0
+    if rate is None:
+        # Only fetched when the caller does not already hold the row. The
+        # instructor page does, and this was a second round trip for a value
+        # it had read three lines earlier.
+        who = repo.get("instructors", instructor_id)
+        rate = (who["hourly_rate"] or 0) if who else 0
     return {**sheet, "pay": round(sheet["hours"] * rate, 2)}
 
 
@@ -1810,6 +1950,34 @@ def freeze_plan(repo, sub_id: int, until: str = None, reason: str = None,
         return {"ok": True, "released": released, "frozen_on": start, "frozen_until": until}
 
 
+def _apply_unfreeze(repo, sub: dict, on_date: str = None) -> int:
+    """
+    The two writes that lift a freeze, for a plan row already in hand.
+    Returns how many days the freeze ran for.
+
+    Shared by unfreeze_plan() and lift_expired_freezes() so the date
+    arithmetic exists once: the expiry is pushed out by exactly as long as
+    the plan was paused, which is the whole point of freezing.
+
+    Deliberately no refresh_expiry() here -- see the note on that function.
+    A freeze deletes future bookings on purpose, and this shift needs the
+    stored expiry to still be where it was.
+    """
+    ended = on_date or date.today().isoformat()
+    if ended < sub["frozen_on"]:
+        ended = sub["frozen_on"]
+    days = _days_between(sub["frozen_on"], ended)
+
+    repo.update("subscriptions", sub["id"], {
+        "frozen_on": None, "frozen_until": None,
+        "frozen_days": (sub["frozen_days"] or 0) + days,
+        "expires_on": _shift_date(sub["expires_on"], days)})
+    repo.update_where("freezes",
+                      {"subscription_id": sub["id"], "ended_on": None},
+                      {"ended_on": ended, "days_added": days})
+    return days
+
+
 def unfreeze_plan(repo, sub_id: int, on_date: str = None) -> dict:
     """
     Lift a freeze and push the expiry out by however long it lasted. The
@@ -1823,19 +1991,7 @@ def unfreeze_plan(repo, sub_id: int, on_date: str = None) -> dict:
         if not sub["frozen_on"]:
             return {"ok": False, "error": "this plan is not frozen"}
 
-        ended = on_date or date.today().isoformat()
-        if ended < sub["frozen_on"]:
-            ended = sub["frozen_on"]
-        days = _days_between(sub["frozen_on"], ended)
-
-        repo.update("subscriptions", sub_id, {
-            "frozen_on": None, "frozen_until": None,
-            "frozen_days": (sub["frozen_days"] or 0) + days,
-            "expires_on": _shift_date(sub["expires_on"], days)})
-        repo.update_where("freezes",
-                          {"subscription_id": sub_id, "ended_on": None},
-                          {"ended_on": ended, "days_added": days})
-
+        days = _apply_unfreeze(repo, sub, on_date)
         state = plan_state(repo, sub_id)
         return {"ok": True, "days": days, "expires_on": state["expires_on"],
                 "unassigned": state["unassigned"]}
@@ -1845,6 +2001,12 @@ def lift_expired_freezes(repo) -> int:
     """
     A freeze with an end date lifts itself. Called wherever plans are read, so
     a laptop left off over the whole freeze still comes back correct.
+
+    This sits inside settle_past_sessions(), which runs before every read
+    that touches attendance -- so it is the hottest path in the app and must
+    not go through unfreeze_plan(). That would re-read a row already in hand
+    and then build a plan_state() nothing here looks at: four round trips per
+    due freeze instead of the two writes it actually takes.
     """
     today = date.today().isoformat()
     # `ne: None` matters on a document store: there, a range comparison
@@ -1852,5 +2014,5 @@ def lift_expired_freezes(repo) -> int:
     due = repo.find("subscriptions", {"frozen_on": {"ne": None},
                                       "frozen_until": {"ne": None, "lte": today}})
     for row in due:
-        unfreeze_plan(repo, row["id"], on_date=row["frozen_until"])
+        _apply_unfreeze(repo, row, on_date=row["frozen_until"])
     return len(due)

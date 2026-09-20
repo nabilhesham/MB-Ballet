@@ -57,9 +57,10 @@ class Counted:
                "session_roster", "day_attendance_totals",
                "salary_hours", "adjustments_sum", "taught_totals_bulk",
                "instructor_sessions",
-               "plan_counts", "plan_counts_bulk", "attendance_counts",
+               "plan_counts", "plan_counts_bulk", "attendance_counts", "plan_rows",
                "check_in_booking", "settle_absences",
                "active_plans_with_clients", "last_session_ts", "max_starts_at",
+               "last_session_ts_bulk",
                "recent_events")
 
     def __init__(self):
@@ -92,6 +93,22 @@ class Counted:
 
     def __len__(self):
         return len(self.calls)
+
+    def excluding(self, *names):
+        """
+        How many calls there were, ignoring some.
+
+        SqliteRepo.insert_many() is documented as N separate INSERTs because
+        sqlite3 gives no way to recover N ids from one executemany, while
+        MongoRepo.insert_many() really is one round trip. Counting the
+        decomposed inserts would make a batched write look unbatched on
+        SQLite alone -- so a test about round trips counts the insert_many
+        and ignores what SQLite turns it into.
+        """
+        return len([c for c in self.calls if c not in names])
+
+    def count_of(self, name):
+        return self.calls.count(name)
 
     def report(self):
         from collections import Counter
@@ -133,8 +150,14 @@ def client(academy):
         yield c
 
 
-def test_plan_states_costs_three_queries_whatever_the_count(academy):
-    """One for the plans, one for their counts, one for the classes."""
+def test_plan_states_costs_one_query_whatever_the_count(academy):
+    """
+    The plans, their classes and their booking counts together.
+
+    It was three -- one each -- which is three round trips even for the
+    single plan the reception scan path asks about, with a client standing
+    at the desk. repo.plan_rows() is the one question.
+    """
     repo = academy.repo
     more_clients(repo, academy, 40)
     ids = [r["sub_id"] for r in repo.active_plans_with_clients()]
@@ -144,7 +167,15 @@ def test_plan_states_costs_three_queries_whatever_the_count(academy):
         states = access.plan_states(repo, ids)
 
     assert len(states) == len(ids)
-    assert len(counted) == 3, counted.report()
+    assert len(counted) == 1, counted.report()
+
+
+def test_a_single_plan_state_costs_one_query_too(academy):
+    """plan_state() is plan_states() of one, so it cannot drift from it."""
+    with Counted() as counted:
+        state = access.plan_state(academy.repo, academy.dual_ballet_plan)
+    assert state["id"] == academy.dual_ballet_plan
+    assert len(counted) == 1, counted.report()
 
 
 def test_the_dashboard_does_not_grow_a_query_per_client(client):
@@ -170,7 +201,15 @@ def test_the_dashboard_stays_under_its_ceiling(client):
     # is per-client. The absolute number moves as access.py is drained —
     # settle_absences reads the frozen plans separately rather than joining
     # them, which is one more call here and the only shape Mongo can express.
-    assert len(counted) <= 26, counted.report()
+    # Was 26: expected_today() used to settle a second time, and plan_states()
+    # used to cost three calls rather than one.
+    #
+    # The ceiling is the higher of the two backends, which is Mongo at 19.
+    # That is not slack: sessions_in_range() answers the booked/attended
+    # counts with a second aggregate there, where SQLite folds them into a
+    # correlated subquery inside the one statement. A genuine extra round
+    # trip, counted honestly.
+    assert len(counted) <= 19, counted.report()
 
 
 def test_the_clients_list_does_not_grow_a_query_per_client(client):
@@ -198,7 +237,10 @@ def test_a_client_profile_costs_a_fixed_number_of_queries(client):
         r = client.get(f"/api/clients/{client.academy.dual}")
     assert r.status_code == 200
     assert len(r.json()["plans"]) == 2
-    assert len(counted) <= 16, counted.report()
+    # Was 16, before plan_states() became one call; 11 rather than 10 since
+    # the profile began reading which card images exist -- one find for all
+    # of them, which is the right shape and a legitimate extra call.
+    assert len(counted) <= 11, counted.report()
 
 
 def test_attendance_counts_is_one_query_for_many_sessions(academy):
@@ -222,3 +264,115 @@ def test_a_session_with_no_bookings_still_gets_zeroes(academy):
     assert repo.attendance_counts([fresh])[fresh] == {"booked": 0, "attended": 0}
     assert repo.plan_counts_bulk([9999])[9999] == {
         "assigned": 0, "present": 0, "absent": 0}
+
+
+# ----------------------------------------------------- pages with no budget yet
+#
+# The four below were uncovered, and two of them held the worst N+1s in the
+# app. As above, the property that matters is that the number does not grow
+# with the rows on the page -- the ceilings are ratchets.
+
+def test_the_classes_list_does_not_grow_a_query_per_class(client):
+    """
+    It used to fetch the whole sessions collection, the whole bookings
+    collection, and then one instructor per class.
+    """
+    a = client.academy
+    with Counted() as few:
+        r = client.get("/api/classes")
+    assert r.status_code == 200
+    before = len(r.json())
+
+    with a.repo.begin():
+        a.repo.insert_many("classes", [
+            {"name": f"Extra {i}", "colour": "#87438E", "duration_hours": 1.0,
+             "instructor_id": a.ana, "active": 1} for i in range(20)])
+    with Counted() as many:
+        r = client.get("/api/classes")
+
+    assert len(r.json()) == before + 20
+    assert len(many) <= len(few), (
+        f"adding 20 classes cost {len(many) - len(few)} extra calls\n"
+        f"{many.report()}")
+
+
+def test_an_instructor_profile_costs_a_fixed_number_of_queries(client):
+    with Counted() as counted:
+        r = client.get(f"/api/instructors/{client.academy.ana}")
+    assert r.status_code == 200, r.text
+    # taught_totals_bulk was called three times for the one instructor, and
+    # logged_hours re-read a row the route already had.
+    # Down from twelve: taught_totals_bulk was called three times for the one
+    # instructor and logged_hours re-read a row the route already had. The two
+    # that remain ask genuinely different questions -- the period's totals,
+    # and what is still upcoming within it.
+    #
+    # Eleven rather than ten for the same reason the dashboard's ceiling is
+    # Mongo's: instructor_sessions() costs a second call for the attendance
+    # counts there and one statement on SQLite.
+    assert len(counted) <= 11, counted.report()
+
+
+def test_repeating_a_term_does_not_grow_a_query_per_week(client):
+    """
+    It was exists() + slot_conflict() + insert() per generated date -- three
+    round trips a week, and a term is up to 96 sessions.
+    """
+    a = client.academy
+    from datetime import date, datetime, time, timedelta
+
+    def start(weeks_out):
+        d = date.today() + timedelta(days=200 + weeks_out)
+        return int(datetime.combine(d, time(7, 0)).timestamp())
+
+    with Counted() as few:
+        r = client.post("/api/sessions/repeat", json={
+            "class_id": a.ballet, "starts_at": start(0), "duration_hours": 1.0,
+            "weeks": 2, "weekdays": [(date.today() + timedelta(days=200)).weekday()]})
+    assert r.status_code == 200, r.text
+
+    with Counted() as many:
+        r = client.post("/api/sessions/repeat", json={
+            "class_id": a.ballet, "starts_at": start(140), "duration_hours": 1.0,
+            "weeks": 20,
+            "weekdays": [(date.today() + timedelta(days=340)).weekday()]})
+    assert r.status_code == 200, r.text
+    assert r.json()["created"] == 20
+
+    assert many.count_of("insert_many") == 1, "one write for the whole term"
+    assert many.excluding("insert") <= few.excluding("insert"), (
+        f"10x the weeks cost {many.excluding('insert') - few.excluding('insert')}"
+        f" extra calls\n{many.report()}")
+
+
+def test_a_bulk_delete_does_not_grow_a_query_per_session(client):
+    """
+    It was seven-plus round trips per session, plus refresh_expiry per plan
+    behind them -- several hundred for a term.
+    """
+    a = client.academy
+    from datetime import date, datetime, time, timedelta
+
+    def make(n, day_offset):
+        d = date.today() + timedelta(days=day_offset)
+        ids = []
+        with a.repo.begin():
+            for i in range(n):
+                ts = int(datetime.combine(d, time(6, 0)).timestamp()) + i * 7200
+                ids.append(a.repo.insert("sessions", {
+                    "class_id": a.ballet, "starts_at": ts, "duration_hours": 1.0,
+                    "ends_at": ts + 3600, "status": "scheduled"}))
+        return ids
+
+    small, large = make(2, 500), make(20, 600)
+
+    with Counted() as few:
+        r = client.post("/api/sessions/bulk-delete", json={"ids": small})
+    assert r.status_code == 200 and r.json()["deleted"] == 2, r.text
+
+    with Counted() as many:
+        r = client.post("/api/sessions/bulk-delete", json={"ids": large})
+    assert r.status_code == 200 and r.json()["deleted"] == 20, r.text
+
+    assert len(many) <= len(few), (
+        f"10x the sessions cost {len(many) - len(few)} extra calls\n{many.report()}")

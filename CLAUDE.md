@@ -1831,10 +1831,20 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
 - [ ] `migrate_to_mongo.py` has been run against a synthetic database, not
       against the academy's real one. Do that on a *copy*, and check a
       previously printed card still scans before trusting it.
-- [ ] The Mongo half of the suite takes about eight minutes against Atlas,
-      almost all of it round-trip latency at ~100ms a call. It is opt-in
-      (`MB_TEST_MONGO_URI`) for that reason. A local replica set would be
-      faster if this starts getting run often.
+- [ ] The Mongo half of the suite takes eight minutes or more against Atlas,
+      almost all of it round-trip latency -- measured at a 1,344ms median
+      from Alexandria, not the ~100ms this once assumed. It is opt-in
+      (`MB_TEST_MONGO_URI`) for that reason, and note that a URI sitting in
+      `.env` opts *every* `pytest` run in, since conftest reads `.env` the
+      way the app does. `pytest -k sqlite` is the fast half.
+      A local replica set would be faster if this starts getting run often.
+- [ ] **The latency itself is the unfixed problem.** Cutting round trips got
+      the dashboard from ~24 to 19 and the classes list from ~42 to 5, but
+      each trip still costs over a second on this link. The two things that
+      would actually fix it are moving reception back to `sqlite` (what this
+      document already prescribes, and what keeps it working with no
+      internet) or moving the cluster to a region near Alexandria. Neither is
+      a query change.
 - [ ] Dated deadlines this repository is carrying, so they are in one
       place: **GitHub drops the x86_64 macOS runner in August 2027**, which
       just removes a row from `build-macos.yml`'s matrix (and ends Intel Mac
@@ -2082,22 +2092,43 @@ never promised to match.
 ### Round trips are the unit of cost
 
 On a local SQLite file an N+1 is invisible. Against Atlas each round trip is
-about **100ms measured from here**, so `/api/dashboard` calling
-`plan_state()` once per active client -- three queries each -- was three
-round trips per client: roughly a minute of landing page on a few hundred
-clients.
+about **100ms measured from a good connection -- but measure it, do not
+assume it.** From Alexandria to the eu-central-1 (Frankfurt) cluster the
+median was **1,344ms**, with a 16-second connect and a 20-second worst case;
+ICMP to the same host averaged 392ms with a 525ms standard deviation. At that
+figure a page costing twenty round trips is half a minute, and the only
+number that helps is the count.
 
-`access.plan_states()` answers for many plans in three queries, and
-`plan_state()` is a one-element call into it so the two cannot drift.
+`access.plan_states()` answers for many plans in **one** query via
+`repo.plan_rows()` -- the subscription, its class and its booking counts
+together -- and `plan_state()` is a one-element call into it so the two
+cannot drift. It was three, which is three round trips even for the single
+plan the reception scan path asks about with a client standing at the desk.
 `plan_counts_bulk`, `attendance_counts`, `card_counts_bulk`,
-`taught_totals_bulk` and `active_plans_for` exist for the same reason.
-**`tests/test_query_budget.py` asserts the dashboard and the clients list do
-not grow a query per client** -- it is the only thing that stops this
-regressing.
+`taught_totals_bulk`, `active_plans_for` and `last_session_ts_bulk` exist for
+the same reason; `access.refresh_expiries()` is the bulk counterpart of
+`refresh_expiry()`, for the paths that delete bookings for many plans at once.
+**`tests/test_query_budget.py` asserts that the dashboard, the clients list,
+the classes list, an instructor profile, repeating a term and a bulk delete
+do not grow a query per row** -- it is the only thing that stops this
+regressing. Its `Counted.excluding()` exists because SQLite's `insert_many`
+is documented as N separate INSERTs while MongoDB's is genuinely one round
+trip; counting the decomposed inserts would make a batched write look
+unbatched on SQLite alone.
 
 `insert_many()` is not a convenience either: it allocates a block of ids with
 a single increment, so selling a plan (twelve bookings) or repeating a term
 (up to ninety-six sessions) costs one round trip rather than one each.
+
+**Two write paths were the worst offenders and are now batched.**
+`access.repeat_sessions()` checks a whole term against the duplicate and
+overlap rules in three round trips instead of three per date -- see its
+docstring for the three things the per-date loop got for free and it has to
+do deliberately, the subtlest being that **sessions created in one batch must
+conflict with each other** (each insert used to be visible to the next
+`slot_conflict()`). `access.delete_sessions()` is a fixed number of round
+trips rather than seven-plus per session, and still refuses a session
+carrying attendance by naming it in `blocked` rather than failing the batch.
 
 ### MongoDB deployment
 

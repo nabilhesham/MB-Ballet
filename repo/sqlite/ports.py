@@ -405,12 +405,36 @@ class SqlitePlans(PlansPort):
             "  JOIN sessions s ON s.id=b.session_id"
             " WHERE b.subscription_id=?", (sub_id,)).fetchone()["t"]
 
+    def last_session_ts_bulk(self, sub_ids):
+        if not sub_ids:
+            return {}
+        return {r["sid"]: r["t"] for r in self.conn.execute(
+            "SELECT b.subscription_id sid, MAX(s.starts_at) t FROM bookings b"
+            "  JOIN sessions s ON s.id=b.session_id"
+            f" WHERE b.subscription_id IN ({_marks(sub_ids)})"
+            " GROUP BY b.subscription_id", tuple(sub_ids)).fetchall()
+            if r["t"] is not None}
+
     def max_starts_at(self, session_ids):
         if not session_ids:
             return None
         return self.conn.execute(
             f"SELECT MAX(starts_at) t FROM sessions WHERE id IN ({_marks(session_ids)})",
             tuple(session_ids)).fetchone()["t"]
+
+    def plan_rows(self, sub_ids):
+        if not sub_ids:
+            return {}
+        return {r["id"]: dict(r) for r in self.conn.execute(
+            "SELECT s.*, c.name AS class_name, c.colour AS class_colour,"
+            "  (SELECT COUNT(*) FROM bookings b"
+            "     WHERE b.subscription_id=s.id) AS assigned,"
+            "  (SELECT COUNT(*) FROM bookings b WHERE b.subscription_id=s.id"
+            "     AND b.status='present') AS present,"
+            "  (SELECT COUNT(*) FROM bookings b WHERE b.subscription_id=s.id"
+            "     AND b.status='absent') AS absent"
+            "  FROM subscriptions s LEFT JOIN classes c ON c.id = s.class_id"
+            f" WHERE s.id IN ({_marks(sub_ids)})", tuple(sub_ids)).fetchall()}
 
     def active_plans_for(self, client_ids):
         if not client_ids:
