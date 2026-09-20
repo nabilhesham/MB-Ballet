@@ -118,6 +118,10 @@ class MongoSessions(SessionsPort, _Helpers):
 class MongoClasses(ClassesPort, _Helpers):
 
     def classes_with_counts(self, active):
+        # Four round trips regardless of how many classes there are. It used
+        # to be three plus one per class for the instructor name, and the two
+        # collection-wide fetches below were unfiltered -- the whole sessions
+        # and bookings collections over the wire to count students.
         import db as _db
         classes = self._rows("classes", {"active": active},
                              sort=[("name", 1), ("_id", 1)])
@@ -127,17 +131,21 @@ class MongoClasses(ClassesPort, _Helpers):
                         "starts_at": {"$gt": _db.now()}}},
             {"$group": {"_id": "$class_id", "n": {"$sum": 1}}}])}
         # Distinct clients with a booking in the class. Membership is derived
-        # from bookings -- there is no enrolment list.
-        sess_class = {s["id"]: s["class_id"] for s in self._rows("sessions")}
-        students = {}
-        for b in self._rows("bookings"):
-            cid = sess_class.get(b["session_id"])
-            if cid is not None:
-                students.setdefault(cid, set()).add(b["client_id"])
+        # from bookings -- there is no enrolment list. Driven from sessions
+        # rather than bookings so the $match lands on the class_id index; the
+        # $addToSet is what COUNT(DISTINCT b.client_id) means on the SQL side.
+        students = {r["_id"]: r["n"] for r in self._agg("sessions", [
+            {"$match": {"class_id": {"$in": ids}}},
+            {"$lookup": {"from": "bookings", "localField": "_id",
+                         "foreignField": "session_id", "as": "bk"}},
+            {"$unwind": "$bk"},
+            {"$group": {"_id": "$class_id",
+                        "clients": {"$addToSet": "$bk.client_id"}}},
+            {"$project": {"n": {"$size": "$clients"}}}])}
+        staff = self._by_id("instructors", [c["instructor_id"] for c in classes])
         return [{**c, "upcoming": upcoming.get(c["id"], 0),
-                 "students": len(students.get(c["id"], ())),
-                 "instructor_name": (self.get("instructors", c["instructor_id"])
-                                     or {}).get("name") if c["instructor_id"] else None}
+                 "students": students.get(c["id"], 0),
+                 "instructor_name": (staff.get(c["instructor_id"]) or {}).get("name")}
                 for c in classes]
 
     def class_sessions(self, class_id, limit):
@@ -381,9 +389,11 @@ class MongoClients(ClientsPort, _Helpers):
                            {"phone": {"like": f"%{q}%"}},
                            {"school": {"like": f"%{q}%"}}],
                    "active": active}
-        rows = self._rows("clients", flt)
-        rows.sort(key=lambda r: (r["name_en"] or "", r["id"]))
-        return rows
+        # Sorted by the server, not in Python: this returns the whole client
+        # table and the new name_en index carries the order. name_en is NOT
+        # NULL on both backends, so there is no null-ordering difference to
+        # reconcile -- and the id tiebreak is what keeps the two in step.
+        return self._rows("clients", flt, sort=[("name_en", 1), ("_id", 1)])
 
     def card_counts_bulk(self, client_ids):
         out = {c: 0 for c in client_ids}
@@ -473,28 +483,43 @@ class MongoClients(ClientsPort, _Helpers):
                                       session=self.session)
 
     def takings(self, date_field, month_from, month_to):
-        assert date_field in ("joined_on", "starts_on"), date_field
-        live = {c["id"] for c in self._rows("clients", {"active": 1})}
-        if date_field == "joined_on":
-            people = {c["id"]: c["joined_on"] for c in self._rows("clients")}
-            def when(plan):
-                return people.get(plan["client_id"])
-        else:
-            def when(plan):
-                return plan["starts_on"]
-        paid, unpriced, plans = 0.0, 0, 0
-        for plan in self._rows("subscriptions"):
-            if plan["client_id"] not in live:
-                continue
-            d = when(plan)
-            if d is None or not (month_from <= d < month_to):
-                continue
-            plans += 1
-            if plan["price"] is None:
-                unpriced += 1
-            else:
-                paid += plan["price"]
-        return {"paid": paid, "unpriced": unpriced, "plans": plans}
+        """
+        One aggregate. It used to be three unfiltered collection fetches --
+        every client twice and every subscription once -- filtered by date in
+        Python, and month_intake() calls this twice per dashboard.
+
+        The two date_fields are scoped differently on purpose and that has to
+        survive: "starts_on" asks when the money arrived and reads the plan's
+        own date, while "joined_on" asks who the client is and reads theirs,
+        whenever the plan was bought. See the dashboard note in CLAUDE.md.
+        """
+        # Not an assert: this is interpolated into the pipeline below, and
+        # asserts are stripped under `python -O`.
+        if date_field not in ("joined_on", "starts_on"):
+            raise ValueError(f"unknown date_field {date_field!r}")
+        when = "$starts_on" if date_field == "starts_on" else "$cl.joined_on"
+        rows = self._agg("subscriptions", [
+            {"$lookup": {"from": "clients", "localField": "client_id",
+                         "foreignField": "_id", "as": "cl"}},
+            {"$unwind": "$cl"},
+            {"$match": {"cl.active": 1}},
+            {"$set": {"_when": when}},
+            # $ne guards the null: a bare {"$lt": x} matches null on MongoDB
+            # and never on SQLite. repo/mongo/filters.py adds this
+            # automatically on the tier-one path; a raw pipeline must say it.
+            {"$match": {"_when": {"$gte": month_from, "$lt": month_to,
+                                  "$ne": None}}},
+            {"$group": {"_id": None, "plans": {"$sum": 1},
+                        "paid": {"$sum": {"$ifNull": ["$price", 0]}},
+                        "unpriced": {"$sum": {"$cond": [
+                            {"$eq": ["$price", None]}, 1, 0]}}}},
+        ])
+        # No matching plans is no group at all, and the contract is zero.
+        if not rows:
+            return {"paid": 0.0, "unpriced": 0, "plans": 0}
+        r = rows[0]
+        return {"paid": float(r["paid"]), "unpriced": r["unpriced"],
+                "plans": r["plans"]}
 
 
 class MongoInstructors(InstructorsPort, _Helpers):
@@ -570,6 +595,19 @@ class MongoPlans(PlansPort, _Helpers):
         mine = self._rows("bookings", {"subscription_id": sub_id})
         return self.max_starts_at([b["session_id"] for b in mine])
 
+    def last_session_ts_bulk(self, sub_ids):
+        ids = [s for s in dict.fromkeys(sub_ids) if s is not None]
+        if not ids:
+            return {}
+        return {r["_id"]: r["t"] for r in self._agg("bookings", [
+            {"$match": {"subscription_id": {"$in": ids}}},
+            {"$lookup": {"from": "sessions", "localField": "session_id",
+                         "foreignField": "_id", "as": "s"}},
+            {"$unwind": "$s"},
+            {"$group": {"_id": "$subscription_id",
+                        "t": {"$max": "$s.starts_at"}}},
+        ]) if r["t"] is not None}
+
     def max_starts_at(self, session_ids):
         ids = [s for s in session_ids if s is not None]
         if not ids:
@@ -578,6 +616,30 @@ class MongoPlans(PlansPort, _Helpers):
             {"_id": {"$in": ids}}, {"starts_at": 1},
             sort=[("starts_at", -1)], session=self.session)
         return doc["starts_at"] if doc else None
+
+    def plan_rows(self, sub_ids):
+        ids = [s for s in dict.fromkeys(sub_ids) if s is not None]
+        if not ids:
+            return {}
+        docs = self._agg("subscriptions", [
+            {"$match": {"_id": {"$in": ids}}},
+            {"$lookup": {"from": "classes", "localField": "class_id",
+                         "foreignField": "_id", "as": "_c"}},
+            {"$lookup": {"from": "bookings", "localField": "_id",
+                         "foreignField": "subscription_id", "as": "_b"}},
+            {"$set": {
+                # $first over an empty array is null, which is what a plan
+                # with no class should read as.
+                "class_name": {"$first": "$_c.name"},
+                "class_colour": {"$first": "$_c.colour"},
+                "assigned": {"$size": "$_b"},
+                "present": {"$size": {"$filter": {
+                    "input": "$_b", "cond": {"$eq": ["$$this.status", "present"]}}}},
+                "absent": {"$size": {"$filter": {
+                    "input": "$_b", "cond": {"$eq": ["$$this.status", "absent"]}}}}}},
+            {"$unset": ["_c", "_b"]},
+        ])
+        return {d["_id"]: schema.normalise("subscriptions", d) for d in docs}
 
     def active_plans_for(self, client_ids):
         ids = [c for c in client_ids if c is not None]

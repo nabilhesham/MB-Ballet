@@ -23,6 +23,24 @@ export async function api(path, opts = {}) {
  * Fetch `path` on mount and whenever it changes. Returns
  * {data, loading, error, reload} — call reload() after a mutation instead of
  * keeping a second copy of the state around.
+ *
+ * **`path` must be stable across renders.** The effect is keyed on it, so a
+ * path rebuilt from anything that moves on its own — `Date.now()` evaluated
+ * in the component body is the one that bit — means "whenever it changes"
+ * becomes "on every render", and the page fetches itself forever.
+ *
+ * The loop is silent, which is what makes it worth this comment: every run
+ * sets loading=true, so a caller with the usual `if (loading) return
+ * <Empty>Loading…</Empty>` never draws the rows it just fetched. It is also
+ * invisible on a fast backend, because the refetch only triggers once the
+ * value has actually moved — a request answered in milliseconds returns
+ * before the clock ticks over and the loop stops after one pass. Against a
+ * networked backend, where nothing is answered inside a second, it never
+ * stops.
+ *
+ * Derive such a value once with `useState(() => …)` and pass that. Views
+ * that take a period from the user (Dashboard, InstructorDetail) already do,
+ * and the modals keep `Date.now()` inside a mount-only effect instead.
  */
 export function useApi(path) {
   const [data, setData] = useState(null);

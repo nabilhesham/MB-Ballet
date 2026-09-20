@@ -256,8 +256,38 @@ class PlansPort(ABC):
         """The latest `starts_at` among a plan's bookings, or None."""
 
     @abstractmethod
+    def last_session_ts_bulk(self, sub_ids: list) -> dict:
+        """
+        The same for many plans at once: `{sub_id: latest_starts_at}`, in one
+        round trip. A plan with no bookings is absent from the result rather
+        than mapped to None -- "no dates yet" is what refresh_expiry() leaves
+        the stored date alone for, and a missing key says that without
+        needing a sentinel.
+
+        Deleting a term used to call refresh_expiry() once per affected plan,
+        which on MongoDB is three round trips each.
+        """
+
+    @abstractmethod
     def max_starts_at(self, session_ids: list):
         """The latest `starts_at` among the given sessions, or None."""
+
+    @abstractmethod
+    def plan_rows(self, sub_ids: list) -> dict:
+        """
+        Everything plan_state() needs about a set of plans, keyed by id, in
+        **one** round trip: the subscription's own fields, its class's name
+        and colour, and its assigned/present/absent booking counts.
+
+        It used to be three separate questions, which is three round trips
+        for a single plan -- and a single plan is what the reception scan
+        path asks for, with a client standing at the desk.
+
+        The counts are always integers, never None, for the same reason
+        plan_counts_bulk's are: SQL's SUM over no rows is NULL and MongoDB's
+        is no group at all. A plan id that does not exist is absent from the
+        result rather than mapped to an empty dict.
+        """
 
     @abstractmethod
     def active_plans_for(self, client_ids: list) -> dict:

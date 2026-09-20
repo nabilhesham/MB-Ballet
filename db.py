@@ -227,6 +227,21 @@ CREATE INDEX IF NOT EXISTS ix_frz_sub     ON freezes(subscription_id);
 CREATE INDEX IF NOT EXISTS ix_ih_date     ON instructor_hours(work_date);
 CREATE INDEX IF NOT EXISTS ix_cli_joined  ON clients(joined_on);
 CREATE INDEX IF NOT EXISTS ix_sub_starts  ON subscriptions(starts_on);
+
+-- Added for the joins that already existed but had nothing to stand on. Each
+-- one backs a query in repo/sqlite/ports.py that was scanning without it;
+-- the Mongo side already carried the first three (repo/mongo/schema.py).
+CREATE INDEX IF NOT EXISTS ix_sess_class  ON sessions(class_id);
+CREATE INDEX IF NOT EXISTS ix_sess_instr  ON sessions(instructor_id);
+CREATE INDEX IF NOT EXISTS ix_cred_client ON credentials(client_id, class_id);
+-- settle_absences() updates `WHERE status='booked' AND session_id IN (...)`
+-- and runs before every read that touches attendance. Without this it was a
+-- full scan of bookings on every page view. Status first: it is the equality.
+CREATE INDEX IF NOT EXISTS ix_bk_status   ON bookings(status, session_id);
+-- search_clients and class_students both order by name; active_plans_for
+-- orders by expires_on.
+CREATE INDEX IF NOT EXISTS ix_cli_name    ON clients(name_en);
+CREATE INDEX IF NOT EXISTS ix_sub_expires ON subscriptions(expires_on);
 """
 
 

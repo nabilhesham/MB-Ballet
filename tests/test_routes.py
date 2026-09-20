@@ -446,6 +446,35 @@ def test_deleting_a_session_pulls_the_plans_expiry_back(client):
     assert after < before, f"{before} -> {after}"
 
 
+def test_a_bulk_delete_refreshes_expiry_for_every_plan_it_touches(client):
+    """
+    Not just the first. The per-session loop called refresh_expiry() inside
+    itself; batched, the plans are collected across the whole batch and
+    refreshed once -- and only the ones that actually lost a booking.
+    """
+    a = client.academy
+    plans = [a.dual_ballet_plan, a.dual_flex_plan]
+    before = {p: access.plan_state(a.repo, p)["expires_on"] for p in plans}
+
+    # The latest-dated session behind each plan: dropping it must pull that
+    # plan's end date back.
+    doomed = []
+    for p in plans:
+        booked = a.repo.find("bookings", {"subscription_id": p})
+        when = {s["id"]: s["starts_at"] for s in a.repo.find(
+            "sessions", {"id": {"in": [b["session_id"] for b in booked]}})}
+        doomed.append(max(booked, key=lambda b: when[b["session_id"]])["session_id"])
+    assert len(set(doomed)) == 2, "precondition: two different sessions"
+
+    r = client.post("/api/sessions/bulk-delete",
+                    json={"ids": doomed, "force": True})
+    assert r.status_code == 200 and r.json()["deleted"] == 2, r.text
+
+    for p in plans:
+        after = access.plan_state(a.repo, p)["expires_on"]
+        assert after < before[p], f"plan {p}: {before[p]} -> {after}"
+
+
 def test_a_session_carrying_attendance_is_kept_back(client):
     a = client.academy
     attended = a.repo.find_one("bookings", {"status": "present"})

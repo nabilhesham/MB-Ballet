@@ -135,34 +135,23 @@ def repeat_sessions(body: RepeatIn):
         # A term is generated as one change. Each date is still
         # skipped individually on a clash, but a failure partway
         # through must not leave half a term behind.
-        made = 0
-        skipped = []
+        candidates = []
+        for w in range(body.weeks):
+            monday = base - timedelta(days=base.weekday()) + timedelta(weeks=w)
+            for wd in weekdays:
+                when = monday.replace(hour=base.hour, minute=base.minute,
+                                      second=0, microsecond=0) + timedelta(days=wd)
+                ts = int(when.timestamp())
+                if ts >= body.starts_at:
+                    candidates.append(ts)
+        candidates.sort()
+        # The dates are this route's business; which of them may be used is
+        # access.py's. A whole term is generated at once, so one taken evening
+        # in week 7 must not cost the other eleven -- see access.repeat_sessions
+        # for the three rules that survive the batching.
         with repo.begin():
-            for w in range(body.weeks):
-                monday = base - timedelta(days=base.weekday()) + timedelta(weeks=w)
-                for wd in weekdays:
-                    when = monday.replace(hour=base.hour, minute=base.minute,
-                                          second=0, microsecond=0) + timedelta(days=wd)
-                    ts = int(when.timestamp())
-                    if ts < body.starts_at:
-                        continue
-                    if repo.exists("sessions",
-                                   {"class_id": body.class_id, "starts_at": ts}):
-                        continue
-                    # A whole term is generated at once, so one taken evening in
-                    # week 7 must not cost the other eleven. Skip it and say
-                    # which, the same way a date already holding this class's own
-                    # session is skipped just above.
-                    clash = access.slot_conflict(repo, ts, hours)
-                    if clash:
-                        skipped.append(access.slot_taken_message(clash))
-                        continue
-                    repo.insert("sessions", {
-                        "class_id": body.class_id, "instructor_id": instructor_id,
-                        "starts_at": ts, "duration_hours": hours,
-                        "ends_at": access.ends_at_of(ts, hours)})
-                    made += 1
-        return {"created": made, "skipped": skipped}
+            return access.repeat_sessions(repo, body.class_id, instructor_id,
+                                          candidates, hours)
     finally:
         repo.close()
 

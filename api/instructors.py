@@ -107,7 +107,6 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
 
         i["sessions"] = repo.instructor_sessions(iid, start_ts, end_ts, 200)
 
-        t = repo.taught_totals_bulk([iid], start_ts, end_ts)[iid]
         # "Upcoming" is bounded by the picked range too, not just by now: a
         # past range has none (nothing in it is still ahead), and a future
         # range only counts what's still ahead within that window.
@@ -120,24 +119,29 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
         # class that never made it onto the timetable or an hour nobody
         # billed for, and both are worth seeing.
         rate = i["hourly_rate"] or 0
-        i["logged"] = access.logged_hours(repo, iid, period_from, period_to)
+        # The rate is passed in rather than looked up again: the instructor
+        # row is already in hand, three lines up.
+        i["logged"] = access.logged_hours(repo, iid, period_from, period_to,
+                                          rate=rate)
         # Hours taught carries reception's corrections, so pay follows the
-        # corrected figure rather than the raw timetable.
+        # corrected figure rather than the raw timetable. This already counts
+        # the period's sessions, so there is no separate taught_totals_bulk
+        # call for the same instructor over the same range.
         taught = access.taught_hours(repo, iid, period_from, period_to)
         i["period_from"], i["period_to"] = period_from, period_to
         # A day is the only period whose hours may be edited — a correction
         # has to land on the day it happened on to be worth anything later.
         i["is_single_day"] = period_from == period_to
         i["totals"] = {
-            "sessions_taught": t["n"],
+            "sessions_taught": taught["sessions"],
             "hours_taught": taught["hours"],
             "hours_scheduled": taught["scheduled"],
             "hours_adjustment": taught["adjustment"],
             "hourly_rate": rate,
             "earned": round(taught["hours"] * rate, 2),
-            "upcoming": up["n"],
-            "upcoming_hours": round(up["h"], 2),
-            "upcoming_value": round(up["h"] * rate, 2),
+            "upcoming": up["sessions"],
+            "upcoming_hours": round(up["hours"], 2),
+            "upcoming_value": round(up["hours"] * rate, 2),
         }
         return i
     finally:

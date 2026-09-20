@@ -51,7 +51,22 @@ function sessionColumns(selected, toggle) {
 }
 
 export default function Sessions() {
-  const now = Math.floor(Date.now() / 1000);
+  // Frozen at mount, the same way the dashboard and the instructor page
+  // freeze their default period -- and for a sharper reason here, because
+  // this one feeds the request path.
+  //
+  // Recomputed every render, it made the page fetch itself forever: useApi
+  // keys its effect on the path string, the path carries `now`, and `now`
+  // changes once a second. Any request slower than a second therefore lands,
+  // re-renders, moves `now` on, builds a different path and fires again --
+  // and since every run sets loading=true, the `if (loading)` below means the
+  // rows it just fetched are never drawn. A silent loop that only appears
+  // once the backend is slow enough to cross a second, which SQLite never is
+  // and a networked one always is.
+  //
+  // The window is three weeks back to six weeks forward, so second-level
+  // precision in it never meant anything anyway.
+  const [now] = useState(() => Math.floor(Date.now() / 1000));
   const { data: list, loading, error, reload } = useApi(`/sessions?start=${now - 21 * 86400}&end=${now + 42 * 86400}`);
   const { open } = useModal();
   const confirm = useConfirm();
