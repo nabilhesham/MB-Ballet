@@ -310,7 +310,7 @@ class SqliteAccess(AccessPort):
             " WHERE cr.token=?", (token,)).fetchone()
         return dict(row) if row else None
 
-    def client_day_bookings(self, client_id, start, end):
+    def client_bookings(self, client_id):
         return [dict(r) for r in self.conn.execute(
             "SELECT b.id AS booking_id, b.status, b.checked_in_at,"
             "       b.subscription_id, s.id AS session_id, s.starts_at,"
@@ -323,41 +323,8 @@ class SqliteAccess(AccessPort):
             "  JOIN classes c ON c.id = s.class_id"
             "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
             "  LEFT JOIN instructors i ON i.id = s.instructor_id"
-            " WHERE b.client_id = ? AND s.starts_at >= ? AND s.starts_at < ?"
-            " ORDER BY s.starts_at, s.id", (client_id, start, end)).fetchall()]
-
-    def recent_attendance(self, client_id, limit):
-        return [dict(r) for r in self.conn.execute(
-            "SELECT b.status, b.checked_in_at, s.id AS session_id, s.starts_at,"
-            "       c.name AS class_name, c.colour"
-            "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            "  JOIN classes c ON c.id = s.class_id"
-            " WHERE b.client_id = ? AND b.status != 'booked'"
-            " ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
-            (client_id, limit)).fetchall()]
-
-    def next_booked_session(self, client_id, after, class_id=None):
-        sql = ("SELECT s.starts_at, c.name AS class_name FROM bookings b"
-               "  JOIN sessions s ON s.id = b.session_id"
-               "  JOIN classes c ON c.id = s.class_id"
-               " WHERE b.client_id = ? AND b.status = 'booked' AND s.starts_at > ?")
-        params = [client_id, after]
-        if class_id:
-            sql += " AND s.class_id = ?"
-            params.append(class_id)
-        row = self.conn.execute(
-            sql + " ORDER BY s.starts_at, s.id LIMIT 1", params).fetchone()
-        return dict(row) if row else None
-
-    def client_totals(self, client_id):
-        r = self.conn.execute(
-            "SELECT SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) present,"
-            "       SUM(CASE WHEN b.status='absent' THEN 1 ELSE 0 END) absent,"
-            "       MAX(CASE WHEN b.status='present' THEN s.starts_at END) last_visit"
-            "  FROM bookings b JOIN sessions s ON s.id = b.session_id"
-            " WHERE b.client_id=?", (client_id,)).fetchone()
-        return {"present": r["present"] or 0, "absent": r["absent"] or 0,
-                "last_visit": r["last_visit"]}
+            " WHERE b.client_id = ?"
+            " ORDER BY s.starts_at, s.id", (client_id,)).fetchall()]
 
     def giveable_slots(self, client_id, now):
         return [dict(r) for r in self.conn.execute(

@@ -300,19 +300,34 @@ class MongoBookings(BookingsPort, _Helpers):
         return res.matched_count > 0
 
     def settle_absences(self, now, frozen_sub_ids):
-        finished = [s["_id"] for s in self.db["sessions"].find(
-            {"status": {"$ne": "cancelled"}, "ends_at": {"$lt": now, "$ne": None}},
-            {"_id": 1}, session=self.session)]
-        if not finished:
-            return 0
-        flt = {"status": "booked", "session_id": {"$in": finished}}
+        # Driven from the bookings, not from the sessions. Reading the id of
+        # every finished session and sending the lot back as an `$in` was two
+        # round trips whose payload grew with the academy's whole history --
+        # on the path a client waits through at the desk. Still-`booked`
+        # bookings are the bounded set: what is left to settle plus what is
+        # yet to happen, never what has already been settled once.
+        match = {"status": "booked"}
         if frozen_sub_ids:
             # `$nin` matches a null subscription_id correctly here *because*
             # every document carries the field explicitly (see schema.py) and
             # None is not in the list.
-            flt["subscription_id"] = {"$nin": list(frozen_sub_ids)}
+            match["subscription_id"] = {"$nin": list(frozen_sub_ids)}
+        due = [d["_id"] for d in self.db["bookings"].aggregate([
+            {"$match": match},
+            {"$lookup": {
+                "from": "sessions", "localField": "session_id",
+                "foreignField": "_id", "as": "_s",
+                "pipeline": [
+                    {"$match": {"status": {"$ne": "cancelled"},
+                                "ends_at": {"$lt": now, "$ne": None}}},
+                    {"$project": {"_id": 1}}]}},
+            {"$match": {"_s": {"$ne": []}}},
+            {"$project": {"_id": 1}},
+        ], session=self.session)]
+        if not due:
+            return 0
         return self.db["bookings"].update_many(
-            flt, {"$set": {"status": "absent"}},
+            {"_id": {"$in": due}}, {"$set": {"status": "absent"}},
             session=self.session).modified_count
 
 
@@ -326,80 +341,57 @@ class MongoAccess(AccessPort, _Helpers):
         return {**cred, "class_name": k["name"] if k else None,
                 "colour": k["colour"] if k else None}
 
-    def client_day_bookings(self, client_id, start, end):
-        mine = self._rows("bookings", {"client_id": client_id})
-        sessions = self._by_id("sessions", [b["session_id"] for b in mine])
-        today = [b for b in mine
-                 if b["session_id"] in sessions
-                 and start <= sessions[b["session_id"]]["starts_at"] < end]
-        classes = self._by_id("classes",
-                              [sessions[b["session_id"]]["class_id"] for b in today])
-        staff = self._by_id("instructors",
-                            [sessions[b["session_id"]]["instructor_id"] for b in today])
-        plans = self._by_id("subscriptions", [b["subscription_id"] for b in today])
-        rows = []
-        for b in today:
-            s = sessions[b["session_id"]]
-            k = classes.get(s["class_id"])
-            i = staff.get(s["instructor_id"])
-            plan = plans.get(b["subscription_id"])
-            rows.append({
-                "booking_id": b["id"], "status": b["status"],
-                "checked_in_at": b["checked_in_at"],
-                "subscription_id": b["subscription_id"],
-                "session_id": s["id"], "starts_at": s["starts_at"],
-                "duration_hours": s["duration_hours"],
-                "session_status": s["status"], "session_class_id": s["class_id"],
-                "class_name": k["name"] if k else None,
-                "colour": k["colour"] if k else None,
-                "instructor_name": i["name"] if i else None,
-                "plan_class_id": plan["class_id"] if plan else None,
-            })
+    def client_bookings(self, client_id):
+        # One round trip, not five. This is the hottest read in the app -- a
+        # client is standing at the desk while it runs -- and the
+        # fetch-then-`$in`-per-table shape the rest of this module uses was
+        # costing five, one for the bookings and one for each table they join
+        # to. Written as a pipeline the way plan_rows() is, for the same
+        # reason: the joins are all by primary key and the input is one
+        # client's bookings, so what makes a `$lookup` pipeline unreadable
+        # elsewhere -- a conditional join, an unbounded input -- is absent.
+        #
+        # Every field is projected through `$ifNull`, which is this method's
+        # stand-in for schema.normalise(): `$project` drops a field whose
+        # expression resolves to missing, and a caller reading a key that is
+        # sometimes absent is exactly the null-vs-missing trap the schema
+        # module exists to close.
+        def first(path):
+            return {"$ifNull": [{"$first": path}, None]}
+
+        rows = self._agg("bookings", [
+            {"$match": {"client_id": client_id}},
+            {"$lookup": {"from": "sessions", "localField": "session_id",
+                         "foreignField": "_id", "as": "_s"}},
+            {"$set": {"_s": {"$first": "$_s"}}},
+            # A booking whose session is gone is dropped, which is what the
+            # SQLite side's inner JOIN does.
+            {"$match": {"_s": {"$type": "object"}}},
+            {"$lookup": {"from": "classes", "localField": "_s.class_id",
+                         "foreignField": "_id", "as": "_c"}},
+            {"$lookup": {"from": "instructors", "localField": "_s.instructor_id",
+                         "foreignField": "_id", "as": "_i"}},
+            {"$lookup": {"from": "subscriptions", "localField": "subscription_id",
+                         "foreignField": "_id", "as": "_p"}},
+            {"$project": {
+                "_id": 0,
+                "booking_id": "$_id",
+                "status": {"$ifNull": ["$status", None]},
+                "checked_in_at": {"$ifNull": ["$checked_in_at", None]},
+                "subscription_id": {"$ifNull": ["$subscription_id", None]},
+                "session_id": "$_s._id",
+                "starts_at": {"$ifNull": ["$_s.starts_at", None]},
+                "duration_hours": {"$ifNull": ["$_s.duration_hours", None]},
+                "session_status": {"$ifNull": ["$_s.status", None]},
+                "session_class_id": {"$ifNull": ["$_s.class_id", None]},
+                "class_name": first("$_c.name"),
+                "colour": first("$_c.colour"),
+                "instructor_name": first("$_i.name"),
+                "plan_class_id": first("$_p.class_id"),
+            }},
+        ])
         rows.sort(key=lambda r: (r["starts_at"], r["session_id"]))
         return rows
-
-    def recent_attendance(self, client_id, limit):
-        mine = [b for b in self._rows("bookings", {"client_id": client_id})
-                if b["status"] != "booked"]
-        sessions = self._by_id("sessions", [b["session_id"] for b in mine])
-        classes = self._by_id("classes",
-                              [s["class_id"] for s in sessions.values()])
-        rows = []
-        for b in mine:
-            s = sessions.get(b["session_id"])
-            if s is None:
-                continue
-            k = classes.get(s["class_id"])
-            rows.append({"status": b["status"], "checked_in_at": b["checked_in_at"],
-                         "session_id": s["id"], "starts_at": s["starts_at"],
-                         "class_name": k["name"] if k else None,
-                         "colour": k["colour"] if k else None})
-        rows.sort(key=lambda r: (-r["starts_at"], -r["session_id"]))
-        return rows[:limit]
-
-    def next_booked_session(self, client_id, after, class_id=None):
-        mine = self._rows("bookings", {"client_id": client_id, "status": "booked"})
-        sessions = self._by_id("sessions", [b["session_id"] for b in mine])
-        ahead = [s for b in mine
-                 if (s := sessions.get(b["session_id"])) is not None
-                 and s["starts_at"] > after
-                 and (class_id is None or s["class_id"] == class_id)]
-        if not ahead:
-            return None
-        s = min(ahead, key=lambda x: (x["starts_at"], x["id"]))
-        k = self.get("classes", s["class_id"])
-        return {"starts_at": s["starts_at"],
-                "class_name": k["name"] if k else None}
-
-    def client_totals(self, client_id):
-        mine = self._rows("bookings", {"client_id": client_id})
-        sessions = self._by_id("sessions", [b["session_id"] for b in mine])
-        present = [b for b in mine if b["status"] == "present"]
-        starts = [sessions[b["session_id"]]["starts_at"] for b in present
-                  if b["session_id"] in sessions]
-        return {"present": len(present),
-                "absent": sum(1 for b in mine if b["status"] == "absent"),
-                "last_visit": max(starts) if starts else None}
 
     def giveable_slots(self, client_id, now):
         mine = self._rows("bookings", {"client_id": client_id})

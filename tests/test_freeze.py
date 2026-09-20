@@ -87,7 +87,7 @@ def test_a_dated_freeze_lifts_itself_once_the_date_passes(academy):
 
     lifted = access.lift_expired_freezes(repo)
 
-    assert lifted == 1
+    assert lifted == {plan}
     assert access.plan_state(repo, plan)["frozen"] is False
 
 

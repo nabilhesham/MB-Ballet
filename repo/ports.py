@@ -235,40 +235,40 @@ class AccessPort(ABC):
         """The credential with its class named, or None."""
 
     @abstractmethod
-    def client_day_bookings(self, client_id: int, start: int, end: int) -> list:
+    def client_bookings(self, client_id: int) -> list:
         """
-        Every booking of this client whose session starts in [start, end),
-        with the session, its class, its instructor and **the class of the
-        plan that paid for it** all resolved.
+        Every booking this client has ever had, oldest first, with the
+        session, its class, its instructor and **the class of the plan that
+        paid for it** all resolved.
 
-        Deliberately one flat fetch rather than a query per question. What
-        `_decide()` needs from it — is one already present, which is nearest
-        to now, does the card's class match — is decided in Python, because
-        the window is one client and one day and is never more than a handful
-        of rows. Written as a query it is a four-table join with a
+        Deliberately one flat fetch rather than a query per question. It is
+        the whole of what a scan needs to know about a person, and
+        `access.py` decides the four separate questions from it in Python:
+        which of their sessions is today, which is nearest to now, whether
+        one is already present, what their last few settled sessions were,
+        when they last visited, and what is next.
+
+        **It was four port methods** -- `client_day_bookings`,
+        `recent_attendance`, `next_booked_session` and `client_totals` --
+        each re-reading the same client's bookings and the same sessions
+        behind them. On SQLite that is four joins over one small set of rows
+        and costs nothing; on a document store each one is a fetch of the
+        client's bookings followed by an `$in` per table it has to join, so
+        the scan path spent thirteen round trips answering four questions
+        about rows it had already had in hand. One client's lifetime
+        bookings is a few hundred rows at the very most, which is cheaper to
+        carry once than to ask for four times.
+
+        Written as a query the day-scoped half is a four-table join with a
         conditional OR and an `ORDER BY ABS(starts_at - ?)`, which has no
-        readable equivalent on a document store.
+        readable equivalent on a document store either -- so deciding in
+        Python is what the interface wanted regardless.
 
-        `plan_class_id` is the point: a card proves the *plan's* class, not
-        the session's, which is what lets a slot moved to another class still
-        be found by the card that paid for it.
+        `plan_class_id` is the point of the join to subscriptions: a card
+        proves the *plan's* class, not the session's, which is what lets a
+        slot moved to another class still be found by the card that paid
+        for it.
         """
-
-    @abstractmethod
-    def recent_attendance(self, client_id: int, limit: int) -> list:
-        """Their last few settled sessions, newest first."""
-
-    @abstractmethod
-    def next_booked_session(self, client_id: int, after: int, class_id: int = None):
-        """
-        The next session they are booked into, or None. Scoped to a class
-        when the card names one — a Ballet card answering with a Flexibility
-        date is true but not the question asked.
-        """
-
-    @abstractmethod
-    def client_totals(self, client_id: int) -> dict:
-        """`{"present", "absent", "last_visit"}` across their whole history."""
 
     @abstractmethod
     def giveable_slots(self, client_id: int, now: int) -> list:

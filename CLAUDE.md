@@ -1839,12 +1839,16 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       way the app does. `pytest -k sqlite` is the fast half.
       A local replica set would be faster if this starts getting run often.
 - [ ] **The latency itself is the unfixed problem.** Cutting round trips got
-      the dashboard from ~24 to 19 and the classes list from ~42 to 5, but
-      each trip still costs over a second on this link. The two things that
-      would actually fix it are moving reception back to `sqlite` (what this
-      document already prescribes, and what keeps it working with no
-      internet) or moving the cluster to a region near Alexandria. Neither is
-      a query change.
+      the dashboard from ~24 to 19, the classes list from ~42 to 5, and a
+      reception scan from 2.1s to 1.1s, but each trip still costs on the
+      order of 100ms on this link and has been measured over a second on a
+      bad one. The two things that would actually fix it are moving
+      reception back to `sqlite` (what this document already prescribes, and
+      what keeps it working with no internet) or moving the cluster to a
+      region near Alexandria. Neither is a query change. The one query change
+      left on the scan path is throttling `settle_past_sessions()`, which
+      costs a documented invariant -- see the scan-path note under "Round
+      trips are the unit of cost".
 - [ ] Dated deadlines this repository is carrying, so they are in one
       place: **GitHub drops the x86_64 macOS runner in August 2027**, which
       just removes a row from `build-macos.yml`'s matrix (and ends Intel Mac
@@ -2109,9 +2113,9 @@ plan the reception scan path asks about with a client standing at the desk.
 the same reason; `access.refresh_expiries()` is the bulk counterpart of
 `refresh_expiry()`, for the paths that delete bookings for many plans at once.
 **`tests/test_query_budget.py` asserts that the dashboard, the clients list,
-the classes list, an instructor profile, repeating a term and a bulk delete
-do not grow a query per row** -- it is the only thing that stops this
-regressing. Its `Counted.excluding()` exists because SQLite's `insert_many`
+the classes list, an instructor profile, a reception scan, repeating a term
+and a bulk delete do not grow a query per row** -- it is the only thing that
+stops this regressing. Its `Counted.excluding()` exists because SQLite's `insert_many`
 is documented as N separate INSERTs while MongoDB's is genuinely one round
 trip; counting the decomposed inserts would make a batched write look
 unbatched on SQLite alone.
@@ -2119,6 +2123,45 @@ unbatched on SQLite alone.
 `insert_many()` is not a convenience either: it allocates a block of ids with
 a single increment, so selling a plan (twelve bookings) or repeating a term
 (up to ninety-six sessions) costs one round trip rather than one each.
+
+**The scan path is the one with a person waiting for it**, so it is measured
+in whole seconds rather than in round trips. A member-number lookup against
+the Frankfurt cluster took **2.1 seconds**; it is **1.1** now, and nothing
+about what it decides changed. Four things were wrong with it, and three of
+them are the same mistake:
+
+- It asked four port methods -- `client_day_bookings`, `recent_attendance`,
+  `next_booked_session` and `client_totals` -- and every one of them re-read
+  the same client's bookings and re-joined the same sessions behind them.
+  Thirteen round trips to answer four questions about rows already in hand.
+  `repo.client_bookings()` is the one read now and `access.py` decides all
+  four from the list in Python; on MongoDB it is a single `$lookup`
+  pipeline, written the way `plan_rows()` is.
+- `active_plan()` was called twice for one scan -- once to build the
+  payload, once in `_decide()` to check the plan was not frozen, with the
+  same client and the same class both times. `_decide()` is handed the plan
+  its caller already has.
+- `settle_past_sessions()` read the frozen plans, then `lift_expired_freezes()`
+  read them again, narrowed. One read, passed in.
+- `_log()` wrapped its single insert in a transaction, and on a document
+  store a commit is its own round trip. A lone statement autocommits, which
+  is what this section already says it wants; inside `swap_and_check_in()`'s
+  block it still joins that block, because `begin()` is re-entrant.
+
+MongoDB's `settle_absences()` was also reading the id of **every finished
+session in the academy** and sending the list back as an `$in`, on a query
+that runs before every read that touches attendance -- a payload growing
+with the whole history, on the path a client waits through. It is driven
+from the still-`booked` bookings now, which is what is left to settle plus
+what is yet to happen, and never what has already been settled once.
+
+What is left is `settle_past_sessions()` itself, about a third of the
+remaining time: it sweeps the whole academy on every scan so that nothing on
+screen is stale. Throttling it -- running it at most once every N seconds
+rather than on every read -- is the obvious next lever and is deliberately
+**not** taken, because it trades a stated invariant (see "Past sessions
+settle themselves") for about 400ms. Decide that on purpose if it is ever
+worth it.
 
 **Two write paths were the worst offenders and are now batched.**
 `access.repeat_sessions()` checks a whole term against the duplicate and

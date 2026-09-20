@@ -29,11 +29,16 @@ FREEZE_MIN_SESSIONS = 12
 # ---------------------------------------------------------------- helpers
 def _log(repo, client_id, credential_id, session_id, decision, reason,
          source: str = "scan") -> int:
-    with repo.begin():
-        return repo.insert("access_events", {
-            "client_id": client_id, "credential_id": credential_id,
-            "session_id": session_id, "scanned_at": db.now(),
-            "decision": decision, "reason": reason, "source": source})
+    # No begin() of its own. It is one insert, so outside a block it
+    # autocommits -- and inside one (swap_and_check_in) it joins whatever
+    # block the caller opened, which is what re-entrancy already gave it.
+    # The wrapper was not free: on a document store a commit is its own round
+    # trip, and every scan, granted or refused, ends here with a client
+    # waiting at the desk.
+    return repo.insert("access_events", {
+        "client_id": client_id, "credential_id": credential_id,
+        "session_id": session_id, "scanned_at": db.now(),
+        "decision": decision, "reason": reason, "source": source})
 
 
 def _deny(message, detail=None, severity="stop", code=None, **base):
@@ -536,32 +541,75 @@ def settle_past_sessions(repo) -> int:
     entirely so a paused client never loses a session.
     """
     with repo.begin():
-        lift_expired_freezes(repo)
-        now = db.now()
         # The frozen plans are read first and passed in rather than joined:
         # Mongo has no cross-collection update, and there are never more than
-        # a handful of them.
-        frozen = [r["id"] for r in repo.find(
-            "subscriptions", {"frozen_on": {"ne": None}}, fields=["id"])]
-        settled = repo.settle_absences(now, frozen)
+        # a handful of them. One read, not two -- lift_expired_freezes() asks
+        # the same collection the same question, narrowed, so it is handed
+        # the rows instead of fetching its own. This runs before every read
+        # that touches attendance, so each round trip here is one a client
+        # waits through at the desk.
+        frozen = repo.find("subscriptions", {"frozen_on": {"ne": None}})
+        lifted = lift_expired_freezes(repo, frozen)
+        now = db.now()
+        still_frozen = [r["id"] for r in frozen if r["id"] not in lifted]
+        settled = repo.settle_absences(now, still_frozen)
         repo.complete_finished_sessions(now)
         return settled
 
 
 # ---------------------------------------------------------------- scanning
-def _client_payload(repo, client, sub, class_id=None) -> dict:
-    cid = client["id"]
+#
+# The four questions a scan asks about a person, all decided from the one
+# flat list of their bookings that `repo.client_bookings()` returns. They
+# were four port methods, and on a networked backend each one re-fetched the
+# same bookings and re-joined the same sessions behind them -- thirteen round
+# trips to answer four questions about rows already in hand, with a client
+# standing at the desk. See the note in repo/ports.py.
+def _recent_attendance(rows, limit) -> list:
+    """Their last few settled sessions, newest first."""
+    done = [r for r in rows if r["status"] != "booked"]
+    done.sort(key=lambda r: (-r["starts_at"], -r["session_id"]))
+    return [{"status": r["status"], "checked_in_at": r["checked_in_at"],
+             "session_id": r["session_id"], "starts_at": r["starts_at"],
+             "class_name": r["class_name"], "colour": r["colour"]}
+            for r in done[:limit]]
+
+
+def _next_booked_session(rows, after, class_id=None):
+    """
+    The next session they are booked into, or None. Scoped to a class when
+    the card names one — a Ballet card answering with a Flexibility date is
+    true but not the question asked.
+    """
+    ahead = [r for r in rows
+             if r["status"] == "booked" and r["starts_at"] > after
+             and (not class_id or r["session_class_id"] == class_id)]
+    if not ahead:
+        return None
+    r = min(ahead, key=lambda x: (x["starts_at"], x["session_id"]))
+    return {"starts_at": r["starts_at"], "class_name": r["class_name"]}
+
+
+def _client_totals(rows) -> dict:
+    """`{"present", "absent", "last_visit"}` across their whole history."""
+    present = [r for r in rows if r["status"] == "present"]
+    return {"present": len(present),
+            "absent": sum(1 for r in rows if r["status"] == "absent"),
+            "last_visit": max((r["starts_at"] for r in present), default=None)}
+
+
+def _client_payload(repo, client, sub, rows, class_id=None) -> dict:
     state = plan_state(repo, sub["id"]) if sub else {}
 
-    recent = repo.recent_attendance(cid, 4)
+    recent = _recent_attendance(rows, 4)
 
     # "Next class" means the next one on the card being held. A client who
     # takes Ballet and Flexibility was being shown whichever came first
     # across both, so the Ballet card could answer with a Flexibility date —
     # true, but not what was asked. Scoped to the card's class; a
     # member-number lookup names no class and still spans everything.
-    nxt = repo.next_booked_session(cid, db.now(), class_id)
-    tot = repo.client_totals(cid)
+    nxt = _next_booked_session(rows, db.now(), class_id)
+    tot = _client_totals(rows)
 
     return {
         "phone": client["phone"], "age": client["age"], "school": client["school"],
@@ -625,16 +673,17 @@ def verify(repo, raw_token: str) -> dict:
     # The card names a class, so the plan is that class's plan. This is what
     # stops a Ballet card drawing on a Flexibility balance.
     sub = active_plan(repo, client["id"], cred["class_id"])
-    base = {**known, **_client_payload(repo, client, sub, cred["class_id"])}
+    rows = repo.client_bookings(client["id"])
+    base = {**known, **_client_payload(repo, client, sub, rows, cred["class_id"])}
     if sub is None and cred["class_id"]:
         _log(repo, client["id"], cred["id"], None, "deny", "no plan for that class")
         return _deny(f"No {cred['class_name']} plan",
                      detail="this card is for a class they are not enrolled in",
                      **base)
-    return _decide(repo, client, cred, base, db.now())
+    return _decide(repo, client, cred, base, db.now(), rows, sub)
 
 
-def _decide(repo, client, cred, base, t):
+def _decide(repo, client, cred, base, t, rows, sub):
     """
     Shared by card scans and member-number lookups.
 
@@ -661,7 +710,7 @@ def _decide(repo, client, cred, base, t):
     # day, so this is a handful of rows -- and as a query it would be a
     # four-table join with a conditional OR and ORDER BY ABS(...), which has
     # no readable equivalent on a document store.
-    today_rows = repo.client_day_bookings(cid, start, end)
+    today_rows = [r for r in rows if start <= r["starts_at"] < end]
 
     # "Today" means the session's own day, never checked_in_at: marking
     # someone present this evening for yesterday's class stamps today's time
@@ -681,8 +730,9 @@ def _decide(repo, client, cred, base, t):
                      detail="nothing was deducted", severity="warn", **base)
 
     # The card's own plan: freezing the ballet plan must not turn away a
-    # client arriving for the flexibility class she is paid up in.
-    sub = active_plan(repo, cid, cred["class_id"] if cred else None)
+    # client arriving for the flexibility class she is paid up in. Passed in
+    # rather than looked up again — both callers have already asked
+    # active_plan() this exact question, with the same class, to build `base`.
     if sub and sub["frozen_on"]:
         until = sub["frozen_until"]
         when = f" until {until}" if until else ""
@@ -751,13 +801,14 @@ def verify_by_client(repo, client_id: int) -> dict:
         return _deny("Client is not active")
 
     sub = active_plan(repo, client_id)
+    rows = repo.client_bookings(client_id)
     base = {
         "client_id": client["id"], "credential_id": None,
         "name_en": client["name_en"], "photo_path": client["photo_path"],
         "card_class": None, "card_colour": None,
-        **_client_payload(repo, client, sub),
+        **_client_payload(repo, client, sub, rows),
     }
-    return _decide(repo, client, None, base, db.now())
+    return _decide(repo, client, None, base, db.now(), rows, sub)
 
 
 def check_in(repo, event_id: int) -> dict:
@@ -1997,22 +2048,29 @@ def unfreeze_plan(repo, sub_id: int, on_date: str = None) -> dict:
                 "unassigned": state["unassigned"]}
 
 
-def lift_expired_freezes(repo) -> int:
+def lift_expired_freezes(repo, frozen=None) -> set:
     """
     A freeze with an end date lifts itself. Called wherever plans are read, so
-    a laptop left off over the whole freeze still comes back correct.
+    a laptop left off over the whole freeze still comes back correct. Returns
+    the ids it lifted.
 
     This sits inside settle_past_sessions(), which runs before every read
     that touches attendance -- so it is the hottest path in the app and must
     not go through unfreeze_plan(). That would re-read a row already in hand
     and then build a plan_state() nothing here looks at: four round trips per
     due freeze instead of the two writes it actually takes.
+
+    `frozen` is every currently frozen plan, when the caller has already read
+    them -- settle_past_sessions() needs the same rows one line later, and
+    two reads of one collection is one round trip more than the answer costs.
     """
     today = date.today().isoformat()
-    # `ne: None` matters on a document store: there, a range comparison
-    # against a string also matches null, because BSON orders null first.
-    due = repo.find("subscriptions", {"frozen_on": {"ne": None},
-                                      "frozen_until": {"ne": None, "lte": today}})
+    if frozen is None:
+        # `ne: None` matters on a document store: there, a range comparison
+        # against a string also matches null, because BSON orders null first.
+        frozen = repo.find("subscriptions", {"frozen_on": {"ne": None}})
+    due = [r for r in frozen
+           if r["frozen_until"] is not None and r["frozen_until"] <= today]
     for row in due:
         _apply_unfreeze(repo, row, on_date=row["frozen_until"])
-    return len(due)
+    return {r["id"] for r in due}

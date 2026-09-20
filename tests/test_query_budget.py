@@ -52,8 +52,7 @@ class Counted:
                "class_students", "search_clients", "card_counts_bulk",
                "client_cards", "client_upcoming", "client_history",
                "plan_sessions", "takings", "active_plans_for",
-               "credential_by_token", "client_day_bookings", "recent_attendance",
-               "next_booked_session", "client_totals", "giveable_slots",
+               "credential_by_token", "client_bookings", "giveable_slots",
                "session_roster", "day_attendance_totals",
                "salary_hours", "adjustments_sum", "taught_totals_bulk",
                "instructor_sessions",
@@ -229,6 +228,61 @@ def test_the_clients_list_does_not_grow_a_query_per_client(client):
     assert len(r.json()) > 40
     assert len(many) <= len(few) + 2, (
         f"adding 40 clients cost {len(many) - len(few)} extra calls\n{many.report()}")
+
+
+def test_a_scan_costs_a_fixed_number_of_queries(academy, repo):
+    """
+    The one path with a person standing at the desk waiting for it.
+
+    It used to ask the same four questions of the same client's bookings
+    through four port methods, each of which re-read those bookings and
+    re-joined the sessions behind them — thirteen round trips on a document
+    store to decide something it already had in hand — and it looked the
+    client's active plan up twice, once to build the payload and once to
+    check it was not frozen.
+
+    The ceiling counts the maintenance sweep too: settle_past_sessions()
+    runs at the top of both entry points, so anything added to it is paid for
+    here, by the client at the desk.
+
+    The number is a ceiling over both backends and not a per-backend total:
+    MongoDB builds some of its named methods out of other counted primitives
+    (credential_by_token is a find_one plus a get, minting an id is its own
+    increment), so it counts higher than SQLite for the same work. What the
+    ceiling holds is the shape — one read of the client's bookings, one of
+    their plan — and the test below holds that it does not grow.
+    """
+    token = academy.dual_ballet_card          # _card() returns the token itself
+
+    with Counted() as c:
+        assert access.verify(repo, token)["granted"] is True
+    assert len(c) <= 14, c.report()
+    assert c.count_of("client_bookings") == 1, c.report()
+
+    with Counted() as c:
+        access.verify_by_client(repo, academy.dual)
+    assert len(c) <= 14, c.report()
+    assert c.count_of("client_bookings") == 1, c.report()
+
+
+def test_a_scan_does_not_grow_a_query_per_client(academy, repo):
+    """
+    The ceiling above must not move when the academy does. The sweep inside
+    settle_past_sessions() is academy-wide, so a version of it that read a
+    row per plan or a row per session would show up here and nowhere else.
+    """
+    token = academy.dual_ballet_card
+
+    with Counted() as small:
+        access.verify(repo, token)
+
+    more_clients(repo, academy, 40)
+
+    with Counted() as large:
+        access.verify(repo, token)
+
+    assert len(large) == len(small), \
+        f"grew with the academy\nbefore: {small.report()}\nafter: {large.report()}"
 
 
 def test_a_client_profile_costs_a_fixed_number_of_queries(client):
