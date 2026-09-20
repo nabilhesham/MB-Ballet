@@ -32,6 +32,20 @@ class EventIn(BaseModel):
     event_id: int
 
 
+class RenewIn(BaseModel):
+    """
+    A renewal sold at the desk. Deliberately no `session_ids`: the kiosk has
+    no session picker, and access.renew_at_desk() chooses the dates. See its
+    docstring for why that is the rule rather than a shortcut.
+    """
+    client_id: int
+    class_id: int
+    plan: str
+    sessions_total: int
+    price: Optional[float] = None
+    paid_on: Optional[str] = None
+
+
 # ---------------------------------------------------------------- routes
 @router.post("/api/access/verify")
 def verify(body: ScanIn):
@@ -95,5 +109,26 @@ def undo(body: EventIn):
     repo = data.connect()
     try:
         return access.undo(repo, body.event_id)
+    finally:
+        repo.close()
+
+
+@router.post("/api/access/renew")
+def renew(body: RenewIn):
+    """
+    Sell the next plan without leaving the kiosk.
+
+    The second way in to a renewal; the first is the client's profile, which
+    keeps its full session picker. This one exists for the moment it is
+    actually needed — a client at the counter whose plan has just run out —
+    and it neither issues a card nor checks anybody in. Both of those are
+    deliberate and both are explained on access.renew_at_desk().
+    """
+    repo = data.connect()
+    try:
+        r = access.renew_at_desk(repo, body.client_id, body.class_id,
+                                 body.plan.strip(), body.sessions_total,
+                                 price=body.price, paid_on=body.paid_on)
+        return JSONResponse(r, status_code=200 if r["ok"] else r.get("status", 400))
     finally:
         repo.close()

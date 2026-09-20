@@ -307,7 +307,10 @@ untouched by the React rewrite: the kiosk is the one latency-sensitive
 surface in the app (USB-HID scanner keystroke timing, camera barcode
 scanning, audio beeps), has no tables, no router, no modals, and nothing to
 gain from a re-render model. It stays self-contained, inline `<style>`,
-inline `<script>`, vanilla — exactly as before.
+inline `<script>`, vanilla — exactly as before. Its two panels that look
+like modals (the manual swap, and the desk renewal below) are inline
+blocks for that reason, and the renewal's dates are chosen server-side
+precisely so the kiosk never needs a session picker.
 
 **`db.init()` is three steps, in this order: tables, `migrate()`, indexes.**
 `CREATE TABLE IF NOT EXISTS` is a no-op on a database that already has the
@@ -1674,6 +1677,79 @@ same `_log()`/`check_in()` pair a scan goes through. That is what makes the
 count honest. The slot keeps the plan that paid for it, so the card still
 works afterwards. **Esc at any point checks nobody in** — the swap only
 happens on the confirm button.
+
+### Renewing at the desk
+
+**A plan that has just run out can be replaced from the kiosk**, which is
+the second way in to a renewal — the client profile keeps the first, with
+its full session picker. This one exists for the moment it is actually
+needed: somebody is standing at the counter, their plan is spent, and the
+alternative is the receptionist leaving the kiosk for the admin screen with
+a queue behind them.
+
+**RENEW PLAN appears beside MANUAL CHECK-IN on one condition**, so it can
+never show up for a reason nobody can name: they have a plan for a class,
+it has **nothing left**, and it is not frozen (a frozen plan is unfrozen,
+not replaced). A client with no plan at all has `sessions_remaining` of
+`null` rather than `0` and is deliberately not offered one — selling a
+*first* plan is still the profile's job.
+
+That covers both arrivals, which are the same situation a beat apart:
+
+- **nothing left on the way in** — the scan is refused, `sessions_remaining`
+  is 0 on the refusal, and the button is there with the verdict;
+- **one session left on the way in** — the scan checks them in as usual and
+  spends it, and `doCheckIn()` re-tests the offer against the balance the
+  check-in *returned*. `current.sessions_remaining` is updated there first,
+  or the test would key off the pre-check-in figure and a client who walked
+  in with exactly one session would be sent away without being offered the
+  next plan.
+
+**`access.renew_at_desk()` chooses the dates rather than offering them.**
+Every slot must be assigned to a real session before a plan saves, and a
+receptionist with a queue cannot tick twelve dates on a kiosk that has no
+tables and no modals — so the terms come from the desk and the dates come
+from the rule: the earliest sessions of that class the client could still
+attend, which is what `PlanPicker`'s "auto-fill earliest" already means on
+the admin side. Reception corrects any of them afterwards from the profile.
+A short timetable is refused as the thing to do about it ("Only 2 Ballet
+Level 8 sessions are scheduled — schedule more, or sell a shorter plan")
+rather than as a rule that was broken, and nothing is sold.
+
+**"Could still attend" means not finished, not "starts in the future."** The
+session somebody is standing at the desk for has usually already started by
+the time they scan. Filling only from sessions ahead would hand back a plan
+that cannot let them into the class they came for — which is the commonest
+renewal there is. Cancelled sessions and ones they already hold a slot in
+are both dropped.
+
+**Two things it deliberately does not do, and both matter more than they
+look.**
+
+- **It issues no card.** Renewing from the profile does (`PlanPicker`),
+  because the card prints the session count and end date of the plan it was
+  made for. But issuing **revokes the previous credential** — and the card
+  being revoked here is the one in the client's hand, which they are about
+  to scan again. A stale printout is a wrong number; a revoked card is a
+  paying client who cannot get in. The kiosk says so under the form, and
+  the profile's Reissue button is where a fresh card comes from.
+- **It checks nobody in.** Selling a plan and spending one of its sessions
+  are separate decisions, and a sale that consumed the first slot would be
+  the app making the second. So the client who had nothing left scans again
+  afterwards to use one; the client who had one session is already in for
+  today and simply leaves with a fresh plan. The screen says which of those
+  two it is, because that is the only difference in what reception does
+  next.
+
+**The refresh afterwards re-reads the client rather than patching the
+panel**, so what is on screen comes from the same `verify()` a scan goes
+through and cannot drift from what the next scan will say. It renders with
+`show(r, {noAuto: true})` — the one caller of that flag — because the
+automatic check-in a granted verdict normally triggers would spend a slot
+of the plan just sold. Which is also why the button under it reads
+**CHECK IN** there rather than CHECK IN ANYWAY: that wording is for a scan
+that matched nothing and is being let in regardless, and this one has a
+session and a slot to spend on it.
 
 **"Next class" is scoped to the card being held.** `_client_payload()` takes
 the credential's `class_id` and filters the lookup by it. A client taking

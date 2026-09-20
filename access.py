@@ -614,6 +614,12 @@ def _client_payload(repo, client, sub, rows, class_id=None) -> dict:
     return {
         "phone": client["phone"], "age": client["age"], "school": client["school"],
         "plan": state.get("plan"),
+        # Which plan, and for which class. The kiosk needs both to offer a
+        # renewal at the desk: a plan is bought for one class, so "renew"
+        # with no class named is not a question the model can answer.
+        "plan_id": state.get("id"),
+        "plan_class_id": state.get("class_id"),
+        "plan_class_name": state.get("class_name"),
         "sessions_total": state.get("sessions_total"),
         "sessions_remaining": state.get("remaining"),
         "expires_on": state.get("expires_on"),
@@ -1059,6 +1065,88 @@ def cancel_session(repo, session_id: int) -> dict:
                               {"status": "booked", "checked_in_at": None})
         repo.update("sessions", session_id, {"status": "cancelled"})
         return {"ok": True, "released": n}
+
+
+def renewable_sessions(repo, class_id: int, client_id: int, want: int) -> list:
+    """
+    The earliest `want` sessions of a class this client could still attend.
+
+    What "still" means is **not finished yet**, not "starts in the future":
+    the session someone is standing at the desk for has usually already
+    started by the time they scan. Dropping it would make the commonest
+    renewal — a client arriving for today's class with nothing left — hand
+    back a plan that cannot let them into the class they came for.
+
+    Cancelled sessions are dropped (a slot on one is meaningless, the same
+    filter lib/planSessions.js applies), and so is anything they already
+    hold a slot in, which is what `not_booked_by` is for.
+    """
+    now = db.now()
+    rows = repo.sessions_in_range(day_bounds(now)[0], None, class_id=class_id,
+                                  not_booked_by=client_id)
+    live = [s for s in rows
+            if s["status"] != "cancelled" and (s["ends_at"] or 0) > now]
+    live.sort(key=lambda s: (s["starts_at"], s["id"]))
+    return [s["id"] for s in live[:want]]
+
+
+def renew_at_desk(repo, client_id: int, class_id: int, plan: str,
+                  sessions_total: int, price: float = None,
+                  paid_on: str = None) -> dict:
+    """
+    Sell a client their next plan with them standing at the reception desk.
+
+    The same sale `add_plan()` makes, with the dates chosen rather than
+    picked. That is the whole reason this exists: every slot must be
+    assigned to a real session before a plan saves, and a receptionist with
+    a queue at the counter cannot tick twelve dates on a kiosk that has no
+    tables and no modals. So the terms come from the desk and the dates come
+    from the rule — the earliest sessions of that class they could still
+    attend, which is what `PlanPicker`'s "auto-fill earliest" button already
+    means on the admin side.
+
+    Reception can correct any of those dates afterwards from the client's
+    profile; what it cannot do is sell a plan that promises nothing.
+
+    **It never issues a card**, and that is the important one. Renewing from
+    the profile does (`PlanPicker`), because the printed card carries the
+    session count and end date of the plan it was made for. But issuing
+    revokes the previous credential — and the card being revoked here is the
+    one in the client's hand, which they are about to scan again. The stored
+    PNG therefore goes stale until somebody presses Reissue on the profile,
+    which is a wrong number on a printout; revoking it would be a client who
+    cannot get in.
+
+    **It checks nobody in either.** The new plan's slots are booked but not
+    spent, so a client who had nothing left scans again to use one. That
+    keeps the deduction where it has always been — a scan, or a deliberate
+    press — rather than something a sale does on its own.
+    """
+    client = repo.get("clients", client_id)
+    if client is None or not client["active"]:
+        return {"ok": False, "status": 404, "error": "no such client"}
+    klass = repo.get("classes", class_id)
+    if not klass:
+        return {"ok": False, "status": 404, "error": "no such class"}
+    if sessions_total < 1:
+        return {"ok": False, "status": 400,
+                "error": "a plan needs at least one session"}
+
+    ids = renewable_sessions(repo, class_id, client_id, sessions_total)
+    if len(ids) < sessions_total:
+        # Said as the thing to do about it rather than as a rule that was
+        # broken: the timetable is short, and the fix is to schedule more or
+        # to sell a smaller plan.
+        return {"ok": False, "status": 400,
+                "error": (f"Only {len(ids)} {klass['name']} session"
+                          f"{'' if len(ids) == 1 else 's'} are scheduled — "
+                          f"schedule more, or sell a shorter plan.")}
+
+    out = add_plan(repo, client_id, class_id, plan, sessions_total, ids,
+                   price=price, paid_on=paid_on)
+    if not out.get("ok"):
+        return out
+    return {**out, "state": plan_state(repo, out["id"])}
 
 
 def _assignment_error(repo, client_id, session_ids, class_id, class_label):
