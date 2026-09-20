@@ -110,15 +110,21 @@ INDEXES = {
     "sessions": [(["starts_at"], False), (["ends_at"], False),
                  (["class_id"], False), (["instructor_id"], False)],
     "subscriptions": [(["client_id", "class_id", "active"], False),
-                      (["starts_on"], False)],
+                      (["starts_on"], False), (["expires_on"], False)],
     "bookings": [(["client_id", "session_id"], True), (["client_id"], False),
-                 (["session_id"], False), (["subscription_id"], False)],
+                 (["session_id"], False), (["subscription_id"], False),
+                 # settle_absences() matches status first, then a session id
+                 # list, and runs before every read that touches attendance.
+                 (["status", "session_id"], False)],
     "freezes": [(["subscription_id"], False)],
     "appointments": [(["on_date"], False)],
     "instructor_hours": [(["instructor_id", "work_date"], True),
                          (["work_date"], False)],
     "instructor_hour_adjustments": [(["instructor_id", "adjustment_date"], False)],
-    "clients": [(["joined_on"], False)],
+    # name_en carries the sort for search_clients and class_students. There is
+    # deliberately no index on `active` here or on subscriptions: it is 0/1 and
+    # nearly every row is 1, so an index on it costs writes and buys no reads.
+    "clients": [(["joined_on"], False), (["name_en"], False)],
     "settings": [(["key"], True)],
 }
 

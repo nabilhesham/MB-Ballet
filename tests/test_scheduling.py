@@ -276,3 +276,89 @@ def test_sessions_in_range_can_exclude_what_a_client_already_holds(empty):
     got = repo.sessions_in_range(start, start + 86400, not_booked_by=cid)
 
     assert [s["id"] for s in got] == [free]
+
+
+# -------------------------------------------------- repeat_sessions (batched)
+#
+# access.repeat_sessions() checks a whole term in three round trips instead of
+# three per date. These pin the three things the per-date loop used to get for
+# free -- see that function's docstring.
+
+def test_a_repeat_creates_every_free_date(empty):
+    cands = [at(d, 18) for d in (1, 8, 15, 22)]
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins, cands, 1.5)
+    assert r["created"] == 4
+    assert r["skipped"] == []
+    assert empty.repo.count("sessions") == 4
+
+
+def test_a_repeat_sets_ends_at_on_every_session(empty):
+    cands = [at(d, 18) for d in (1, 8)]
+    access.repeat_sessions(empty.repo, empty.ballet, empty.ins, cands, 1.5)
+    for s in empty.repo.find("sessions"):
+        assert s["ends_at"] == access.ends_at_of(s["starts_at"], 1.5)
+
+
+def test_one_taken_evening_does_not_cost_the_rest_of_the_term(empty):
+    """A clash skips its own date and names it, never the batch."""
+    add(empty, empty.flex, at(8, 18), 1.0)
+    cands = [at(d, 18) for d in (1, 8, 15, 22)]
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins, cands, 1.5)
+    assert r["created"] == 3
+    assert len(r["skipped"]) == 1
+    assert "Flex" in r["skipped"][0], r["skipped"]
+
+
+def test_a_date_already_holding_this_class_is_skipped_without_a_message(empty):
+    """A duplicate is not a clash: it is silently already there."""
+    add(empty, empty.ballet, at(8, 18), 1.5)
+    cands = [at(d, 18) for d in (1, 8)]
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins, cands, 1.5)
+    assert r["created"] == 1
+    assert r["skipped"] == []
+
+
+def test_a_cancelled_session_of_this_class_still_counts_as_already_entered(empty):
+    """
+    The duplicate check carries no status filter, unlike the overlap check.
+    A cancelled session frees the *slot* but the date is still entered.
+    """
+    add(empty, empty.ballet, at(8, 18), 1.5, status="cancelled")
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins,
+                               [at(8, 18)], 1.5)
+    assert r["created"] == 0
+    assert r["skipped"] == []
+
+
+def test_a_cancelled_session_of_another_class_does_not_block(empty):
+    add(empty, empty.flex, at(8, 18), 1.0, status="cancelled")
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins,
+                               [at(8, 18)], 1.5)
+    assert r["created"] == 1
+
+
+def test_back_to_back_dates_in_one_batch_are_both_created(empty):
+    """Half-open intervals: 18:00-19:30 and 19:30-20:30 do not overlap."""
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins,
+                               [at(1, 18), at(1, 19, 30)], 1.5)
+    assert r["created"] == 2, r["skipped"]
+
+
+def test_sessions_created_in_one_batch_conflict_with_each_other(empty):
+    """
+    The one the loop got for free. Each insert used to be visible to the next
+    slot_conflict(); batched, nothing is written until the end, so an
+    overlapping pair inside a single term would both be accepted unless the
+    accepted slots are accumulated as it goes.
+    """
+    r = access.repeat_sessions(empty.repo, empty.ballet, empty.ins,
+                               [at(1, 18), at(1, 19)], 1.5)   # 18:00-19:30 vs 19:00
+    assert r["created"] == 1, "the second overlaps the first by 30 minutes"
+    assert len(r["skipped"]) == 1
+    assert "Ballet" in r["skipped"][0], r["skipped"]
+    assert empty.repo.count("sessions") == 1
+
+
+def test_an_empty_candidate_list_is_not_an_error(empty):
+    assert access.repeat_sessions(empty.repo, empty.ballet, empty.ins, [], 1.5) \
+        == {"created": 0, "skipped": []}
