@@ -129,7 +129,17 @@
   .swaprow .w{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .swaprow .t{font-family:var(--mono);font-size:11px;color:var(--mute)}
   .swapnone{color:var(--dim);font-size:12.5px;padding:10px 2px}
-  #manual,#swapGo{display:none}
+  #manual,#swapGo,#renewBtn,#renewGo{display:none}
+
+  /* Renewing at the desk. Same panel idiom as the swap above — an inline
+     block, not a modal: the kiosk has no modal machinery and does not want
+     any, and a form the receptionist reads at arm's length is better wide
+     than boxed. Four fields, because the dates are not one of them; see
+     access.renew_at_desk() for why they are chosen rather than picked. */
+  #renew{display:none;margin-bottom:20px}
+  #renew.on{display:block}
+  .renewgrid{display:grid;grid-template-columns:2fr 1fr 1fr 1.2fr;gap:12px}
+  @media(max-width:900px){ .renewgrid{grid-template-columns:1fr 1fr} }
 
   /* ---------- sidebar ---------- */
   aside{border-left:1px solid var(--line);background:#0A0E13;padding:20px 16px;
@@ -222,10 +232,38 @@
       </div>
     </div>
 
+    <!-- Their plan has run out and they are standing here. Sell the next
+         one without leaving the kiosk, rather than walking round to the
+         admin screen with a queue at the counter. The dates are filled in
+         by the server — see access.renew_at_desk(). -->
+    <div id="renew">
+      <div class="swaphead">
+        Renew <b id="renewClass"></b> — the dates are filled from the timetable,
+        earliest first. Correct them later from their profile if they need to move.
+      </div>
+      <div class="renewgrid">
+        <div><div class="swapk">PLAN NAME</div>
+          <input id="renewPlan" type="text" autocomplete="off"></div>
+        <div><div class="swapk">SESSIONS</div>
+          <input id="renewCount" type="number" min="1" max="200" inputmode="numeric"></div>
+        <div><div class="swapk">PRICE (EGP)</div>
+          <input id="renewPrice" type="number" placeholder="optional" inputmode="decimal"></div>
+        <div><div class="swapk">PAID ON</div>
+          <input id="renewPaid" type="date"></div>
+      </div>
+      <div class="swapnone">
+        Nothing is sold until SAVE. Their card keeps working and is not
+        reissued — print a fresh one from their profile when you want the
+        new figures on it.
+      </div>
+    </div>
+
     <div class="actions">
       <button id="manual">MANUAL CHECK-IN</button>
+      <button id="renewBtn">RENEW PLAN</button>
       <button id="checkin">CHECK IN</button>
       <button id="swapGo">CHECK IN</button>
+      <button id="renewGo">SAVE RENEWAL</button>
       <button id="undo" class="danger">Undo</button>
     </div>
     <div class="keys" id="keys">Esc to clear</div>
@@ -610,9 +648,23 @@ async function scan(token){
   }
 }
 
-function show(r){
+function show(r, opts){
+  /*
+   * `opts.noAuto` renders a verdict without acting on it. The one caller is
+   * the refresh after a desk renewal: the panel has to show the plan they
+   * now hold, and must not spend a session of it to do so. Selling a plan
+   * and using one are separate decisions, and a sale that quietly consumed
+   * the first slot would be the app deciding the second.
+   */
+  opts = opts || {};
   current = r;
   idle.style.display='none'; card.classList.add('on');
+  /* A panel left open by the last verdict is not this one's. Cleared here
+     as well as in reset(), because a renewal re-renders without passing
+     through it. */
+  $('swap').classList.remove('on'); $('swapGo').style.display='none';
+  $('renew').classList.remove('on'); $('renewGo').style.display='none';
+  $('stats').style.display=''; $('recent').style.display='';
 
   /* Three states, not two. A refusal the server marked "warn" is amber and
      says what happened — scanning twice in one day is the ordinary case, and
@@ -724,7 +776,7 @@ function show(r){
      inform-don't-block rule describes), spending a slot on it must go back
      to being a deliberate press rather than something that happens by
      itself. */
-  const auto = r.granted && !!r.session;
+  const auto = r.granted && !!r.session && !opts.noAuto;
   const btn = $('checkin');
   btn.style.display = r.granted ? 'inline-flex' : 'none';
   /* Two refusals are worth a way out rather than only a no, and both are the
@@ -737,9 +789,18 @@ function show(r){
   const CAN_SWAP = ['no_session_today', 'absent_today'];
   $('manual').style.display =
     (!r.granted && CAN_SWAP.includes(r.code) && r.client_id) ? 'inline-flex' : 'none';
+  /* Nothing left on the plan: offer the next one, here, rather than sending
+     the receptionist round to the admin screen. This is the scan-time half
+     — the other half is doCheckIn(), for the client who walks in with
+     exactly one session and spends it on the way past. */
+  showRenew(renewOffered(r));
   btn.style.background = 'var(--ok)';
   btn.disabled = auto;
-  btn.textContent = auto ? 'CHECKING IN…' : 'CHECK IN ANYWAY';
+  /* "CHECK IN ANYWAY" is the wording for a scan that matched nothing and is
+     being let in regardless. After a renewal the button is the ordinary
+     one — they have a session and a slot to spend on it — so it says so. */
+  btn.textContent = auto ? 'CHECKING IN…'
+    : (opts.noAuto && r.session ? 'CHECK IN' : 'CHECK IN ANYWAY');
   $('undo').classList.remove('on');
 
   keysBase = auto || !r.granted ? 'Esc to clear' : 'Enter to check in · Esc to clear';
@@ -846,6 +907,117 @@ async function doSwapCheckIn(){
 $('manual').onclick = openSwap;
 $('swapGo').onclick = doSwapCheckIn;
 
+/* ================================================================
+   RENEW AT THE DESK
+   Their plan has run out — either they arrived with nothing left, or they
+   arrived with one session and just spent it on the way past. Both end the
+   same way: the next plan gets sold here, with the client standing there,
+   instead of the receptionist walking round to the admin screen.
+
+   Two things it deliberately does not do, both on access.renew_at_desk():
+   it issues no card (issuing revokes the one in their hand, which they are
+   about to scan again), and it checks nobody in (a sale is not an
+   attendance). So a client who had nothing left scans again afterwards;
+   one who had a session is already in for today and simply leaves with a
+   fresh plan.
+   ================================================================ */
+function renewOffered(r){
+  /* Exactly one condition, so the button cannot appear for a reason nobody
+     can name: they have a plan for a class, it has nothing left, and it is
+     not frozen (a frozen plan is unfrozen, not replaced). A client with no
+     plan at all has `sessions_remaining` of null rather than 0 and is not
+     offered one here — selling a first plan is still the profile's job. */
+  return !!(r && r.client_id && r.plan_class_id && !r.frozen
+            && r.sessions_remaining === 0);
+}
+
+function showRenew(on){
+  $('renewBtn').style.display = on ? 'inline-flex' : 'none';
+}
+
+function todayISO(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function openRenew(){
+  if(!current || !current.plan_class_id) return;
+  $('renewBtn').style.display = 'none';
+  $('manual').style.display = 'none';
+  $('checkin').style.display = 'none';
+  $('renewClass').textContent = current.plan_class_name || 'this class';
+  /* Defaults are the plan they just finished: a renewal is the same pack
+     again far more often than it is a different one, and anything here can
+     be typed over. */
+  $('renewPlan').value = current.plan || '';
+  $('renewCount').value = current.sessions_total || 12;
+  $('renewPrice').value = '';
+  /* Paid today, because the money is changing hands at this counter. Clear
+     it and the plan reads as unpaid, which is a real answer — see the
+     paid_on note in CLAUDE.md. */
+  $('renewPaid').value = todayISO();
+  $('renew').classList.add('on');
+  $('renewGo').style.display = 'inline-flex';
+  $('stats').style.display = 'none'; $('recent').style.display = 'none';
+  $('keys').textContent = 'Esc to cancel — nothing is sold until SAVE';
+  /* Focusing an input is also what stops the scanner listener reading the
+     typing as a card: layer one of the four in the note at the top. */
+  $('renewPlan').focus();
+}
+
+async function doRenew(){
+  if(!current || !current.plan_class_id) return;
+  const plan = $('renewPlan').value.trim();
+  const n = Number($('renewCount').value);
+  if(!plan){ $('reason').textContent = 'Give the plan a name'; $('renewPlan').focus(); return; }
+  if(!n || n < 1){ $('reason').textContent = 'How many sessions?'; $('renewCount').focus(); return; }
+
+  /* Whether they are already in for today, read before the refresh replaces
+     `current`. It is the only difference between the two things reception
+     is told to do next. */
+  const wasIn = !!current.done;
+  const cid = current.client_id;
+  $('renewGo').disabled = true;
+  let r;
+  try{
+    r = await (await fetch('/api/access/renew', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        client_id: cid, class_id: current.plan_class_id,
+        plan, sessions_total: n,
+        price: $('renewPrice').value === '' ? null : Number($('renewPrice').value),
+        paid_on: $('renewPaid').value || null,
+      })})).json();
+  }catch(e){ r = {ok:false, error:'System not responding'}; }
+  $('renewGo').disabled = false;
+  if(!r || !r.ok){
+    /* The refusal worth reading is "only 4 sessions are scheduled" — the
+       timetable is short and somebody has to go and fix it. */
+    $('reason').textContent = (r && r.error) || 'Could not renew';
+    return;
+  }
+
+  /* Read the client back rather than patching the panel from the response:
+     what is on screen then comes from the same verify() a scan goes
+     through, so it cannot drift from what the next scan will say. noAuto
+     because this refresh must not spend a slot of the plan just sold. */
+  let fresh;
+  try{
+    fresh = await (await fetch('/api/access/lookup', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({client_id: cid})})).json();
+  }catch(e){ $('reason').textContent = 'Renewed, but the screen could not refresh'; return; }
+
+  show(fresh, {noAuto:true});
+  $('reason').textContent = wasIn
+    ? `Renewed — ${n} sessions. They are already checked in for today.`
+    : `Renewed — ${n} sessions. Check them in to use one.`;
+  $('keys').textContent = 'Card unchanged — reissue it from their profile · Esc to clear';
+  beepOk();
+}
+$('renewBtn').onclick = openRenew;
+$('renewGo').onclick = doRenew;
+
 async function doCheckIn(){
   /* The auto path disables the button before calling in, so "already
      disabled" cannot be the guard any more — `done` is. */
@@ -859,6 +1031,16 @@ async function doCheckIn(){
     $('checkin').textContent = 'CHECKED IN — ' + r.sessions_remaining + ' LEFT';
     $('checkin').style.background = 'var(--ok)';
     $('undo').classList.add('on');
+    /* That was their last one. The balance on `current` is the pre-check-in
+       figure, so it is updated here before the offer is re-tested —
+       otherwise the button would key off a number that is one out, and a
+       client who walked in with one session would be sent away without
+       being offered the next plan. */
+    current.sessions_remaining = r.sessions_remaining;
+    showRenew(renewOffered(current));
+    if(r.sessions_remaining === 0){
+      $('reason').textContent = 'That was their last session — offer a renewal';
+    }
   }else{
     $('reason').textContent = r.error;
     $('checkin').textContent = 'CHECK IN ANYWAY';
@@ -881,6 +1063,10 @@ function reset(){
   $('swap').classList.remove('on');
   $('swapGo').style.display = 'none';
   $('manual').style.display = 'none';
+  // Esc out of a half-typed renewal sells nothing either.
+  $('renew').classList.remove('on');
+  $('renewGo').style.display = 'none';
+  $('renewBtn').style.display = 'none';
   $('stats').style.display = ''; $('recent').style.display = '';
   card.classList.remove('on'); idle.style.display='flex'; stage.className='';
   keysBase = 'Esc to clear';
