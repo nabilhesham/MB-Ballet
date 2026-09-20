@@ -648,6 +648,14 @@ async function scan(token){
   }
 }
 
+/* What colour a remaining-sessions figure is. Named because the check-in
+   below re-writes that figure and has to reach the same answer — two copies
+   of "red at zero, amber at two" would eventually disagree. */
+function leftColour(n){
+  if(n === undefined || n === null) return 'var(--mute)';
+  return n <= 0 ? 'var(--bad)' : n <= 2 ? 'var(--warn)' : 'var(--ok)';
+}
+
 function show(r, opts){
   /*
    * `opts.noAuto` renders a verdict without acting on it. The one caller is
@@ -746,8 +754,7 @@ function show(r, opts){
   const left = r.sessions_remaining;
   $('stats').innerHTML = `
     <div class="stat"><div class="k">SESSIONS LEFT</div>
-      <div class="v" style="color:${left===undefined||left===null?'var(--mute)'
-        : left<=0?'var(--bad)' : left<=2?'var(--warn)':'var(--ok)'}">${left ?? '—'}</div>
+      <div class="v" id="statLeft" style="color:${leftColour(left)}">${left ?? '—'}</div>
       <div class="n">${r.sessions_total ? 'of '+r.sessions_total : 'no plan'}</div></div>
     <div class="stat"><div class="k">VISITS</div><div class="v">${r.visits ?? 0}</div>
       <div class="n">${r.last_visit ? 'last '+fmtDay(r.last_visit) : 'first time'}</div></div>
@@ -945,6 +952,11 @@ function openRenew(){
   $('renewBtn').style.display = 'none';
   $('manual').style.display = 'none';
   $('checkin').style.display = 'none';
+  /* Undo goes too. It belongs to the check-in that may have just happened,
+     and beside SAVE RENEWAL it is a mis-click that wipes a half-typed form:
+     it calls reset(), which clears the whole screen. Esc is the way out of
+     here, and the line under the buttons says so. */
+  $('undo').classList.remove('on');
   $('renewClass').textContent = current.plan_class_name || 'this class';
   /* Defaults are the plan they just finished: a renewal is the same pack
      again far more often than it is a different one, and anything here can
@@ -1037,6 +1049,16 @@ async function doCheckIn(){
        client who walked in with one session would be sent away without
        being offered the next plan. */
     current.sessions_remaining = r.sessions_remaining;
+    /* The panel was drawn from the verdict, which is the balance *before*
+       this check-in spent a slot — so SESSIONS LEFT read one too many the
+       moment the button said CHECKED IN. Harmless-looking until the figure
+       is 1: the screen then says "1 left" beside "CHECKED IN — 0 LEFT" and
+       flatly contradicts the renewal it is offering. */
+    const el = $('statLeft');
+    if(el && r.sessions_remaining !== undefined && r.sessions_remaining !== null){
+      el.textContent = r.sessions_remaining;
+      el.style.color = leftColour(r.sessions_remaining);
+    }
     showRenew(renewOffered(current));
     if(r.sessions_remaining === 0){
       $('reason').textContent = 'That was their last session — offer a renewal';
