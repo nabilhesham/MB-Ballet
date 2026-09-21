@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 
-import { useApi } from '../api';
-import { fmtISODay } from '../lib/format';
+import { api, useApi } from '../api';
+import { fmtISODayTime } from '../lib/format';
 import { useModal } from '../components/Modal';
 import DataTable from '../components/DataTable';
 import Empty from '../components/Empty';
+import { useConfirm } from '../components/ConfirmModal';
+import { useToast } from '../components/Toast';
 import AppointmentForm from '../modals/AppointmentForm';
 
 /*
@@ -31,6 +33,8 @@ export default function Appointments() {
   const [draft, setDraft] = useState({ from: '', to: '' });
   const [range, setRange] = useState({ from: '', to: '' });
   const { open } = useModal();
+  const confirm = useConfirm();
+  const toast = useToast();
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query), 250);
@@ -41,6 +45,24 @@ export default function Appointments() {
   if (range.from) qs.set('date_from', range.from);
   if (range.to) qs.set('date_to', range.to);
   const { data: list, loading, error, reload } = useApi(`/appointments?${qs}`);
+
+  const edit = a => open(<AppointmentForm appt={a} onSaved={reload} />);
+
+  /* Deleted outright, which is the one place in this app that is the right
+     answer -- an enquiry has no attendance, no plan and no card behind it,
+     so there is nothing to lose by removing it and a list full of
+     cancelled calls is worse at the only job it has. See the endpoint. */
+  const remove = a => confirm({
+    title: 'Delete this appointment',
+    message: <>The enquiry from <b>{a.name}</b> will be removed for good. Nothing
+      else is affected — an appointment is only a note that somebody rang up.</>,
+    label: 'Delete it',
+    onConfirm: async () => {
+      await api(`/appointments/${a.id}`, { method: 'DELETE' });
+      toast('Appointment deleted');
+      reload();
+    },
+  });
 
   if (loading && list === null) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
@@ -112,12 +134,27 @@ export default function Appointments() {
                 : <span className="mute">— none —</span>),
             },
             {
-              label: 'APPOINTMENT', sortValue: r => r.on_date,
-              cell: r => fmtISODay(r.on_date),
+              // Sorted on the two halves joined, so rows on the same day
+              // order by time of day and the ones with no time sit first --
+              // the order the day itself runs in.
+              label: 'APPOINTMENT', sortValue: r => `${r.on_date} ${r.on_time || ''}`,
+              cell: r => fmtISODayTime(r.on_date, r.on_time),
             },
             {
               label: 'NOTES', className: 'mute', hideSm: true,
               sortValue: r => r.notes || '', cell: r => r.notes || '',
+            },
+            {
+              // No sortValue: a column of buttons has nothing to sort by,
+              // and that absence is what marks it unsortable -- see the
+              // <DataTable> note in CLAUDE.md.
+              label: '', className: 'right',
+              cell: r => (
+                <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                  <button className="sm" onClick={() => edit(r)}>Edit</button>
+                  <button className="sm danger" onClick={() => remove(r)}>Delete</button>
+                </div>
+              ),
             },
           ]}
         />

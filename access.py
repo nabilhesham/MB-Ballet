@@ -1108,14 +1108,16 @@ def renew_at_desk(repo, client_id: int, class_id: int, plan: str,
     Reception can correct any of those dates afterwards from the client's
     profile; what it cannot do is sell a plan that promises nothing.
 
-    **It never issues a card**, and that is the important one. Renewing from
-    the profile does (`PlanPicker`), because the printed card carries the
-    session count and end date of the plan it was made for. But issuing
-    revokes the previous credential — and the card being revoked here is the
-    one in the client's hand, which they are about to scan again. The stored
-    PNG therefore goes stale until somebody presses Reissue on the profile,
-    which is a wrong number on a printout; revoking it would be a client who
-    cannot get in.
+    **The sale is all this does — no card, and no check-in.**
+
+    The card is issued by the route above it, `POST /api/access/renew`,
+    because drawing a PNG is presentation and this module holds the rules.
+    Both ways in to a renewal issue one: the printed card carries the
+    session count and the end date of the plan it was made for, so a
+    renewal leaves the old one reading last month's figures. The cost is
+    that issuing revokes the previous credential — the card in the client's
+    hand stops scanning until the new one is printed — and the kiosk says
+    so where reception can act on it. See that route's docstring.
 
     **It checks nobody in either.** The new plan's slots are booked but not
     spent, so a client who had nothing left scans again to use one. That

@@ -197,8 +197,11 @@ identity.py       What makes two client records the same person: the mobile
                   them.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
-cards.py          Member card PNG generation.
-server.py         FastAPI app, paths, startup, cache policy, static mounts.
+cards.py          Member card PNG generation, and cards.issue() --
+                  credential + PNG + stamped URL in one step, shared by
+                  the profile's Issue/Reissue and the desk renewal.
+server.py         FastAPI app, paths, the lifespan handler, cache policy,
+                  static mounts.
                   Thin — routes
                   live in api/, business rules live in access.py.
 api/              One router module per resource, wired into server.py with
@@ -838,16 +841,36 @@ system and everything else follows from it:
   the whole value of the list is the people who have *not* been written down
   as clients yet — so the row holds its own `name`, `phone` and `age`
   (`REAL`, for the same reason `clients.age` is), which is all reception has
-  when the phone rings. `on_date` is an ISO day, not a timestamp: reception
-  writes "Tuesday" down, not 16:30, and a day column is what makes the
-  list's date range need no end-of-day arithmetic (contrast the Sessions
-  list, where it does). If the person turns up and enrols, a client is
+  when the phone rings. If the person turns up and enrols, a client is
   created separately and this row stays as the record of the enquiry.
+
+  **The day and the time of day are two columns, not one timestamp.**
+  `on_date` is an ISO day like every other calendar day in this schema;
+  `on_time` is `HH:MM` beside it, and **nullable on purpose** — "sometime
+  Tuesday" is a real answer over the phone and midnight is not a truthful
+  stand-in for it. Keeping them apart is what lets the list's date range
+  need no end-of-day arithmetic (contrast the Sessions list, where the TO
+  bound has to be pushed to 23:59 because the column is an epoch), and the
+  filter is still on the day alone however precise the time against it. The
+  two are joined for display only, by `lib/format.js`'s `fmtISODayTime`.
 
   **None of the client identity rules reach it**, and that is a decision
   rather than an omission: the mobile is optional and may repeat, because
   the same family rings twice about two children and the same person
   reschedules. There is no uniqueness rule here at all.
+
+  **An enquiry is edited and deleted in place**, which is the one row in
+  this app that is deleted outright rather than archived. The deletion
+  policy below exists because losing who attended what is worse than a
+  cluttered list — and an appointment has no attendance, no plan, no card
+  and nothing pointing at it. A cancelled call kept for ever as a greyed
+  row would make the list worse at the only job it has, which is showing
+  who is expected. The edit offers every field, because an enquiry is a
+  note taken over the phone and any part of it can be misheard; it is held
+  to exactly the same refusals a create is (`_checked()` in
+  api/appointments.py is the single copy of them), since refusing something
+  at creation and allowing it a minute later leaves the state the refusal
+  exists to prevent.
 
 **The class is the spine.** A plan is bought for one class, may only be
 assigned to that class's sessions, and is proved by that class's card:
@@ -1402,6 +1425,13 @@ deletion is a separate `?hard=true` call, and the server refuses it when
 attendance records exist. Losing the record of who attended what is worse than
 a cluttered list.
 
+**Appointments are the one exception, and it is not a loophole.** `DELETE
+/api/appointments/{id}` removes an enquiry for good, because an enquiry has
+no attendance, no plan, no card and nothing pointing at it — the rule above
+is protecting a record that does not exist here, and a list of cancelled
+calls is worse at the only job the list has. See the appointments note in
+the data model.
+
 Archiving is currently **one-way**: there is no restore endpoint and no
 "Admin → Archive" screen. An `admin_routes.py` once existed with a restore
 route and a manual-balance-adjustment endpoint, but it was never mounted into
@@ -1723,16 +1753,34 @@ that cannot let them into the class they came for — which is the commonest
 renewal there is. Cancelled sessions and ones they already hold a slot in
 are both dropped.
 
-**Two things it deliberately does not do, and both matter more than they
-look.**
+**It issues the card, and it checks nobody in.**
 
-- **It issues no card.** Renewing from the profile does (`PlanPicker`),
-  because the card prints the session count and end date of the plan it was
-  made for. But issuing **revokes the previous credential** — and the card
-  being revoked here is the one in the client's hand, which they are about
-  to scan again. A stale printout is a wrong number; a revoked card is a
-  paying client who cannot get in. The kiosk says so under the form, and
-  the profile's Reissue button is where a fresh card comes from.
+- **The card is replaced, both ways in.** The printed card carries the
+  session count and the end date of the plan it was made for, so a renewal
+  makes both of them wrong — the profile's `PlanPicker` has always issued a
+  fresh one on a renewal, and the desk does too. `POST /api/access/renew`
+  is where that happens rather than `access.renew_at_desk()`, because
+  drawing a PNG is presentation; `cards.issue()` is the one copy of the
+  three steps (credential, PNG, stamped URL) that both the profile's
+  Issue/Reissue button and this route go through.
+
+  **The cost is real and the kiosk says it out loud.** Issuing **revokes
+  the previous credential**, and the credential being revoked is the card
+  in the client's hand — between the sale and the printout, that card does
+  not scan. The screen therefore reads "New card issued — print it from
+  their profile. The old card no longer works", and the form says the same
+  thing before SAVE. The trade is a wrong number on a card that works
+  against a right one that has to be printed, and it is reception's to
+  manage with the client in front of them. (This reverses an earlier
+  decision that the desk should leave the card alone; if it is ever
+  reversed back, the sentence under the form and the line under the verdict
+  are the two places that have to move with it.)
+
+  **A card that could not be drawn does not undo the sale.** The route
+  reports the failure beside the verdict instead of raising: unselling a
+  plan somebody has just paid for is not a press of a button, and a 500
+  over a picture would leave the kiosk claiming nothing happened with the
+  money already in the till.
 - **It checks nobody in.** Selling a plan and spending one of its sessions
   are separate decisions, and a sale that consumed the first slot would be
   the app making the second. So the client who had nothing left scans again

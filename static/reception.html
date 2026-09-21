@@ -252,9 +252,9 @@
           <input id="renewPaid" type="date"></div>
       </div>
       <div class="swapnone">
-        Nothing is sold until SAVE. Their card keeps working and is not
-        reissued — print a fresh one from their profile when you want the
-        new figures on it.
+        Nothing is sold until SAVE. Saving issues a new card for this class —
+        <b>print it from their profile and hand it over</b>, because the one
+        they are holding stops working the moment this saves.
       </div>
     </div>
 
@@ -656,6 +656,38 @@ function leftColour(n){
   return n <= 0 ? 'var(--bad)' : n <= 2 ? 'var(--warn)' : 'var(--ok)';
 }
 
+/* The four figures and the recent-attendance chips, from a verdict.
+ *
+ * Its own function because it is drawn twice: once from the verdict, and
+ * again by doCheckIn() from the same verdict *after* it has been told what
+ * the check-in changed. The panel above it -- who this is, and the red or
+ * green word across the top -- is deliberately left alone there: a verdict
+ * is never swapped out from under whoever is reading it, which is the whole
+ * reason nothing on this screen dismisses itself.
+ */
+function numbers(r){
+  const left = r.sessions_remaining;
+  $('stats').innerHTML = `
+    <div class="stat"><div class="k">SESSIONS LEFT</div>
+      <div class="v" style="color:${leftColour(left)}">${left ?? '—'}</div>
+      <div class="n">${r.sessions_total ? 'of '+r.sessions_total : 'no plan'}</div></div>
+    <div class="stat"><div class="k">VISITS</div><div class="v">${r.visits ?? 0}</div>
+      <div class="n">${r.last_visit ? 'last '+fmtDay(r.last_visit) : 'first time'}</div></div>
+    <div class="stat"><div class="k">ABSENCES</div>
+      <div class="v" style="color:${r.absences?'var(--warn)':'var(--ink)'}">${r.absences ?? 0}</div>
+      <div class="n">recorded</div></div>
+    <div class="stat"><div class="k">NEXT CLASS</div>
+      <div class="v" style="font-size:15px;padding-top:7px">${r.next_session
+        ? esc(r.next_session.class_name) : '—'}</div>
+      <div class="n">${r.next_session ? fmtDay(r.next_session.starts_at)+' '+fmtTime(r.next_session.starts_at) : 'nothing booked'}</div></div>`;
+
+  $('recent').innerHTML = (r.recent||[]).map(a=>{
+    const tag = a.status==='present' ? '<b style="color:var(--ok)">attended</b>'
+              : '<b style="color:var(--bad)">absent</b>';
+    return `<span class="rchip">${fmtDay(a.starts_at)} · ${esc(a.class_name)} · ${tag}</span>`;
+  }).join('');
+}
+
 function show(r, opts){
   /*
    * `opts.noAuto` renders a verdict without acting on it. The one caller is
@@ -751,26 +783,7 @@ function show(r, opts){
   $('notes').classList.toggle('on', notes.length > 0);
 
   /* ---- numbers ---- */
-  const left = r.sessions_remaining;
-  $('stats').innerHTML = `
-    <div class="stat"><div class="k">SESSIONS LEFT</div>
-      <div class="v" id="statLeft" style="color:${leftColour(left)}">${left ?? '—'}</div>
-      <div class="n">${r.sessions_total ? 'of '+r.sessions_total : 'no plan'}</div></div>
-    <div class="stat"><div class="k">VISITS</div><div class="v">${r.visits ?? 0}</div>
-      <div class="n">${r.last_visit ? 'last '+fmtDay(r.last_visit) : 'first time'}</div></div>
-    <div class="stat"><div class="k">ABSENCES</div>
-      <div class="v" style="color:${r.absences?'var(--warn)':'var(--ink)'}">${r.absences ?? 0}</div>
-      <div class="n">recorded</div></div>
-    <div class="stat"><div class="k">NEXT CLASS</div>
-      <div class="v" style="font-size:15px;padding-top:7px">${r.next_session
-        ? esc(r.next_session.class_name) : '—'}</div>
-      <div class="n">${r.next_session ? fmtDay(r.next_session.starts_at)+' '+fmtTime(r.next_session.starts_at) : 'nothing booked'}</div></div>`;
-
-  $('recent').innerHTML = (r.recent||[]).map(a=>{
-    const tag = a.status==='present' ? '<b style="color:var(--ok)">attended</b>'
-              : '<b style="color:var(--bad)">absent</b>';
-    return `<span class="rchip">${fmtDay(a.starts_at)} · ${esc(a.class_name)} · ${tag}</span>`;
-  }).join('');
+  numbers(r);
 
   /* A scan that matched one of today's sessions checks itself in — that is
      the whole transaction, and making the receptionist press a button to
@@ -1024,7 +1037,15 @@ async function doRenew(){
   $('reason').textContent = wasIn
     ? `Renewed — ${n} sessions. They are already checked in for today.`
     : `Renewed — ${n} sessions. Check them in to use one.`;
-  $('keys').textContent = 'Card unchanged — reissue it from their profile · Esc to clear';
+  /* The card line is the one thing on this screen reception has to act on
+     before the client leaves, so it says what happened to the card rather
+     than what to press. Issuing revokes the previous credential — the card
+     in their hand — so "print it" is not a tidy-up, it is the difference
+     between a member who can scan tomorrow and one who cannot. */
+  $('keys').textContent = (r.card && r.card.ok)
+    ? 'New card issued — print it from their profile. The old card no longer works · Esc to clear'
+    : `Renewed, but the card could not be issued${r.card && r.card.error ? ': ' + r.card.error : ''}`
+      + ' — issue it from their profile · Esc to clear';
   beepOk();
 }
 $('renewBtn').onclick = openRenew;
@@ -1049,16 +1070,27 @@ async function doCheckIn(){
        client who walked in with one session would be sent away without
        being offered the next plan. */
     current.sessions_remaining = r.sessions_remaining;
-    /* The panel was drawn from the verdict, which is the balance *before*
-       this check-in spent a slot — so SESSIONS LEFT read one too many the
-       moment the button said CHECKED IN. Harmless-looking until the figure
-       is 1: the screen then says "1 left" beside "CHECKED IN — 0 LEFT" and
-       flatly contradicts the renewal it is offering. */
-    const el = $('statLeft');
-    if(el && r.sessions_remaining !== undefined && r.sessions_remaining !== null){
-      el.textContent = r.sessions_remaining;
-      el.style.color = leftColour(r.sessions_remaining);
+    /* The rest of the panel came from the same pre-check-in verdict, so
+       every figure on it was one visit behind the button above: SESSIONS
+       LEFT read one too many, VISITS one too few, and the session they were
+       standing there for was missing from the chips. Harmless-looking at 6
+       of 12, and self-contradictory at 1 — "1 left" beside "CHECKED IN — 0
+       LEFT", above the renewal that figure is supposed to justify.
+
+       Nothing is re-fetched to correct it. A check-in marks one booking
+       present, and this is the booking: it is today, in the class named on
+       the verdict, and the new balance came back in the response. Asking
+       the server again would cost a round trip to be told what we just
+       did. */
+    current.visits = (current.visits ?? 0) + 1;
+    if(current.session){
+      current.last_visit = current.session.starts_at;
+      current.recent = [{starts_at: current.session.starts_at,
+                         class_name: current.session.class_name,
+                         status: 'present'},
+                        ...(current.recent || [])].slice(0, 4);
     }
+    numbers(current);
     showRenew(renewOffered(current));
     if(r.sessions_remaining === 0){
       $('reason').textContent = 'That was their last session — offer a renewal';

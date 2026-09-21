@@ -306,22 +306,13 @@ def issue_card(cid: int, body: CardIn):
     """
     repo = data.connect()
     try:
-        r = access.issue_card(repo, cid, body.class_id)
+        # cards.issue() is the credential, the PNG and the stamped URL in one
+        # step, shared with the renewal at the reception desk so the two
+        # cannot drift. See its docstring for why the stamp matters.
+        r = cards.issue(repo, cid, body.class_id)
         if not r["ok"]:
             raise HTTPException(r.get("status", 400), r["error"])
-        # Drawing the PNG is file I/O and presentation, so it stays here
-        # rather than in access.py.
-        png = cards.build_card(cid, r["client_name"], r["token"],
-                               r["sessions_total"], r["expires_on"],
-                               class_name=r["class_name"],
-                               colour=r["class_colour"])
-        # Stamped with the issue time, for the reason get_client gives above.
-        now = db.now()
-        slug = cards.class_slug(r["class_name"])
-        images.store(repo, images.CARD, cid, png, "image/png",
-                     variant=slug, now=now)
-        return {"token": r["token"],
-                "card_url": images.url(images.CARD, cid, variant=slug, stamp=now),
+        return {"token": r["token"], "card_url": r["card_url"],
                 "revoked": r["revoked"]}
     finally:
         repo.close()
