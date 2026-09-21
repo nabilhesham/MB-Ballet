@@ -6,14 +6,15 @@ either they walked in with nothing left, or they walked in with one session
 and spent it on the way past — and the receptionist would otherwise have to
 leave the kiosk for the admin screen with a queue at the counter.
 
-Two things it must not do, and both have a sharper reason than tidiness:
+What it must not do: **check anybody in.** Selling a plan and spending one
+of its sessions are separate decisions, and a sale that consumed the first
+slot would be the app making the second.
 
-  * **it issues no card.** Issuing revokes the previous credential, and the
-    card being revoked is the one in the client's hand, which they are about
-    to scan again;
-  * **it checks nobody in.** Selling a plan and spending one of its sessions
-    are separate decisions, and a sale that consumed the first slot would be
-    the app making the second.
+What it does not do *itself*: draw a card. The route above it issues one, so
+both ways in to a renewal replace the printout that carries the plan's
+figures -- the profile's picker already did. The price is that issuing
+revokes the credential in the client's hand, which is why the kiosk says so
+in as many words; the tests over HTTP below hold both halves.
 
 The dates are chosen rather than picked, because every slot must be assigned
 before a plan saves and a kiosk has no session picker. That makes *which*
@@ -173,11 +174,11 @@ def test_it_checks_nobody_in(repo):
     assert {b["status"] for b in repo.find("bookings", {"client_id": who})} == {"booked"}
 
 
-def test_it_does_not_touch_the_card(repo, academy):
+def test_the_sale_itself_draws_no_card(repo, academy):
     """
-    The one that would be worst on the day: issuing a card revokes the
-    previous one, and the previous one is what the client is holding and is
-    about to scan again.
+    A layering fact rather than a promise to the receptionist: drawing a PNG
+    is presentation, so it belongs to the route and not to this module. The
+    card *is* issued on a desk renewal -- over HTTP, asserted below.
     """
     a = academy
     before = repo.find("credentials", {"client_id": a.dual})
@@ -221,6 +222,73 @@ def test_the_endpoint_sells_and_reports_the_new_plan(client, repo):
     body = r.json()
     assert body["ok"] and body["state"]["remaining"] == 12
     assert body["state"]["sessions_total"] == 12
+
+
+def test_the_endpoint_issues_the_card(client, repo):
+    """
+    Both ways in to a renewal replace the card, because the printed card
+    carries the session count and end date of the plan it was made for and a
+    renewal makes both of them wrong.
+    """
+    a = client.academy
+    for d in range(1, 15):
+        _session(repo, a.ballet, _ts(TODAY + timedelta(days=30 + d)))
+    live = [c for c in repo.find("credentials", {"client_id": a.dual})
+            if c["class_id"] == a.ballet and c["revoked_at"] is None]
+    assert live, "fixture should start with a live ballet card"
+
+    body = client.post("/api/access/renew", json={
+        "client_id": a.dual, "class_id": a.ballet,
+        "plan": "12 sessions", "sessions_total": 12}).json()
+    assert body["card"]["ok"] and body["card"]["revoked"]
+
+    after = repo.find("credentials", {"client_id": a.dual})
+    ballet = [c for c in after if c["class_id"] == a.ballet]
+    # Exactly one live ballet card, and it is the new one. The old is
+    # revoked rather than deleted -- the log has to keep pointing at the
+    # credential that was actually used.
+    assert len([c for c in ballet if c["revoked_at"] is None]) == 1
+    assert all(c["revoked_at"] is not None for c in ballet if c["id"] == live[0]["id"])
+    # The other class is untouched: one card per class, and only the renewed
+    # class's plan changed.
+    flex = [c for c in after
+            if c["class_id"] == a.flex and c["revoked_at"] is None]
+    assert len(flex) == 1
+
+
+def test_the_new_card_carries_the_new_plan_s_figures(client, repo):
+    """The whole reason it is reissued at all. A stored picture is a
+    snapshot nothing regenerates, so it has to be redrawn on the sale."""
+    import cards
+    import images
+    a = client.academy
+    for d in range(1, 15):
+        _session(repo, a.ballet, _ts(TODAY + timedelta(days=30 + d)))
+    # cards.class_slug() is the one place the variant is derived; asking it
+    # here rather than writing the slug out keeps this test from being the
+    # second copy of that rule.
+    slug = cards.class_slug(repo.get("classes", a.ballet)["name"])
+    before = repo.find_one("images", {"kind": images.CARD, "owner_id": a.dual,
+                                      "variant": slug})
+    client.post("/api/access/renew", json={
+        "client_id": a.dual, "class_id": a.ballet,
+        "plan": "12 sessions", "sessions_total": 12})
+    after = repo.find_one("images", {"kind": images.CARD, "owner_id": a.dual,
+                                     "variant": slug})
+    assert after is not None
+    assert before is None or after["data"] != before["data"]
+
+
+def test_a_refused_sale_leaves_the_card_alone(client, repo):
+    """Nothing was sold, so the card in their hand must go on working."""
+    a = client.academy
+    before = repo.find("credentials", {"client_id": a.dual})
+    assert client.post("/api/access/renew", json={
+        "client_id": a.dual, "class_id": a.ballet,
+        "plan": "99 sessions", "sessions_total": 99}).status_code == 400
+    after = repo.find("credentials", {"client_id": a.dual})
+    assert ([c["revoked_at"] for c in after]
+            == [c["revoked_at"] for c in before])
 
 
 def test_the_endpoint_passes_the_refusal_through(client, repo):

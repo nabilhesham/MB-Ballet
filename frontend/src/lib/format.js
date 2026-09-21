@@ -40,6 +40,22 @@ export const fmtISODay = iso => {
     [], { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 };
 
+/* An ISO day plus a separate "HH:MM", as one line.
+ *
+ * The two halves are stored apart (see db.py's appointments table) because
+ * only the day is ever filtered on, so joining them for display is a
+ * formatting job rather than a reason to make the column a timestamp. A
+ * missing time is a real state -- "sometime Tuesday" -- and reads as the
+ * day alone rather than as midnight. */
+export const fmtISODayTime = (iso, hhmm) => {
+  const day = fmtISODay(iso);
+  if (!day || !hhmm) return day;
+  const [h, m] = String(hhmm).split(':').map(Number);
+  if (Number.isNaN(h) || Number.isNaN(m)) return day;
+  return `${day} · ${new Date(2000, 0, 1, h, m).toLocaleTimeString(
+    [], { hour: 'numeric', minute: '2-digit' })}`;
+};
+
 /* The local calendar month "YYYY-MM-DD" -> "YYYY-MM-DD" bounds of today's
    month — mirrors access.month_bounds() so the instructor view's date
    inputs show real dates immediately, before the first response arrives. */

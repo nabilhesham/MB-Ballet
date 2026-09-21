@@ -10,6 +10,7 @@ paths, the FastAPI app, the startup event, and the static mounts.
 """
 
 import asyncio
+import contextlib
 import os
 import sys
 
@@ -55,27 +56,23 @@ APP_DIR = config.app_dir()
 BUNDLE_DIR = config.bundle_dir()
 STATIC_DIR = os.path.join(BUNDLE_DIR, "static")
 
-app = FastAPI(title="MB Ballet Academy")
 
-# Registered in the same order the route groups appeared in the old
-# single-file server.py: clients, plans, instructors, classes, sessions,
-# access, dashboard. Kept in this order deliberately, not just for a tidy
-# diff — FastAPI matches routes in registration order, and within
-# api/sessions.py POST /api/sessions/repeat depends on being defined before
-# any /api/sessions/{sid}-shaped route, exactly as it was before the split.
-app.include_router(clients_router)
-app.include_router(plans_router)
-app.include_router(instructors_router)
-app.include_router(classes_router)
-app.include_router(sessions_router)
-app.include_router(access_router)
-app.include_router(dashboard_router)
-app.include_router(images_router)
-app.include_router(appointments_router)
+@contextlib.asynccontextmanager
+async def _lifespan(app):
+    """
+    Everything that has to happen once, before the first request.
 
+    A lifespan handler rather than @app.on_event("startup"), which FastAPI
+    deprecated and which printed a warning across the launcher's own banner
+    on every start -- three lines of framework internals in the middle of
+    the four ticks that tell reception the app is healthy.
 
-@app.on_event("startup")
-def _startup():
+    The shape is the same: the work above the `yield` is the old startup
+    body. What the decorator could not express is the half below it, so the
+    hourly sweep is now cancelled on the way out instead of being left to
+    die with the process; asyncio warns about a task still pending at loop
+    close, and that warning would have landed in the same place.
+    """
     # Settings are already loaded, at import. Only provisioning is left, and
     # only in a source checkout: a packaged build was handed its secret at
     # build time and must never invent a second one. Minting one here is how
@@ -109,7 +106,35 @@ def _startup():
             print(f"  Moved {moved} photo(s) and card(s) into the database.")
     finally:
         starter.close()
-    asyncio.create_task(_settle_loop())
+
+    # Held in a local: asyncio keeps only a weak reference to a running
+    # task, so a bare create_task() may be collected mid-sweep.
+    settle = asyncio.create_task(_settle_loop())
+    try:
+        yield
+    finally:
+        settle.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await settle
+
+
+app = FastAPI(title="MB Ballet Academy", lifespan=_lifespan)
+
+# Registered in the same order the route groups appeared in the old
+# single-file server.py: clients, plans, instructors, classes, sessions,
+# access, dashboard. Kept in this order deliberately, not just for a tidy
+# diff — FastAPI matches routes in registration order, and within
+# api/sessions.py POST /api/sessions/repeat depends on being defined before
+# any /api/sessions/{sid}-shaped route, exactly as it was before the split.
+app.include_router(clients_router)
+app.include_router(plans_router)
+app.include_router(instructors_router)
+app.include_router(classes_router)
+app.include_router(sessions_router)
+app.include_router(access_router)
+app.include_router(dashboard_router)
+app.include_router(images_router)
+app.include_router(appointments_router)
 
 
 def _connect_or_explain():
