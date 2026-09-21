@@ -231,9 +231,17 @@ CREATE TABLE IF NOT EXISTS appointments (
     name        TEXT NOT NULL,
     phone       TEXT,
     age         REAL,
-    -- ISO YYYY-MM-DD, like every other calendar day in this schema. A day,
-    -- not a timestamp: reception writes "Tuesday" down, not 16:30.
+    -- ISO YYYY-MM-DD, like every other calendar day in this schema, with the
+    -- time of day kept beside it as a separate HH:MM rather than folded into
+    -- one timestamp. Both halves are real -- reception does write "Tuesday
+    -- at 4" down -- but only the day is ever filtered on, and a day column
+    -- is what lets the list's from/to range need no end-of-day arithmetic
+    -- (contrast the Sessions list, where the TO bound has to be pushed to
+    -- 23:59 because the column is an epoch). on_time is nullable: an
+    -- enquiry taken as "sometime Tuesday" is a real state, not a blank to
+    -- be filled with midnight.
     on_date     TEXT NOT NULL,
+    on_time     TEXT,
     notes       TEXT,
     created_at  INTEGER NOT NULL
 );
@@ -434,6 +442,7 @@ def migrate(conn) -> None:
         "classes": [("level", "TEXT"), ("instructor_id", "INTEGER")],
         "sessions": [("ends_at", "INTEGER")],
         "credentials": [("class_id", "INTEGER")],
+        "appointments": [("on_time", "TEXT")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
                           ("class_id", "INTEGER"),

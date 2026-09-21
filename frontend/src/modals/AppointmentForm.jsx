@@ -6,22 +6,30 @@ import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 
 /**
- * Book an enquiry in: somebody who has rung up and is not a client yet.
+ * Book an enquiry in, or correct one: somebody who has rung up and is not a
+ * client yet.
+ *
+ * One form for both, keyed on whether an `appt` was handed in. An enquiry is
+ * a note taken over the phone, so every field on it can be wrong and the
+ * edit has to offer all of them -- which makes it the same form, and two
+ * copies of it would drift the moment a field was added to one.
  *
  * Deliberately lighter than ClientForm. None of the client identity rules
- * apply — the mobile is optional and may repeat, because the same family
+ * apply -- the mobile is optional and may repeat, because the same family
  * rings about two children and the same person reschedules. See
  * api/appointments.py.
  */
-export default function AppointmentForm({ onSaved }) {
+export default function AppointmentForm({ appt = null, onSaved }) {
   const { close } = useModal();
   const toast = useToast();
+  const editing = !!appt;
 
-  const [name, setName] = useState('');
-  const [phone, setPhone] = useState('');
-  const [age, setAge] = useState('');
-  const [onDate, setOnDate] = useState(todayISO());
-  const [notes, setNotes] = useState('');
+  const [name, setName] = useState(appt?.name || '');
+  const [phone, setPhone] = useState(appt?.phone || '');
+  const [age, setAge] = useState(appt?.age ?? '');
+  const [onDate, setOnDate] = useState(appt?.on_date || todayISO());
+  const [onTime, setOnTime] = useState(appt?.on_time || '');
+  const [notes, setNotes] = useState(appt?.notes || '');
   const [err, setErr] = useState('');
 
   const save = async () => {
@@ -29,19 +37,22 @@ export default function AppointmentForm({ onSaved }) {
     if (!name.trim()) return setErr('A name is required.');
     if (!onDate) return setErr('Pick the date of the appointment.');
     try {
-      await api('/appointments', { method: 'POST', body: {
-        name, phone, age: age === '' ? null : Number(age),
-        on_date: onDate, notes,
-      } });
+      await api(editing ? `/appointments/${appt.id}` : '/appointments', {
+        method: editing ? 'PUT' : 'POST',
+        body: {
+          name, phone, age: age === '' ? null : Number(age),
+          on_date: onDate, on_time: onTime || null, notes,
+        },
+      });
       close();
-      toast('Appointment booked');
+      toast(editing ? 'Appointment updated' : 'Appointment booked');
       onSaved();
     } catch (e) { setErr(e.message); toast(e.message, 'bad'); }
   };
 
   return (
     <>
-      <h3>New appointment</h3>
+      <h3>{editing ? 'Edit appointment' : 'New appointment'}</h3>
       <div className="mh">
         For somebody who is not a client yet. Enrolling them later is a separate
         step — this row stays as the record of the enquiry.
@@ -75,6 +86,15 @@ export default function AppointmentForm({ onSaved }) {
           <input type="date" value={onDate}
                  onChange={e => { setOnDate(e.target.value); setErr(''); }} />
         </div>
+        <div>
+          <label>TIME</label>
+          <input type="time" value={onTime}
+                 onChange={e => { setOnTime(e.target.value); setErr(''); }} />
+          {/* Left blank on purpose when nobody said one. "Sometime Tuesday"
+              is what a good half of these are, and a midnight stand-in
+              would read on the list as an appointment at midnight. */}
+          <div className="hint">Optional — leave it empty for "that day".</div>
+        </div>
       </div>
       <label>NOTES (OPTIONAL)</label>
       <textarea value={notes} onChange={e => setNotes(e.target.value)}
@@ -82,7 +102,7 @@ export default function AppointmentForm({ onSaved }) {
 
       <div className="acts">
         <button onClick={close}>Cancel</button>
-        <button className="pri" onClick={save}>Book it</button>
+        <button className="pri" onClick={save}>{editing ? 'Save changes' : 'Book it'}</button>
       </div>
     </>
   );

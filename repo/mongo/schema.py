@@ -58,7 +58,7 @@ FIELDS = {
     },
     "appointments": {
         "name": None, "phone": None, "age": None, "on_date": None,
-        "notes": None, "created_at": None,
+        "on_time": None, "notes": None, "created_at": None,
     },
     "freezes": {
         "subscription_id": None, "from_date": None, "until_date": None,
