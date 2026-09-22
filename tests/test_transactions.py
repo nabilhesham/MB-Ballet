@@ -213,8 +213,8 @@ def test_the_sweep_and_the_freezes_it_lifts_are_one_transaction(academy, monkeyp
     # Fail after the freeze has been lifted but before the sweep completes.
     real = access.lift_expired_freezes
 
-    def lift_then_fail(c):
-        real(c)
+    def lift_then_fail(c, frozen=None):
+        real(c, frozen)
         raise RuntimeError("crash after lifting")
 
     monkeypatch.setattr(access, "lift_expired_freezes", lift_then_fail)

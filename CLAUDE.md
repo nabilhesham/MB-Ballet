@@ -1187,6 +1187,35 @@ still-`booked` slot absent once its session has ended, and runs on startup,
 hourly, and before every read that touches attendance. Nothing on screen is
 stale.
 
+**It skips itself when it provably has nothing to do, which is not the same
+as throttling it.** What the sweep acts on is wall-clock time crossing a
+session's `ends_at` — both halves, `booked`→`absent` and
+`scheduled`→`completed` — or a date boundary, which is what
+`lift_expired_freezes()` compares `frozen_until` against. So once it has run,
+it cannot do anything again before the earlier of the next session end and
+the next local midnight. `access._sweep_deadline` is that moment, from
+`repo.next_sweep_deadline()`, and before it the sweep costs **zero round
+trips** rather than four.
+
+That distinction is the whole point and a throttle was declined for it: a
+throttle trades the invariant above for speed, where skipping until a moment
+nothing can have happened before loses nothing at all. It ran at the top of
+nine read endpoints and was a fifth to a third of every page in the admin
+against Atlas — about 420ms.
+
+The one thing a deadline cannot see is a **write**: a session created in the
+past, an edited start time, a new freeze. `server.py`'s `cache_policy`
+middleware calls `access.sweep_invalidate()` on any non-GET request, which is
+the single place in the app where "something may have changed" is knowable,
+so a write endpoint added later is covered without anyone remembering to. A
+rejected write invalidates too; that costs one extra sweep and nothing else,
+which is the right way round for a guess to be wrong.
+
+The cache is module state, so `tests/conftest.py`'s `repo` fixture clears it —
+a deadline computed from the previous test's sessions would make this one's
+sweep skip itself, and every attendance assertion would pass or fail on what
+the test before it happened to contain.
+
 **A plan is valid through the last session it pays for, kept current by
 writing it, not by deriving it at read time.** `subscriptions.expires_on` is
 the answer `plan_state()` returns, verbatim — no floor, no read-time raise.
@@ -1963,12 +1992,18 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       way the app does. `pytest -k sqlite` is the fast half.
       A local replica set would be faster if this starts getting run often.
 - [ ] **The latency itself is the unfixed problem.** Cutting round trips got
-      the dashboard from ~24 to 19 and the classes list from ~42 to 5, but
-      each trip still costs over a second on this link. The two things that
-      would actually fix it are moving reception back to `sqlite` (what this
-      document already prescribes, and what keeps it working with no
-      internet) or moving the cluster to a region near Alexandria. Neither is
-      a query change.
+      a reception scan from 2.1s to 1.1s, the client profile and the class
+      page from ~1.5-1.75s to ~0.5s, the timetable from 1.0s to 0.25s and
+      the dashboard from 2.2s to 1.4s -- but each trip still costs on the
+      order of 100ms on this link and has been measured over a second on a
+      bad one, so a screen needing a dozen of them is still slow in a way no
+      further query change fixes. The two things that would actually fix it
+      are moving reception back to `sqlite` (what this document already
+      prescribes, and what keeps it working with no internet) or moving the
+      cluster to a region near Alexandria. Neither is a query change. The
+      one structural lever left is running a page's independent reads
+      concurrently, which is deliberately not taken -- see the end of "The
+      admin screens, same finding" under "Round trips are the unit of cost".
 - [ ] Dated deadlines this repository is carrying, so they are in one
       place: **GitHub drops the x86_64 macOS runner in August 2027**, which
       just removes a row from `build-macos.yml`'s matrix (and ends Intel Mac
@@ -2233,9 +2268,11 @@ plan the reception scan path asks about with a client standing at the desk.
 the same reason; `access.refresh_expiries()` is the bulk counterpart of
 `refresh_expiry()`, for the paths that delete bookings for many plans at once.
 **`tests/test_query_budget.py` asserts that the dashboard, the clients list,
-the classes list, an instructor profile, repeating a term and a bulk delete
-do not grow a query per row** -- it is the only thing that stops this
-regressing. Its `Counted.excluding()` exists because SQLite's `insert_many`
+the classes list, a class page, a client profile, an instructor profile, a
+reception scan, repeating a term and a bulk delete do not grow a query per
+row** -- it is the only thing that stops this regressing. It also holds the
+sweep's deadline: that a second `settle_past_sessions()` costs nothing, and
+that an invalidation makes it run again. Its `Counted.excluding()` exists because SQLite's `insert_many`
 is documented as N separate INSERTs while MongoDB's is genuinely one round
 trip; counting the decomposed inserts would make a batched write look
 unbatched on SQLite alone.
@@ -2243,6 +2280,114 @@ unbatched on SQLite alone.
 `insert_many()` is not a convenience either: it allocates a block of ids with
 a single increment, so selling a plan (twelve bookings) or repeating a term
 (up to ninety-six sessions) costs one round trip rather than one each.
+
+**The scan path is the one with a person waiting for it**, so it is measured
+in whole seconds rather than in round trips. A member-number lookup against
+the Frankfurt cluster took **2.1 seconds**; it is **1.1** now, and nothing
+about what it decides changed. Four things were wrong with it, and three of
+them are the same mistake:
+
+- It asked four port methods -- `client_day_bookings`, `recent_attendance`,
+  `next_booked_session` and `client_totals` -- and every one of them re-read
+  the same client's bookings and re-joined the same sessions behind them.
+  Thirteen round trips to answer four questions about rows already in hand.
+  `repo.client_bookings()` is the one read now and `access.py` decides all
+  four from the list in Python; on MongoDB it is a single `$lookup`
+  pipeline, written the way `plan_rows()` is.
+- `active_plan()` was called twice for one scan -- once to build the
+  payload, once in `_decide()` to check the plan was not frozen, with the
+  same client and the same class both times. `_decide()` is handed the plan
+  its caller already has.
+- `settle_past_sessions()` read the frozen plans, then `lift_expired_freezes()`
+  read them again, narrowed. One read, passed in.
+- `_log()` wrapped its single insert in a transaction, and on a document
+  store a commit is its own round trip. A lone statement autocommits, which
+  is what this section already says it wants; inside `swap_and_check_in()`'s
+  block it still joins that block, because `begin()` is re-entrant.
+
+MongoDB's `settle_absences()` was also reading the id of **every finished
+session in the academy** and sending the list back as an `$in`, on a query
+that runs before every read that touches attendance -- a payload growing
+with the whole history, on the path a client waits through. It is driven
+from the still-`booked` bookings now, which is what is left to settle plus
+what is yet to happen, and never what has already been settled once.
+
+What was left after that was `settle_past_sessions()` itself, about a third
+of the remaining time, and it is now free on all but the first read after a
+write -- **not** by throttling it, which was declined, but by skipping it
+until the moment it could possibly have work. See "Past sessions settle
+themselves" above for the deadline and where it is invalidated.
+
+### The admin screens, same finding
+
+The scan path was the first place this was measured and not the only place it
+was true. Every admin screen paid the same two costs: the sweep at the top of
+nine read endpoints, and `repo/mongo/ports.py` fetching one `$in` per table
+it joins to. Measured against the Frankfurt cluster, route functions called
+directly:
+
+| screen | was | now |
+|---|---|---|
+| `/api/dashboard` | 2194ms / 20 trips | 1399ms / 12 |
+| `/api/classes/{id}` | 1751ms / 16 | 508ms / 7 |
+| `/api/clients/{id}` | 1490ms / 18 | 529ms / 7 |
+| `/api/clients` | 1189ms / 8 | 809ms / 4 |
+| `/api/sessions` | 1010ms / 8 | 265ms / 1 |
+| `/api/classes` | 920ms / 6 | 837ms / 6 |
+| `/api/instructors/{id}` | 906ms / 11 | 526ms / 7 |
+| `/api/instructors` | 582ms / 6 | 172ms / 2 |
+| `/api/sessions/{id}` | 743ms / 10 | 328ms / 6 |
+
+A reception scan is 1.2s when it follows a write (the check-in before it
+invalidated the sweep) and 0.58s when it does not, from the 1.1s it was.
+
+**Pagination was considered and is the wrong tool.** The academy holds 254
+clients, 402 sessions and 1,144 bookings; a page that fetches 402 rows in one
+trip is already optimal, and one that fetches 40 in eight trips is not. The
+unit of cost is the round trip, which is what this whole section is about.
+
+What changed, beyond the sweep:
+
+- **The client profile read the same client's bookings twice.**
+  `client_upcoming` and `client_history` were separate port methods, each a
+  fetch of the bookings plus an `$in` per table behind them — eight round
+  trips to ask twice about one list. `api/clients.py`'s `get_client` reads
+  `repo.client_bookings()` once and derives both, the same split `access.py`
+  makes for the scan payload. `client_history` had no other caller and is
+  gone; `client_upcoming` stays for `access.delete_client()`.
+- **`_decorate_sessions` became `_sessions_decorated`**, a pipeline rather
+  than three `$in`s on top of a fetch. It is charged to the timetable, the
+  class page and the calendar, and `/api/sessions` is one round trip because
+  of it. `not_booked_by` reuses the bookings that pipeline already joins.
+- **`_plan_ends` has two ways in on purpose.** `classes_with_counts()` holds
+  every session and booking by the time it asks, so the last session per plan
+  is arithmetic; `class_students()` holds only one class's, so it gets a
+  nested `$lookup` **bounded to the plans that fund that class**. Unbounded
+  it walks every plan in the academy, which measured 295ms — most of three
+  round trips to answer a question about one class.
+- **`recent_events`, `active_plans_with_clients`, `day_attendance_totals`
+  and `client_cards`** are each one round trip now instead of two to four.
+- **`event_totals` and `joined_counts`** replace pairs of counts over one
+  collection — two of the dashboard's figures came from reading the same
+  window twice, which is a round trip spent on arithmetic.
+- **`_projected()`** is for the whole-collection reads. `classes_with_counts`
+  carries every session and every booking to work out who still studies what,
+  and at ~220ms a collection most of that was columns no loop there reads. It
+  deliberately does *not* go through `schema.normalise()`: that fills in every
+  declared field with its default, so a projected document would hand back a
+  plausible-looking zero for a field that was never fetched. A field nobody
+  asked for is absent, and reading it raises.
+
+`/api/classes` is the one that barely moved and is now the slowest list: it
+reads two whole collections to derive class membership from bookings, and
+collapsing that into an aggregation needs the nested plan-end walk over every
+plan — the 295ms shape above. Left alone on purpose.
+
+**The next lever is concurrency, and it has not been taken.** The reads on a
+page are mostly independent, so a thread-pool fan-out would roughly halve
+these again. It would also add concurrency to a single-threaded
+business-record app, `sqlite3` connections are not thread-safe, and it buys
+nothing on SQLite — which is what reception runs. Decide it on purpose.
 
 **Two write paths were the worst offenders and are now batched.**
 `access.repeat_sessions()` checks a whole term against the duplicate and

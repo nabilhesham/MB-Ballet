@@ -27,6 +27,7 @@ config.load_env()
 # in a .env that is not in git. Set before `import tokens` anywhere.
 os.environ.setdefault("ENTRY_SECRET", "test-secret-not-a-real-key")
 
+import access                                # noqa: E402
 import db                                    # noqa: E402
 import repo as data                          # noqa: E402
 from fixtures import build_academy           # noqa: E402
@@ -138,6 +139,11 @@ def repo(backend, tmp_path, monkeypatch, mongo_database):
     if backend == "mongo":
         # Documents only. The indexes were built once, for the session.
         mongo_clean(os.environ[TEST_MONGO_URI], mongo_database)
+    # The absent-sweep's deadline is module state, and the database under it
+    # has just been replaced -- a deadline computed from the *previous* test's
+    # sessions would make this one's sweep skip itself and every attendance
+    # assertion pass or fail on what the test before it happened to contain.
+    access.sweep_invalidate()
     r = data.connect()
     if backend == "sqlite":
         r.init_schema()

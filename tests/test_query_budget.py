@@ -50,18 +50,17 @@ class Counted:
                "sessions_in_range", "slot_conflict", "complete_finished_sessions",
                "session_detail", "classes_with_counts", "class_sessions",
                "class_students", "search_clients", "card_counts_bulk",
-               "client_cards", "client_upcoming", "client_history",
+               "client_cards", "client_upcoming",
                "plan_sessions", "takings", "active_plans_for",
-               "credential_by_token", "client_day_bookings", "recent_attendance",
-               "next_booked_session", "client_totals", "giveable_slots",
+               "credential_by_token", "client_bookings", "giveable_slots",
                "session_roster", "day_attendance_totals",
                "salary_hours", "adjustments_sum", "taught_totals_bulk",
                "instructor_sessions",
                "plan_counts", "plan_counts_bulk", "attendance_counts", "plan_rows",
-               "check_in_booking", "settle_absences",
+               "check_in_booking", "settle_absences", "next_sweep_deadline",
                "active_plans_with_clients", "last_session_ts", "max_starts_at",
                "last_session_ts_bulk",
-               "recent_events")
+               "recent_events", "event_totals", "joined_counts")
 
     def __init__(self):
         # Its own MonkeyPatch, not the test's. undo() reverts everything the
@@ -180,10 +179,15 @@ def test_a_single_plan_state_costs_one_query_too(academy):
 
 def test_the_dashboard_does_not_grow_a_query_per_client(client):
     a = client.academy
+    # The sweep skips itself until its deadline, so the second load would be
+    # legitimately cheaper than the first and could hide a per-client growth.
+    # Both loads pay for one, which is what makes this a fair comparison.
+    access.sweep_invalidate()
     with Counted() as few:
         client.get("/api/dashboard")
 
     more_clients(a.repo, a, 40)
+    access.sweep_invalidate()
     with Counted() as many:
         client.get("/api/dashboard")
 
@@ -194,6 +198,7 @@ def test_the_dashboard_does_not_grow_a_query_per_client(client):
 
 def test_the_dashboard_stays_under_its_ceiling(client):
     more_clients(client.academy.repo, client.academy, 40)
+    access.sweep_invalidate()          # the ceiling includes one full sweep
     with Counted() as counted:
         r = client.get("/api/dashboard")
     assert r.status_code == 200
@@ -218,10 +223,12 @@ def test_the_clients_list_does_not_grow_a_query_per_client(client):
     a card count. Now five for the whole list.
     """
     a = client.academy
+    access.sweep_invalidate()          # same fairness point as the dashboard
     with Counted() as few:
         client.get("/api/clients")
 
     more_clients(a.repo, a, 40)
+    access.sweep_invalidate()
     with Counted() as many:
         r = client.get("/api/clients")
 
@@ -231,16 +238,212 @@ def test_the_clients_list_does_not_grow_a_query_per_client(client):
         f"adding 40 clients cost {len(many) - len(few)} extra calls\n{many.report()}")
 
 
+def test_a_scan_costs_a_fixed_number_of_queries(academy, repo):
+    """
+    The one path with a person standing at the desk waiting for it.
+
+    It used to ask the same four questions of the same client's bookings
+    through four port methods, each of which re-read those bookings and
+    re-joined the sessions behind them — thirteen round trips on a document
+    store to decide something it already had in hand — and it looked the
+    client's active plan up twice, once to build the payload and once to
+    check it was not frozen.
+
+    The ceiling counts the maintenance sweep too, deliberately: it runs at
+    the top of both entry points, and at reception most scans do pay for one
+    -- a check-in is a POST, which invalidates the sweep's deadline, so the
+    next client through the door sweeps. Anything added to it is paid for
+    here, by somebody standing at the desk. (The scan on its own is four
+    calls lighter; test_the_sweep_skips_itself_until_it_can_do_something is
+    where the skip itself is held.)
+
+    The number is a ceiling over both backends and not a per-backend total:
+    MongoDB builds some of its named methods out of other counted primitives
+    (credential_by_token is a find_one plus a get, minting an id is its own
+    increment), so it counts higher than SQLite for the same work. What the
+    ceiling holds is the shape — one read of the client's bookings, one of
+    their plan — and the test below holds that it does not grow.
+    """
+    token = academy.dual_ballet_card          # _card() returns the token itself
+
+    access.sweep_invalidate()
+    with Counted() as c:
+        assert access.verify(repo, token)["granted"] is True
+    assert len(c) <= 15, c.report()
+    assert c.count_of("client_bookings") == 1, c.report()
+
+    access.sweep_invalidate()
+    with Counted() as c:
+        access.verify_by_client(repo, academy.dual)
+    assert len(c) <= 15, c.report()
+    assert c.count_of("client_bookings") == 1, c.report()
+
+
+def test_a_scan_does_not_grow_a_query_per_client(academy, repo):
+    """
+    The ceiling above must not move when the academy does. The sweep inside
+    settle_past_sessions() is academy-wide, so a version of it that read a
+    row per plan or a row per session would show up here and nowhere else.
+    """
+    token = academy.dual_ballet_card
+
+    # Both scans must pay for a sweep or the comparison is not like for like:
+    # the sweep skips itself until its deadline passes, so a second scan in
+    # the same breath is legitimately cheaper than the first and would hide
+    # a per-client growth rather than show it. This is the one place that
+    # matters -- see test_the_sweep_skips_itself_until_it_can_do_something.
+    access.sweep_invalidate()
+    with Counted() as small:
+        access.verify(repo, token)
+
+    more_clients(repo, academy, 40)
+
+    access.sweep_invalidate()
+    with Counted() as large:
+        access.verify(repo, token)
+
+    assert len(large) == len(small), \
+        f"grew with the academy\nbefore: {small.report()}\nafter: {large.report()}"
+
+
+def test_the_sweep_skips_itself_until_it_can_do_something(academy, repo):
+    """
+    settle_past_sessions() runs at the top of nine read endpoints, so its
+    cost was a fifth to a third of every page in the admin. It skips itself
+    until the moment it could possibly have work -- the earlier of the next
+    session end and the next midnight -- which is an exact skip rather than
+    a throttle: nothing it looks at can change before then.
+    """
+    access.sweep_invalidate()
+
+    with Counted() as first:
+        access.settle_past_sessions(repo)
+    assert len(first), "the first sweep must actually run"
+    assert first.count_of("next_sweep_deadline") == 1, first.report()
+
+    with Counted() as second:
+        access.settle_past_sessions(repo)
+    assert len(second) == 0, \
+        f"nothing can have changed, so this must cost nothing\n{second.report()}"
+
+
+def test_the_sweep_runs_again_once_its_deadline_passes(academy, repo):
+    """
+    The skip is until a moment, not for ever. Without this the two tests
+    around it would pass just as happily on a sweep that never ran twice.
+    """
+    import db
+    access.sweep_invalidate()
+    access.settle_past_sessions(repo)
+    assert access._sweep_deadline > db.now(), "a deadline was set"
+
+    # Stand just past it, which is where the next session ends or the day
+    # turns over -- whichever the sweep decided came first.
+    past = access._sweep_deadline + 1
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(db, "now", lambda: past)
+    try:
+        with Counted() as counted:
+            access.settle_past_sessions(repo)
+        assert len(counted), "the deadline passed, so this must sweep"
+    finally:
+        monkey.undo()
+
+
+def test_a_write_makes_the_sweep_run_again(academy, repo):
+    """
+    The deadline cannot see a write -- a session created in the past, an
+    edited start, a new freeze. server.py's middleware invalidates on any
+    non-GET request, which is what this stands in for.
+    """
+    access.sweep_invalidate()
+    access.settle_past_sessions(repo)
+
+    with Counted() as skipped:
+        access.settle_past_sessions(repo)
+    assert len(skipped) == 0, skipped.report()
+
+    access.sweep_invalidate()
+    with Counted() as after:
+        access.settle_past_sessions(repo)
+    assert len(after), "an invalidated deadline must sweep again"
+
+
+def test_a_page_load_after_the_first_pays_nothing_for_the_sweep(client):
+    """
+    The point of the deadline, measured where it is felt: the second load of
+    a screen in the same minute does not repeat the academy-wide sweep.
+    """
+    access.sweep_invalidate()
+    with Counted() as first:
+        client.get("/api/dashboard")
+    with Counted() as second:
+        client.get("/api/dashboard")
+
+    assert len(second) < len(first), \
+        f"the sweep was repeated\nfirst: {first.report()}\nsecond: {second.report()}"
+    assert second.count_of("settle_absences") == 0, second.report()
+
+
 def test_a_client_profile_costs_a_fixed_number_of_queries(client):
     """plan_states() answers for every plan the client has ever had at once."""
+    # The first load pays for the academy-wide sweep and every load after it
+    # does not, so measuring the second is measuring the profile. The sweep
+    # has its own ceiling in test_the_sweep_skips_itself_until_it_can_do_something.
+    client.get(f"/api/clients/{client.academy.dual}")
     with Counted() as counted:
         r = client.get(f"/api/clients/{client.academy.dual}")
     assert r.status_code == 200
     assert len(r.json()["plans"]) == 2
-    # Was 16, before plan_states() became one call; 11 rather than 10 since
-    # the profile began reading which card images exist -- one find for all
-    # of them, which is the right shape and a legitimate extra call.
-    assert len(counted) <= 11, counted.report()
+    # Was 16 including the sweep, before plan_states() became one call; then
+    # 11, since the profile began reading which card images exist -- one find
+    # for all of them, which is the right shape and a legitimate extra call.
+    # Six now, and the sweep is no longer among them: `upcoming` and
+    # `history` were two port calls asking about the same bookings, and on
+    # Mongo each was a fetch plus an `$in` per table behind it. One
+    # client_bookings() answers both.
+    assert len(counted) <= 6, counted.report()
+
+
+def test_a_client_profile_reads_their_bookings_once(client):
+    """
+    The profile shows what they have coming up and what they attended. Those
+    are two views of one list, not two questions -- it cost eight round
+    trips on a document store to ask twice, on the page reception opens most.
+    """
+    client.get(f"/api/clients/{client.academy.dual}")      # prime the sweep
+    with Counted() as counted:
+        r = client.get(f"/api/clients/{client.academy.dual}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["upcoming"] and body["history"], "precondition: both non-empty"
+    assert counted.count_of("client_bookings") == 1, counted.report()
+
+
+def test_a_class_page_costs_a_fixed_number_of_queries(client):
+    """
+    The class page had no ceiling at all, and was the heaviest read in the
+    admin after the dashboard: its sessions were decorated with an `$in` per
+    table, and its student list re-read every session, booking and
+    subscription in the academy to work out whose plans had lapsed.
+    """
+    a = client.academy
+    access.sweep_invalidate()
+    with Counted() as few:
+        r = client.get(f"/api/classes/{a.ballet}")
+    assert r.status_code == 200
+    assert r.json()["students"], "precondition: the class has students"
+
+    more_clients(a.repo, a, 40)
+
+    access.sweep_invalidate()
+    with Counted() as many:
+        client.get(f"/api/classes/{a.ballet}")
+
+    assert len(many) == len(few), (
+        f"adding 40 clients cost {len(many) - len(few)} extra calls\n"
+        f"{many.report()}")
+    assert len(few) <= 12, few.report()
 
 
 def test_attendance_counts_is_one_query_for_many_sessions(academy):

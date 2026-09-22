@@ -238,6 +238,17 @@ HASHED_ASSETS = "/static/app/assets/"
 
 @app.middleware("http")
 async def cache_policy(request, call_next):
+    # A write may have moved the moment the absent-sweep next has work to do
+    # -- a session created in the past, an edited start time, a new freeze --
+    # and the sweep skips itself until that moment to keep it off the read
+    # path (see the deadline note in access.py). This is the one place where
+    # "something may have changed" is knowable for the whole app, so a write
+    # endpoint added later is covered without anyone remembering to.
+    #
+    # A rejected write invalidates too. That costs one extra sweep and
+    # nothing else, which is the right way round for a guess to be wrong.
+    if request.method != "GET":
+        access.sweep_invalidate()
     r = await call_next(request)
     if request.url.path.startswith(HASHED_ASSETS):
         r.headers["Cache-Control"] = "public, max-age=31536000, immutable"
