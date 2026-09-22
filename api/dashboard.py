@@ -31,13 +31,15 @@ def dashboard(month_from: str = None, month_to: str = None):
 
         exp = access.expected_today(repo)
         intake = access.month_intake(repo, month_from, month_to)
+        # Both figures come out of one pass over today's events. They were
+        # two counts over the identical window, which is a round trip spent
+        # on arithmetic — on the page that already makes the most of them.
+        events = repo.event_totals(midnight)
         stats = {
             **{f"exp_{k}": v for k, v in exp.items()},
             **{f"mo_{k}": v for k, v in intake.items()},
-            "scans_today": repo.count(
-                "access_events", {"scanned_at": {"gte": midnight}, "source": "scan"}),
-            "denied_today": repo.count(
-                "access_events", {"scanned_at": {"gte": midnight}, "decision": "deny"}),
+            "scans_today": events["scans"],
+            "denied_today": events["denied"],
             "active_clients": repo.count("clients", {"active": 1}),
             "classes": repo.count("classes", {"active": 1}),
             "sessions_week": repo.count("sessions", {

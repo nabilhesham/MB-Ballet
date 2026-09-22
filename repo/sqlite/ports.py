@@ -66,6 +66,11 @@ class SqliteSessions(SessionsPort):
             "UPDATE sessions SET status='completed'"
             " WHERE status='scheduled' AND ends_at < ?", (now,)).rowcount
 
+    def next_sweep_deadline(self, now):
+        return self.conn.execute(
+            "SELECT MIN(ends_at) t FROM sessions"
+            " WHERE ends_at >= ? AND status != 'cancelled'", (now,)).fetchone()["t"]
+
     def session_detail(self, session_id):
         row = self.conn.execute(
             "SELECT s.*, c.name AS class_name, c.colour, i.name AS instructor_name"
@@ -254,16 +259,6 @@ class SqliteClients(ClientsPort):
             " WHERE b.client_id=? AND s.starts_at >= ? AND s.status != 'cancelled'"
             " ORDER BY s.starts_at, s.id", (client_id, now)).fetchall()]
 
-    def client_history(self, client_id, now, limit):
-        return [dict(r) for r in self.conn.execute(
-            "SELECT b.id AS booking_id, b.status, b.checked_in_at, b.subscription_id,"
-            "       s.id AS session_id, s.starts_at, cl.name AS class_name, cl.colour,"
-            "       i.name AS instructor_name"
-            + self._BOOKING_JOIN +
-            " WHERE b.client_id=? AND s.starts_at < ?"
-            " ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
-            (client_id, now, limit)).fetchall()]
-
     def merge_client_facts(self, client_id, **facts):
         joined = facts.pop("joined_on", None)
         sets = [f"{k}=COALESCE({k},?)" for k in facts]
@@ -290,6 +285,17 @@ class SqliteClients(ClientsPort):
             (month_from, month_to)).fetchone()
         return {"paid": r["paid"] or 0, "unpriced": r["unpriced"] or 0,
                 "plans": r["plans"] or 0}
+
+    def joined_counts(self, windows):
+        if not windows:
+            return []
+        sums = ", ".join(
+            "SUM(CASE WHEN joined_on >= ? AND joined_on < ? THEN 1 ELSE 0 END)"
+            for _ in windows)
+        params = [x for w in windows for x in w]
+        r = self.conn.execute(
+            f"SELECT {sums} FROM clients WHERE active=1", params).fetchone()
+        return [r[i] or 0 for i in range(len(windows))]
 
     def plan_sessions(self, client_id, sub_id):
         return [dict(r) for r in self.conn.execute(
@@ -483,3 +489,10 @@ class SqliteEvents(EventsPort):
             "  LEFT JOIN classes cl ON cl.id=s.class_id"
             " WHERE e.scanned_at >= ? ORDER BY e.scanned_at DESC, e.id DESC"
             " LIMIT ?", (since, limit)).fetchall()]
+
+    def event_totals(self, since):
+        r = self.conn.execute(
+            "SELECT SUM(CASE WHEN source='scan' THEN 1 ELSE 0 END) scans,"
+            "       SUM(CASE WHEN decision='deny' THEN 1 ELSE 0 END) denied"
+            "  FROM access_events WHERE scanned_at >= ?", (since,)).fetchone()
+        return {"scans": r["scans"] or 0, "denied": r["denied"] or 0}

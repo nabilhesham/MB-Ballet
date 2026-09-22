@@ -16,6 +16,11 @@ import repo as data
 
 router = APIRouter()
 
+# How far back the profile's attendance history goes. It is a display cap,
+# not a data bound — the whole of it is already in hand by the time this
+# applies (see get_client).
+HISTORY_LIMIT = 100
+
 
 # ---------------------------------------------------------------- models
 class ClientIn(BaseModel):
@@ -198,9 +203,29 @@ def get_client(cid: int):
                 if slug in stored else None)
 
         now = db.now()
-        c["upcoming"] = repo.client_upcoming(cid, now)
+        # One read of this client's bookings, both lists decided from it.
+        # They were two port calls — client_upcoming and client_history —
+        # and on a document store each was a fetch of the bookings plus one
+        # `$in` per table behind them, so the profile paid eight round trips
+        # to ask twice about the same rows. Same split as access.py's scan
+        # payload, for the same reason. See repo/ports.py::client_bookings.
+        rows = repo.client_bookings(cid)
+        c["upcoming"] = [
+            {k: r[k] for k in ("booking_id", "status", "session_id", "starts_at",
+                               "duration_hours", "class_name", "colour",
+                               "instructor_name")}
+            | {"class_id": r["session_class_id"]}
+            for r in rows
+            if r["starts_at"] >= now and r["session_status"] != "cancelled"]
+        c["upcoming"].sort(key=lambda r: (r["starts_at"], r["session_id"]))
 
-        c["history"] = repo.client_history(cid, now, 100)
+        past = [r for r in rows if r["starts_at"] < now]
+        past.sort(key=lambda r: (-r["starts_at"], -r["session_id"]))
+        c["history"] = [
+            {k: r[k] for k in ("booking_id", "status", "checked_in_at",
+                               "subscription_id", "session_id", "starts_at",
+                               "class_name", "colour", "instructor_name")}
+            for r in past[:HISTORY_LIMIT]]
         return c
     finally:
         repo.close()

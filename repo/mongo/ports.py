@@ -5,10 +5,26 @@ MongoDB answers to the named questions in repo/ports.py.
 The contract is the dict that comes back, which tests/test_parity.py checks
 directly by running both backends side by side.
 
-Where SQLite joins, this fetches by `$in` and joins in Python. A four-table
-`$lookup` pipeline is technically possible and practically unreadable, and
-every join here is bounded by something small — one client's day, one plan's
-slots, one class's sessions. `$group` is used where it is genuinely an
+Where SQLite joins, this either fetches by `$in` and joins in Python or, on
+the reads a screen waits for, says the same thing as a `$lookup` pipeline.
+Both shapes are here on purpose, and which one a method uses is a decision
+about round trips rather than taste:
+
+- **`$in` fetches, joined in Python** are the default. They are far easier to
+  read than a pipeline and cost nothing extra where the joined rows are
+  needed anyway or the method is off the hot path.
+- **A `$lookup` pipeline** is what a read *a person is waiting for* gets,
+  because the `$in` shape costs one round trip per table joined and those are
+  ~100ms each against Atlas. `client_bookings()`, `_sessions_decorated()`,
+  `plan_rows()`, `_plan_ends()`, `recent_events()` and `client_cards()` are
+  the ones that earned it: each was three to five round trips answering one
+  question, several of them charged twice to the same page.
+
+A pipeline here keeps to joins by primary key and projects every field
+through `$ifNull`, which is the pipeline's stand-in for `schema.normalise()`:
+`$project` drops a field whose expression resolves to missing, and a caller
+reading a key that is sometimes absent is exactly the null-vs-missing trap
+`schema.py` exists to close. `$group` is used where it is genuinely an
 aggregate over many documents and the pipeline stays short.
 
 Aggregates always return numbers, never None. SQL's `SUM` over no rows is
@@ -49,22 +65,76 @@ class _Helpers:
     def _agg(self, coll, pipeline):
         return list(self.db[coll].aggregate(pipeline, session=self.session))
 
-    def _decorate_sessions(self, sessions):
-        """Attach class, instructor and the booked/attended counts."""
-        classes = self._by_id("classes", [s["class_id"] for s in sessions])
-        staff = self._by_id("instructors", [s["instructor_id"] for s in sessions])
-        counts = self.attendance_counts([s["id"] for s in sessions])
-        out = []
-        for s in sessions:
-            k = classes.get(s["class_id"])
-            i = staff.get(s["instructor_id"])
-            out.append({**s,
-                        "class_name": k["name"] if k else None,
-                        "colour": k["colour"] if k else None,
-                        "instructor_name": i["name"] if i else None,
-                        "booked": counts[s["id"]]["booked"],
-                        "attended": counts[s["id"]]["attended"]})
-        return out
+    def _projected(self, coll, fields, flt=None):
+        """
+        Plain dicts carrying `id` and nothing but `fields`.
+
+        **Deliberately not schema.normalise().** That fills in every declared
+        field with its default, so a projected document would hand a caller a
+        plausible-looking zero or None for a field that was never read. Here
+        a field nobody asked for is simply absent and reading it raises,
+        which is the failure mode you want.
+
+        It exists for the whole-collection reads. classes_with_counts()
+        carries every session and every booking in the academy to work out
+        who still studies what, and at ~220ms a collection against Atlas most
+        of that was columns -- notes, prices, timestamps -- that no loop here
+        looks at. The round trip is the same; the wire is a fraction of it.
+        """
+        want = [f for f in fields if f != "id"]
+        return [{**{f: d.get(f) for f in want}, "id": d["_id"]}
+                for d in self.db[coll].find(
+                    rename_id(compile_filter(coll, flt)),
+                    {f: 1 for f in want}, session=self.session)]
+
+    def _sessions_decorated(self, match, sort, limit=None, not_booked_by=None):
+        """
+        Sessions with their class, their instructor and their
+        booked/attended counts, in **one** round trip.
+
+        This was `_decorate_sessions()`, which took sessions already fetched
+        and then paid an `$in` for the classes, an `$in` for the instructors
+        and an aggregate for the counts -- three more round trips on top of
+        the fetch, charged to the timetable, the class page and the calendar
+        alike. Written as a pipeline the way plan_rows() and
+        client_bookings() are: every join is by primary key, and the counts
+        fall out of the bookings already joined.
+
+        `not_booked_by` reuses that same bookings join rather than reading
+        the client's slots separately -- it is the "somewhere to go" half of
+        a kiosk swap, and the rows it filters on are already here.
+        """
+        # `$sort` takes a document, where cursor.sort() takes a list of pairs.
+        # A dict preserves insertion order, so the tiebreak stays a tiebreak.
+        pipeline = [{"$match": match}, {"$sort": dict(sort)}]
+        # Before the joins: a limit is much cheaper applied to bare sessions,
+        # and $sort/$limit ordering is preserved through the stages below.
+        if limit is not None:
+            pipeline.append({"$limit": limit})
+        pipeline += [
+            {"$lookup": {"from": "classes", "localField": "class_id",
+                         "foreignField": "_id", "as": "_c"}},
+            {"$lookup": {"from": "instructors", "localField": "instructor_id",
+                         "foreignField": "_id", "as": "_i"}},
+            {"$lookup": {"from": "bookings", "localField": "_id",
+                         "foreignField": "session_id", "as": "_b"}},
+        ]
+        if not_booked_by:
+            pipeline.append({"$match": {"_b.client_id": {"$ne": not_booked_by}}})
+        pipeline += [
+            {"$set": {
+                # $first over an empty array is null, which is what a session
+                # with no instructor should read as.
+                "class_name": {"$ifNull": [{"$first": "$_c.name"}, None]},
+                "colour": {"$ifNull": [{"$first": "$_c.colour"}, None]},
+                "instructor_name": {"$ifNull": [{"$first": "$_i.name"}, None]},
+                "booked": {"$size": "$_b"},
+                "attended": {"$size": {"$filter": {
+                    "input": "$_b", "cond": {"$eq": ["$$this.status", "present"]}}}}}},
+            {"$unset": ["_c", "_i", "_b"]},
+        ]
+        return [schema.normalise("sessions", d)
+                for d in self._agg("sessions", pipeline)]
 
 
 class MongoSessions(SessionsPort, _Helpers):
@@ -82,14 +152,8 @@ class MongoSessions(SessionsPort, _Helpers):
         flt = {"starts_at": window} if window else {}
         if class_id:
             flt["class_id"] = class_id
-        sessions = [schema.normalise("sessions", d) for d in
-                    self.db["sessions"].find(flt, session=self.session)
-                    .sort([("starts_at", 1), ("_id", 1)])]
-        if not_booked_by:
-            held = {b["session_id"] for b in self._rows(
-                "bookings", {"client_id": not_booked_by})}
-            sessions = [s for s in sessions if s["id"] not in held]
-        return self._decorate_sessions(sessions)
+        return self._sessions_decorated(
+            flt, [("starts_at", 1), ("_id", 1)], not_booked_by=not_booked_by)
 
     def slot_conflict(self, starts_at, ends_at, exclude_id=None):
         # Half-open overlap, the same two comparisons SQLite makes. Both
@@ -116,6 +180,12 @@ class MongoSessions(SessionsPort, _Helpers):
             {"$set": {"status": "completed"}},
             session=self.session).modified_count
 
+    def next_sweep_deadline(self, now):
+        doc = self.db["sessions"].find_one(
+            {"status": {"$ne": "cancelled"}, "ends_at": {"$gte": now, "$ne": None}},
+            {"ends_at": 1}, sort=[("ends_at", 1)], session=self.session)
+        return doc["ends_at"] if doc else None
+
     def session_detail(self, session_id):
         s = self.get("sessions", session_id)
         if s is None:
@@ -130,36 +200,73 @@ class MongoSessions(SessionsPort, _Helpers):
 
 class MongoClasses(ClassesPort, _Helpers):
 
-    def _plan_ends(self, sessions=None, bookings=None):
+    @staticmethod
+    def _plan_end(expires_on, last_ts):
         """
-        {subscription_id: the last day it covers} -- the later of its own
-        expires_on and the last session it pays for. The Python counterpart
-        of the SQLite _PLAN_END CTE; access.plan_end() is the same rule for
-        a single plan. Two reads, whatever the number of plans.
+        One plan's end: the later of its own `expires_on` and the day of the
+        last session it pays for. The rule lives here once, whichever way
+        the two callers below arrived at `last_ts`.
 
-        `sessions` and `bookings` are taken from a caller that has already
-        read them, rather than read again: classes_with_counts() holds both
-        by the time it gets here, and on a networked backend a second copy
-        of every session and every booking is two round trips and the whole
-        collection twice over the wire.
+        The epoch becomes a local day here and never in the pipeline. `$max`
+        picks the same session either way (a day is monotonic in its
+        timestamp), and this app has no timezone concept -- converting in
+        BSON would anchor it to UTC and move a late-evening session onto the
+        next day. See CLAUDE.md, "Dates stay exactly as they are".
         """
-        last = {}
-        if sessions is None:
-            sessions = self._rows("sessions")
-        if bookings is None:
-            bookings = self._rows("bookings")
-        starts = {s["id"]: s["starts_at"] for s in sessions}
-        for b in bookings:
-            sub, ts = b.get("subscription_id"), starts.get(b["session_id"])
-            if sub is None or ts is None:
-                continue
-            day = _date.fromtimestamp(ts).isoformat()
-            if day > last.get(sub, ""):
-                last[sub] = day
-        return {sub["id"]: max(x for x in (sub.get("expires_on"),
-                                           last.get(sub["id"]), "")
-                               if x is not None)
-                for sub in self._rows("subscriptions")}
+        last = _date.fromtimestamp(last_ts).isoformat() if last_ts else None
+        return max(x for x in (expires_on, last, "") if x is not None)
+
+    def _plan_ends(self, sessions=None, bookings=None, sub_ids=None):
+        """
+        {subscription_id: the last day it covers}. The Python counterpart of
+        the SQLite _PLAN_END CTE; access.plan_end() is the same rule for a
+        single plan.
+
+        **Two ways in, because the two callers are in genuinely different
+        positions, and both are one round trip.**
+
+        `sessions` and `bookings` are for a caller that has already read them
+        -- classes_with_counts() holds every session and every booking by the
+        time it gets here, so the last session per plan is arithmetic it can
+        do for free, and all that is left to fetch is the plans themselves.
+
+        `sub_ids` is for a caller that has not: class_students() knows only
+        one class's bookings, so the nested `$lookup` walks
+        subscription -> its bookings -> their sessions for it. **Bounded by
+        those ids and not left open**: unbounded it walks every plan in the
+        academy, which measured 295ms against Atlas -- most of three round
+        trips, to answer a question about one class.
+        """
+        if sessions is not None and bookings is not None:
+            starts = {s["id"]: s["starts_at"] for s in sessions}
+            last = {}
+            for b in bookings:
+                sub, ts = b.get("subscription_id"), starts.get(b["session_id"])
+                if sub is None or ts is None:
+                    continue
+                if ts > last.get(sub, 0):
+                    last[sub] = ts
+            return {s["id"]: self._plan_end(s.get("expires_on"), last.get(s["id"]))
+                    for s in self._projected("subscriptions", ["expires_on"])}
+
+        ids = sorted({s for s in (sub_ids or ()) if s is not None})
+        if not ids:
+            return {}
+        return {d["_id"]: self._plan_end(d.get("expires_on"), d.get("last_ts"))
+                for d in self._agg("subscriptions", [
+                    {"$match": {"_id": {"$in": ids}}},
+                    {"$lookup": {
+                        "from": "bookings", "localField": "_id",
+                        "foreignField": "subscription_id", "as": "_b",
+                        "pipeline": [
+                            {"$lookup": {"from": "sessions",
+                                         "localField": "session_id",
+                                         "foreignField": "_id", "as": "_s"}},
+                            {"$project": {
+                                "starts_at": {"$first": "$_s.starts_at"}}}]}},
+                    {"$project": {"expires_on": 1,
+                                  "last_ts": {"$max": "$_b.starts_at"}}},
+                ])}
 
     def _booking_end(self, booking, plan_ends, starts):
         """
@@ -187,10 +294,15 @@ class MongoClasses(ClassesPort, _Helpers):
         # every plan here ended before `lapsed_before` has stopped being a
         # student. Same cutoff as class_students(), which it has to be: a
         # list saying 12 beside a page showing 8 is worse than either.
-        sessions = self._rows("sessions")
+        # Only the columns the loops below read. These are the two
+        # whole-collection reads in the app -- see _projected().
+        sessions = self._projected("sessions", ["class_id", "starts_at"])
         sess_class = {s["id"]: s["class_id"] for s in sessions}
         starts = {s["id"]: s["starts_at"] for s in sessions}
-        bookings = self._rows("bookings")
+        bookings = self._projected(
+            "bookings", ["client_id", "session_id", "subscription_id"])
+        # Both collections are already in hand, so the last session per plan
+        # is arithmetic rather than a query -- see _plan_ends().
         plan_ends = self._plan_ends(sessions, bookings)
         latest = {}
         for b in bookings:
@@ -213,11 +325,8 @@ class MongoClasses(ClassesPort, _Helpers):
                 for c in classes]
 
     def class_sessions(self, class_id, limit):
-        sessions = [schema.normalise("sessions", d) for d in
-                    self.db["sessions"].find({"class_id": class_id},
-                                             session=self.session)
-                    .sort([("starts_at", -1), ("_id", -1)]).limit(limit)]
-        decorated = self._decorate_sessions(sessions)
+        decorated = self._sessions_decorated(
+            {"class_id": class_id}, [("starts_at", -1), ("_id", -1)], limit=limit)
         # class_sessions is always one class, so the class name is redundant
         # and SQLite does not select it either.
         for s in decorated:
@@ -228,9 +337,13 @@ class MongoClasses(ClassesPort, _Helpers):
     def class_students(self, class_id, lapsed_before):
         mine = {s["id"]: s["starts_at"] for s in
                 self._rows("sessions", {"class_id": class_id})}
-        plan_ends = self._plan_ends()
+        # The bookings first, so the plan ends can be asked for only the
+        # plans that actually fund this class -- see _plan_ends().
+        booked = self._rows("bookings", {"session_id": {"in": sorted(mine)}})
+        plan_ends = self._plan_ends(
+            sub_ids=[b.get("subscription_id") for b in booked])
         tally, latest = {}, {}
-        for b in self._rows("bookings", {"session_id": {"in": sorted(mine)}}):
+        for b in booked:
             t = tally.setdefault(b["client_id"], {"slots": 0, "attended": 0})
             t["slots"] += 1
             if b["status"] == "present":
@@ -435,15 +548,26 @@ class MongoAccess(AccessPort, _Helpers):
         return rows
 
     def day_attendance_totals(self, start, end):
-        live = [s["_id"] for s in self.db["sessions"].find(
-            {"starts_at": {"$gte": start, "$lt": end},
-             "status": {"$ne": "cancelled"}}, {"_id": 1}, session=self.session)]
-        if not live:
+        # One round trip: today's live sessions and their bookings counted
+        # together, rather than reading the session ids and sending them back
+        # as an `$in`. Aggregates are always numbers here, never None --
+        # `$group` over no rows is no group at all.
+        rows = self._agg("sessions", [
+            {"$match": {"starts_at": {"$gte": start, "$lt": end},
+                        "status": {"$ne": "cancelled"}}},
+            {"$lookup": {"from": "bookings", "localField": "_id",
+                         "foreignField": "session_id", "as": "_b"}},
+            {"$unwind": "$_b"},
+            {"$group": {
+                "_id": None, "expected": {"$sum": 1},
+                "arrived": {"$sum": {"$cond": [
+                    {"$eq": ["$_b.status", "present"]}, 1, 0]}},
+                "absent": {"$sum": {"$cond": [
+                    {"$eq": ["$_b.status", "absent"]}, 1, 0]}}}},
+        ])
+        if not rows:
             return {"expected": 0, "arrived": 0, "absent": 0}
-        rows = self._rows("bookings", {"session_id": {"in": live}})
-        return {"expected": len(rows),
-                "arrived": sum(1 for b in rows if b["status"] == "present"),
-                "absent": sum(1 for b in rows if b["status"] == "absent")}
+        return {k: rows[0][k] for k in ("expected", "arrived", "absent")}
 
 
 class MongoClients(ClientsPort, _Helpers):
@@ -483,64 +607,60 @@ class MongoClients(ClientsPort, _Helpers):
         return out
 
     def client_cards(self, client_id):
-        cards = self._rows("credentials", {"client_id": client_id,
-                                           "revoked_at": None})
-        classes = self._by_id("classes", [c["class_id"] for c in cards])
-        rows = [{"id": c["id"], "token": c["token"], "class_id": c["class_id"],
-                 "issued_at": c["issued_at"],
-                 "class_name": (classes.get(c["class_id"]) or {}).get("name"),
-                 "colour": (classes.get(c["class_id"]) or {}).get("colour")}
-                for c in cards]
+        # One round trip. The client profile is the heaviest read in the
+        # admin, so the cards and their classes come back together.
+        rows = [{"id": d["_id"], "token": d["token"], "class_id": d["class_id"],
+                 "issued_at": d["issued_at"], "class_name": d["class_name"],
+                 "colour": d["colour"]}
+                for d in self._agg("credentials", [
+                    {"$match": {"client_id": client_id, "revoked_at": None}},
+                    {"$lookup": {"from": "classes", "localField": "class_id",
+                                 "foreignField": "_id", "as": "_c"}},
+                    {"$project": {
+                        "token": 1,
+                        "class_id": {"$ifNull": ["$class_id", None]},
+                        "issued_at": {"$ifNull": ["$issued_at", None]},
+                        "class_name": {"$ifNull": [{"$first": "$_c.name"}, None]},
+                        "colour": {"$ifNull": [{"$first": "$_c.colour"}, None]}}},
+                ])]
         rows.sort(key=lambda r: (r["class_name"] or "", r["id"]))
         return rows
 
-    def _booking_rows(self, client_id, keep, columns, newest_first=False,
-                      limit=None, sub_id=None):
-        flt = {"client_id": client_id}
+    def _booking_rows(self, client_id, keep, columns, sub_id=None):
+        """
+        The shared body of client_upcoming() and plan_sessions(): filter,
+        order and project one client's bookings.
+
+        It reads through client_bookings(), which is the same question in one
+        `$lookup` pipeline. It used to fetch the bookings and then one `$in`
+        per table it joins to -- four round trips each, and the profile paid
+        them twice because `upcoming` and `history` were two calls about the
+        same rows. (`history` is gone: api/clients.py derives both lists from
+        one client_bookings() itself.) `keep` is given the whole row rather
+        than a separate booking and session, since the pipeline has already
+        joined them.
+        """
+        rows = self.client_bookings(client_id)
         if sub_id is not None:
-            flt["subscription_id"] = sub_id
-        mine = self._rows("bookings", flt)
-        sessions = self._by_id("sessions", [b["session_id"] for b in mine])
-        classes = self._by_id("classes", [s["class_id"] for s in sessions.values()])
-        staff = self._by_id("instructors",
-                            [s["instructor_id"] for s in sessions.values()])
-        rows = []
-        for b in mine:
-            s = sessions.get(b["session_id"])
-            if s is None or not keep(b, s):
-                continue
-            k, i = classes.get(s["class_id"]), staff.get(s["instructor_id"])
-            full = {"booking_id": b["id"], "status": b["status"],
-                    "checked_in_at": b["checked_in_at"],
-                    "subscription_id": b["subscription_id"],
-                    "session_id": s["id"], "starts_at": s["starts_at"],
-                    "duration_hours": s["duration_hours"],
-                    "class_id": s["class_id"],
-                    "class_name": k["name"] if k else None,
-                    "colour": k["colour"] if k else None,
-                    "instructor_name": i["name"] if i else None}
-            rows.append({c: full[c] for c in columns})
-        rows.sort(key=lambda r: (r["starts_at"], r["session_id"]),
-                  reverse=newest_first)
-        return rows[:limit] if limit else rows
+            rows = [r for r in rows if r["subscription_id"] == sub_id]
+        # `class_id` here is the *session's* class, which is what both
+        # callers mean and what the SQLite side selects.
+        out = [{c: (r["session_class_id"] if c == "class_id" else r[c])
+                for c in columns}
+               for r in rows if keep(r)]
+        out.sort(key=lambda r: (r["starts_at"], r["session_id"]))
+        return out
 
     def client_upcoming(self, client_id, now):
         return self._booking_rows(
             client_id,
-            lambda b, s: s["starts_at"] >= now and s["status"] != "cancelled",
+            lambda r: r["starts_at"] >= now and r["session_status"] != "cancelled",
             ("booking_id", "status", "session_id", "starts_at", "duration_hours",
              "class_id", "class_name", "colour", "instructor_name"))
 
-    def client_history(self, client_id, now, limit):
-        return self._booking_rows(
-            client_id, lambda b, s: s["starts_at"] < now,
-            ("booking_id", "status", "checked_in_at", "subscription_id",
-             "session_id", "starts_at", "class_name", "colour", "instructor_name"),
-            newest_first=True, limit=limit)
-
     def plan_sessions(self, client_id, sub_id):
         return self._booking_rows(
-            client_id, lambda b, s: True,
+            client_id, lambda r: True,
             ("status", "checked_in_at", "session_id", "starts_at",
              "duration_hours", "class_name", "colour", "instructor_name"),
             sub_id=sub_id)
@@ -597,8 +717,23 @@ class MongoClients(ClientsPort, _Helpers):
         return {"paid": float(r["paid"]), "unpriced": r["unpriced"],
                 "plans": r["plans"]}
 
+    def joined_counts(self, windows):
+        if not windows:
+            return []
+        rows = self._agg("clients", [
+            {"$match": {"active": 1}},
+            {"$group": {"_id": None, **{
+                f"w{n}": {"$sum": {"$cond": [
+                    {"$and": [{"$gte": ["$joined_on", a]},
+                              {"$lt": ["$joined_on", b]}]}, 1, 0]}}
+                for n, (a, b) in enumerate(windows)}}},
+        ])
+        # `$group` over no rows is no group at all, where SQL's SUM is NULL.
+        return [rows[0][f"w{n}"] if rows else 0 for n in range(len(windows))]
+
 
 class MongoInstructors(InstructorsPort, _Helpers):
+
 
     def salary_hours(self, instructor_id, period_from, period_to):
         rows = self._rows("instructor_hours", {
@@ -656,16 +791,24 @@ class MongoInstructors(InstructorsPort, _Helpers):
 class MongoPlans(PlansPort, _Helpers):
 
     def active_plans_with_clients(self):
-        plans = self._rows("subscriptions", {"active": 1})
-        people = self._by_id("clients", [p["client_id"] for p in plans])
-        rows = [{"id": p["client_id"],
-                 "name_en": people[p["client_id"]]["name_en"],
-                 "phone": people[p["client_id"]]["phone"],
-                 "sub_id": p["id"], "plan": p["plan"]}
-                for p in plans
-                if p["client_id"] in people and people[p["client_id"]]["active"]]
-        rows.sort(key=lambda r: r["sub_id"])
-        return rows
+        # One round trip rather than the plans and then their owners. This
+        # runs on the dashboard, where every trip saved is one off the
+        # landing page.
+        return [{"id": d["client_id"], "name_en": d["name_en"],
+                 "phone": d["phone"], "sub_id": d["_id"], "plan": d["plan"]}
+                for d in self._agg("subscriptions", [
+                    {"$match": {"active": 1}},
+                    {"$lookup": {"from": "clients", "localField": "client_id",
+                                 "foreignField": "_id", "as": "_p"}},
+                    {"$set": {"_p": {"$first": "$_p"}}},
+                    # An archived owner drops the plan, as the join did.
+                    {"$match": {"_p.active": 1}},
+                    {"$project": {
+                        "client_id": 1, "plan": {"$ifNull": ["$plan", None]},
+                        "name_en": {"$ifNull": ["$_p.name_en", None]},
+                        "phone": {"$ifNull": ["$_p.phone", None]}}},
+                    {"$sort": {"_id": 1}},
+                ])]
 
     def last_session_ts(self, sub_id):
         mine = self._rows("bookings", {"subscription_id": sub_id})
@@ -734,21 +877,50 @@ class MongoPlans(PlansPort, _Helpers):
 class MongoEvents(EventsPort, _Helpers):
 
     def recent_events(self, since, limit):
-        events = [schema.normalise("access_events", d) for d in
-                  self.db["access_events"].find(
-                      {"scanned_at": {"$gte": since}}, session=self.session)
-                  .sort([("scanned_at", -1), ("_id", -1)]).limit(limit)]
-        people = self._by_id("clients", [e["client_id"] for e in events])
-        sessions = self._by_id("sessions", [e["session_id"] for e in events])
-        classes = self._by_id("classes",
-                              [s["class_id"] for s in sessions.values()])
-        out = []
-        for e in events:
-            s = sessions.get(e["session_id"])
-            k = classes.get(s["class_id"]) if s else None
-            out.append({"id": e["id"], "scanned_at": e["scanned_at"],
-                        "decision": e["decision"], "reason": e["reason"],
-                        "confirmed_at": e["confirmed_at"],
-                        "name_en": (people.get(e["client_id"]) or {}).get("name_en"),
-                        "class_name": k["name"] if k else None})
-        return out
+        # One round trip: the events, who they were, and the class of the
+        # session each was for. It was four -- the events, then an `$in` per
+        # table behind them -- on the dashboard, which pays for nine other
+        # reads besides. The class is two joins out from the event, which is
+        # what the nested lookup is doing.
+        return [{"id": d["_id"], "scanned_at": d["scanned_at"],
+                 "decision": d["decision"], "reason": d["reason"],
+                 "confirmed_at": d["confirmed_at"],
+                 "name_en": d["name_en"], "class_name": d["class_name"]}
+                for d in self._agg("access_events", [
+                    {"$match": {"scanned_at": {"$gte": since}}},
+                    {"$sort": {"scanned_at": -1, "_id": -1}},
+                    {"$limit": limit},
+                    {"$lookup": {"from": "clients", "localField": "client_id",
+                                 "foreignField": "_id", "as": "_p"}},
+                    {"$lookup": {
+                        "from": "sessions", "localField": "session_id",
+                        "foreignField": "_id", "as": "_s",
+                        "pipeline": [
+                            {"$lookup": {"from": "classes",
+                                         "localField": "class_id",
+                                         "foreignField": "_id", "as": "_c"}},
+                            {"$project": {
+                                "class_name": {"$first": "$_c.name"}}}]}},
+                    {"$project": {
+                        "scanned_at": 1, "decision": 1,
+                        "reason": {"$ifNull": ["$reason", None]},
+                        "confirmed_at": {"$ifNull": ["$confirmed_at", None]},
+                        "name_en": {"$ifNull": [{"$first": "$_p.name_en"}, None]},
+                        "class_name": {
+                            "$ifNull": [{"$first": "$_s.class_name"}, None]}}},
+                ])]
+
+    def event_totals(self, since):
+        rows = self._agg("access_events", [
+            {"$match": {"scanned_at": {"$gte": since}}},
+            {"$group": {
+                "_id": None,
+                "scans": {"$sum": {"$cond": [
+                    {"$eq": ["$source", "scan"]}, 1, 0]}},
+                "denied": {"$sum": {"$cond": [
+                    {"$eq": ["$decision", "deny"]}, 1, 0]}}}},
+        ])
+        # `$group` over no rows is no group at all, where SQL's SUM is NULL.
+        # Both have to arrive here as 0 -- see the module docstring.
+        return ({"scans": rows[0]["scans"], "denied": rows[0]["denied"]}
+                if rows else {"scans": 0, "denied": 0})

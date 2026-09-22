@@ -62,6 +62,19 @@ class SessionsPort(ABC):
         """Mark every scheduled session whose end has passed completed."""
 
     @abstractmethod
+    def next_sweep_deadline(self, now: int):
+        """
+        The earliest `ends_at` at or after `now` among sessions that are not
+        cancelled, or None when nothing is left to end.
+
+        This is the next moment `access.settle_past_sessions()` could
+        possibly have work to do, which is what lets it skip itself entirely
+        until then -- see the deadline note there. NULL `ends_at` is excluded
+        for the same reason the sweep itself excludes it: a row the sweep
+        cannot act on cannot be the reason to wake it up.
+        """
+
+    @abstractmethod
     def session_detail(self, session_id: int):
         """One session with its class and instructor named, or None."""
 
@@ -195,10 +208,6 @@ class ClientsPort(ABC):
         """Bookings whose session is still ahead and not cancelled."""
 
     @abstractmethod
-    def client_history(self, client_id: int, now: int, limit: int) -> list:
-        """Bookings whose session has been, newest first."""
-
-    @abstractmethod
     def plan_sessions(self, client_id: int, sub_id: int) -> list:
         """Every session one plan has paid for, in order."""
 
@@ -225,6 +234,19 @@ class ClientsPort(ABC):
         dashboard's two intake figures: "earned from them" follows the
         people out of the window, while "revenue" stays inside it. Unpriced
         plans are counted separately and never as zero.
+        """
+
+    @abstractmethod
+    def joined_counts(self, windows: list) -> list:
+        """
+        How many active clients joined in each `(from, to)` half-open range,
+        in the order given and in **one** round trip.
+
+        The dashboard asks this twice -- the chosen period and the span
+        immediately before it, for the like-for-like comparison -- and two
+        counts over one collection is a round trip spent on arithmetic.
+        Bounds are ISO dates; `joined_on` is compared as a string, which is
+        what lets an index serve it (see access.month_intake).
         """
 
 
@@ -386,4 +408,26 @@ class EventsPort(ABC):
         """
         The kiosk feed: scans since a moment, newest first, with the client
         and the session's class named where they are known.
+        """
+
+    @abstractmethod
+    def event_totals(self, since: int) -> dict:
+        """
+        `{"scans", "denied"}` since a moment -- how many came from the kiosk
+        and how many were refused, whatever their source.
+
+        One question rather than two counts over the same window: they sit
+        side by side on the dashboard, and reading the window twice is a
+        round trip spent on arithmetic. Always integers, never None.
+        """
+
+    @abstractmethod
+    def event_totals(self, since: int) -> dict:
+        """
+        `{"scans", "denied"}` since a moment -- how many came from the kiosk
+        and how many were refused, whatever their source.
+
+        One question rather than two counts over the same window: they sit
+        side by side on the dashboard and reading the window twice is a round
+        trip spent on arithmetic. Always integers, never None.
         """

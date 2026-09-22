@@ -530,6 +530,52 @@ def plan_end(repo, sub) -> str:
 
 
 # ---------------------------------------------------------------- auto-absent
+#
+# The sweep runs before every read that touches attendance -- nine endpoints
+# -- and against a networked backend it cost about 400ms of those reads, which
+# was a fifth to a third of every page in the admin.
+#
+# It does not have to. What the sweep acts on is wall-clock time crossing a
+# session's `ends_at` (both the booked->absent and the scheduled->completed
+# halves), or a date boundary (lift_expired_freezes, which compares
+# `frozen_until` to today). So once it has run, it is *provably* unable to do
+# anything again until the earlier of the next session end and the next
+# midnight. `_sweep_deadline` is that moment, and before it the sweep costs
+# zero round trips.
+#
+# **This is an exact skip, not a throttle.** The distinction is the whole
+# point: a throttle trades the "nothing on screen is stale" invariant for
+# speed, and was deliberately declined for exactly that reason. Skipping until
+# a moment nothing can happen before loses nothing at all.
+#
+# The one thing the deadline cannot see is a write -- a session created in the
+# past, an edited start, a new freeze. server.py's middleware calls
+# sweep_invalidate() on any non-GET request, which is the single place where
+# "something may have changed" is knowable, and cannot be forgotten by an
+# endpoint added later.
+_sweep_deadline = 0
+
+
+def sweep_invalidate():
+    """
+    Forget the cached deadline: a write may have moved it. The next
+    settle_past_sessions() sweeps and recomputes.
+    """
+    global _sweep_deadline
+    _sweep_deadline = 0
+
+
+def _next_midnight(now: int) -> int:
+    """
+    The start of tomorrow, local time. The deadline is capped at this because
+    lift_expired_freezes() acts on a *date* -- a freeze ending tomorrow
+    becomes due at tomorrow's midnight, which no session's ends_at need
+    coincide with.
+    """
+    return int(datetime.combine(
+        date.fromtimestamp(now) + timedelta(days=1), _t.min).timestamp())
+
+
 def settle_past_sessions(repo) -> int:
     """
     Any booking whose session has finished but was never checked in becomes
@@ -539,7 +585,23 @@ def settle_past_sessions(repo) -> int:
     Dated freezes are lifted first: a plan that came out of a freeze last week
     should have its slots settled normally, and one still frozen is skipped
     entirely so a paused client never loses a session.
+
+    Returns 0 without touching the database while the cached deadline above
+    has not passed, because nothing it looks at can have changed yet.
     """
+    global _sweep_deadline
+    if db.now() < _sweep_deadline:
+        return 0
+    settled = _sweep(repo)
+    # After the sweep, not before: `now` has to be read after the writes so a
+    # session that ended during them is not skipped over until tomorrow.
+    now = db.now()
+    nxt = repo.next_sweep_deadline(now)
+    _sweep_deadline = min(_next_midnight(now), nxt) if nxt else _next_midnight(now)
+    return settled
+
+
+def _sweep(repo) -> int:
     with repo.begin():
         # The frozen plans are read first and passed in rather than joined:
         # Mongo has no cross-collection update, and there are never more than
@@ -1886,12 +1948,16 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
     # both >= "2026-08" and < "2026-09" while "2026-07-31" is neither — and
     # the range form is the one an index can use. substr() on the column
     # defeated ix_cli_joined and ix_sub_starts entirely.
-    def joined_in(a: str, b: str) -> int:
-        return repo.count("clients", {"active": 1,
-                                     "joined_on": {"gte": a, "lt": next_month(b)}})
-
-    new_clients = joined_in(month, month_to)
-    before = joined_in(prev_from, prev_to)
+    # Both windows in one pass. They are two counts over the same collection
+    # and the dashboard shows them side by side, so asking twice is a round
+    # trip spent on arithmetic. That pass is a scan rather than two index
+    # ranges, which on a few hundred clients is nothing next to the trip it
+    # saves; the note above still governs `takings()` below, where the range
+    # really is what an index serves.
+    new_clients, before = repo.joined_counts([
+        (month, next_month(month_to)),
+        (prev_from, next_month(prev_to)),
+    ])
 
     def takings(date_field: str) -> tuple:
         r = repo.takings(date_field, month, next_month(month_to))
