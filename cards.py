@@ -401,3 +401,43 @@ def build_card(client_id: int, name: str, token: str, sessions_total: int,
     out = io.BytesIO()
     card.save(out, "PNG", dpi=(300, 300))
     return out.getvalue()
+
+
+def issue(repo, client_id: int, class_id: int) -> dict:
+    """
+    Mint this class's card for this client and store the picture: the
+    credential, the PNG, and the stamped URL the screens link to.
+
+    Both places that issue one go through here -- the client profile's
+    Issue/Reissue button, and the renewal at the reception desk. It is the
+    same three steps either way, and two copies of them would drift on the
+    detail that is easiest to forget: the `?v=` stamp. `card_path()` gives
+    one stable address per client per class, deliberately, so a reissue
+    overwrites what the browser already holds and an edited end date comes
+    out right in the file and wrong on the screen. Stamping it with the
+    issue time changes the URL exactly when the bytes change.
+
+    Deliberately here rather than in access.py: drawing a PNG is
+    presentation. access.issue_card() below still owns the rule -- who may
+    hold a card, and revoking the one it replaces.
+
+    Raises whatever access.issue_card() refused with, as {"ok": False, ...};
+    the caller turns that into its own kind of refusal.
+    """
+    import access
+    import db
+    import images
+
+    r = access.issue_card(repo, client_id, class_id)
+    if not r["ok"]:
+        return r
+    png = build_card(client_id, r["client_name"], r["token"],
+                     r["sessions_total"], r["expires_on"],
+                     class_name=r["class_name"], colour=r["class_colour"])
+    now = db.now()
+    slug = class_slug(r["class_name"])
+    images.store(repo, images.CARD, client_id, png, "image/png",
+                 variant=slug, now=now)
+    return {"ok": True, "token": r["token"], "revoked": r["revoked"],
+            "card_url": images.url(images.CARD, client_id, variant=slug,
+                                   stamp=now)}
