@@ -45,10 +45,19 @@ permissions:
 #
 # The versions do NOT line up, and assuming they do is the trap here:
 #
-#     actions/checkout         v4 node20 -> v5 node24 -> v6   (pinned v6)
+#     actions/checkout         v4 node20 -> v5 node24 -> v7   (pinned v7)
 #     actions/setup-python     v5 node20 -> v6 node24 -> v7   (pinned v7)
 #     actions/upload-artifact  v4 node20 -> v5 STILL node20
 #                                        -> v6 node24 -> v7   (pinned v7)
+#
+# checkout moved v6 -> v7 by Dependabot, which is the mechanism working as
+# intended. v7 is still node24, so the deadline above is unaffected. Its one
+# behavioural change is that it refuses to check a fork's PR out under
+# `pull_request_target` and `workflow_run`; this workflow has neither
+# trigger, and both `uses:` here pass no inputs, so nothing else could
+# break. **A bump is not finished until this table moves with it** -- the
+# macos-14 bump silently left a comment claiming Intel, and the wrong
+# binary was what surfaced it, on the reception Mac.
 #
 # upload-artifact skips a major: v5 predates the Node 24 move and is still
 # node20, so bumping each action to "the next one" fixes two thirds of the

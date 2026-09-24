@@ -551,9 +551,21 @@ still declaring `runs.using: node20` does not warn, it fails to start.
 **The majors do not line up, and assuming they do is the trap.**
 `actions/upload-artifact@v5` is **still node20** -- it predates the move --
 so bumping each action to "the next one" fixes two thirds of the problem and
-looks finished. The pins are `checkout@v6`, `setup-python@v7`,
+looks finished. The pins are `checkout@v7`, `setup-python@v7`,
 `upload-artifact@v7`; check `runs.using` in an action's own `action.yml`
-before trusting any version number. Two things were checked before pinning
+before trusting any version number.
+
+**Dependabot has already moved one of them, which is the mechanism working.**
+`checkout` went v6 -> v7; it is still node24, so the deadline is unaffected,
+and v7's one behavioural change -- refusing to check a fork's PR out under
+`pull_request_target` and `workflow_run` -- reaches a workflow that has
+neither trigger and passes the action no inputs. **Two things to do on the
+next one of these**, in this order: read `runs.using` in the new version's
+own `action.yml`, since a newer major is not automatically a node24 one (see
+upload-artifact v5); and move the version table in the workflow's own header
+comment with it. Dependabot edits the `uses:` line and nothing else, and a
+comment left behind saying something different is exactly how the macos-14
+bug reached the reception Mac. Two things were checked before pinning
 them: no input this workflow passes was removed (setup-python v7 dropped
 `pip-install`, unused here), and upload-artifact v6+ needs Actions Runner
 >= 2.327.1, which the hosted images have and a self-hosted one might not.
