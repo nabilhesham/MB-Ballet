@@ -28,9 +28,51 @@ class PlanEdit(BaseModel):
     session_ids: Optional[list[int]] = None
     paid_on: Optional[str] = None
     notes: Optional[str] = None
+    # When the plan began. Not bookkeeping alone -- it is one of the two
+    # answers a plan's dates are derived from, so every form that offers it
+    # re-picks the sessions when it changes. See access.sessions_from_start().
+    starts_on: Optional[str] = None
+    price: Optional[float] = None
+
+
+class AutoSessionsIn(BaseModel):
+    """Which sessions a start day and a session count come to."""
+    class_id: int
+    client_id: int
+    starts_on: str
+    sessions_total: int
+    # The plan being edited, when there is one. It is what makes its own
+    # already-booked dates candidates again instead of obstacles, and what
+    # keeps its attended ones in the answer.
+    plan_id: Optional[int] = None
 
 
 # ---------------------------------------------------------------- routes
+@router.post("/api/plans/auto-sessions")
+def auto_sessions(body: AutoSessionsIn):
+    """
+    The dates a plan gets when reception states when it starts and how many
+    sessions it buys — the answer, not a suggestion to be re-derived.
+
+    Three forms ask it: the plan picker, the plan editor, and the kiosk's
+    update panel, which has no session list at all. The rule is one function
+    in access.py for the usual reason — three copies of "the first four
+    sessions from 1 October" would agree on the obvious case and part company
+    on attendance, on the plan's own dates, and on a day already gone. See
+    access.sessions_from_start().
+    """
+    if body.sessions_total < 1:
+        raise HTTPException(400, "A plan needs at least one session.")
+    repo = data.connect()
+    try:
+        access.settle_past_sessions(repo)
+        return access.sessions_from_start(
+            repo, body.class_id, body.client_id, body.starts_on,
+            body.sessions_total, plan_id=body.plan_id)
+    finally:
+        repo.close()
+
+
 @router.put("/api/plans/{pid}")
 def edit_plan(pid: int, body: PlanEdit, clear_paid_on: bool = False):
     """

@@ -56,6 +56,15 @@ def _deny(message, detail=None, severity="stop", code=None, **base):
             "message": message, "detail": detail}
 
 
+# How many sessions an unpaid plan is allowed on trust. One: a client who has
+# genuinely forgotten their wallet gets today's class and pays next time, and
+# nobody is turned away at the door over a payment reception can take in a
+# minute. From the second session it is no longer a forgotten wallet, and the
+# refusal is what puts the payment in front of the receptionist while the
+# client is standing there -- which is the only moment it is easy to collect.
+UNPAID_GRACE_SESSIONS = 1
+
+
 def day_bounds(ts: int = None):
     """Midnight-to-midnight around a timestamp, in local time."""
     d = date.fromtimestamp(ts or db.now())
@@ -685,6 +694,12 @@ def _client_payload(repo, client, sub, rows, class_id=None) -> dict:
         "sessions_total": state.get("sessions_total"),
         "sessions_remaining": state.get("remaining"),
         "expires_on": state.get("expires_on"),
+        # The rest of the plan as it stands, for the kiosk's update panel:
+        # it opens on the plan the card just proved, so every field has to
+        # arrive with the verdict rather than costing a second round trip
+        # with a client waiting at the counter.
+        "plan_starts_on": state.get("starts_on"),
+        "plan_price": state.get("price"),
         # Shown as a tag at reception. It never blocks a check-in — the
         # receptionist is the one who decides what to do about it.
         "paid_on": state.get("paid_on"),
@@ -833,6 +848,32 @@ def _decide(repo, client, cred, base, t, rows, sub):
         return _deny(f"No session booked today{cls}",
                      detail="check their upcoming sessions on their profile",
                      code="no_session_today", **base)
+
+    # Not paid for, and the trust has run out.
+    #
+    # Deliberately here, *after* a session of theirs has been found: a client
+    # with nothing on today should be told that, not chased for money on a
+    # day they were never due. And deliberately before the absent branch
+    # below, whose MANUAL CHECK-IN spends a slot exactly like a scan does --
+    # letting that through would be letting them in unpaid by another door.
+    #
+    # The count is of this plan's own used slots, taken from the bookings
+    # already in hand rather than re-queried. It is gated on the booking
+    # belonging to the card's live plan: an older, already-renewed plan's
+    # leftover slot is finished business and not what reception would be
+    # collecting for.
+    if (sub and not sub["paid_on"] and row["subscription_id"] == sub["id"]):
+        used = sum(1 for r in rows
+                   if r["subscription_id"] == sub["id"]
+                   and r["status"] in ("present", "absent"))
+        if used >= UNPAID_GRACE_SESSIONS:
+            _log(repo, cid, cred_id, row["session_id"], "deny", "plan not paid")
+            spent = f"{used} session{'' if used == 1 else 's'}"
+            return _deny(
+                f"Not paid for yet — {spent} already taken",
+                detail=("take the payment and put the date on the plan; "
+                        "they are checked in as soon as it saves"),
+                code="unpaid_plan", **base)
 
     if row["status"] == "absent":
         # Their session has been and gone and they were swept absent, but here
@@ -1152,6 +1193,91 @@ def renewable_sessions(repo, class_id: int, client_id: int, want: int) -> list:
     return [s["id"] for s in live[:want]]
 
 
+def sessions_from_start(repo, class_id: int, client_id: int, start_day: str,
+                       want: int, plan_id: int = None) -> dict:
+    """
+    A plan's dates worked out from two answers: when it starts, and how many
+    sessions it buys. The first `want` sessions of that class from that day
+    onwards, and the end date that follows from the last of them.
+
+    **It lives here rather than in each form**, because there are three of
+    them — the client profile's plan picker and its Edit, and the reception
+    kiosk's update panel, which has no session list to tick at all. Written
+    once in each would be three answers to "which four sessions is 1 October
+    plus four", and they would drift on the edges below rather than on the
+    obvious part.
+
+    The edges, all of which are decisions rather than details:
+
+    * **Already-attended sessions are kept, whatever the start day says**,
+      and they count toward `want`. They are attendance history; `edit_plan()`
+      refuses any edit that drops one, so a rule that quietly excluded them
+      would produce a set the server will not accept. That is also why they
+      are counted rather than added on top — four sessions means four.
+    * **This plan's own upcoming slots are candidates again**, not
+      obstacles. `not_booked_by` rightly hides dates the client already
+      holds, but the plan's own are exactly the ones being re-picked: without
+      them, changing 4 sessions to 5 would skip the four it already had and
+      offer four *different* dates.
+    * **A day already gone is offered.** This is the one place that differs
+      from "auto-fill earliest", which skips the past on purpose because
+      creating absences in bulk is not a decision to take by accident. Here
+      the receptionist has *typed* the start day, and writing a plan down
+      after the client started coming is precisely why the window reaches
+      three weeks back. The count comes back in `past` so the form can say
+      how many will be recorded as absent before anything is saved.
+    * **A short timetable is reported, not padded.** `short` is how many
+      fewer than `want` exist; the caller decides whether that blocks a save.
+    * **A plan cannot go below its own attendance**, so asking for fewer
+      sessions than it has already used answers with those sessions and
+      `kept` says how many they are. That is a floor, not a miscount: the
+      forms turn it into "n sessions are already attended — the plan cannot
+      go below that" rather than silently dropping one.
+    """
+    lo = int(datetime.combine(date.fromisoformat(start_day), _t.min).timestamp())
+
+    mine = repo.plan_sessions(client_id, plan_id) if plan_id else []
+    kept = [r for r in mine if r["status"] != "booked"]
+    reuse_ids = [r["session_id"] for r in mine if r["status"] == "booked"]
+
+    pool = [s for s in repo.sessions_in_range(lo, None, class_id=class_id,
+                                              not_booked_by=client_id)
+            if s["status"] != "cancelled"]
+    if reuse_ids:
+        pool += [s for s in repo.find("sessions", {"id": {"in": sorted(reuse_ids)}})
+                 if s["class_id"] == class_id and s["status"] != "cancelled"
+                 and s["starts_at"] >= lo]
+
+    seen = {r["session_id"] for r in kept}
+    fill = []
+    for s in sorted(pool, key=lambda s: (s["starts_at"], s["id"])):
+        if s["id"] in seen:
+            continue
+        seen.add(s["id"])
+        fill.append(s)
+
+    room = max(0, want - len(kept))
+    taken = fill[:room]
+    chosen = ([{"id": r["session_id"], "starts_at": r["starts_at"]} for r in kept]
+              + [{"id": s["id"], "starts_at": s["starts_at"]} for s in taken])
+    chosen.sort(key=lambda r: (r["starts_at"], r["id"]))
+
+    # `past` is what the form warns about, so it counts the sessions that
+    # would *become* absences and nothing else: finished, and not already
+    # attendance. Two distinctions that both matter -- an already-attended
+    # date is a record, not a warning, and "finished" is the test the three
+    # write paths actually book by (session_end, not starts_at), so the
+    # class somebody is standing in right now is not counted as missed.
+    now = db.now()
+    return {
+        "session_ids": [r["id"] for r in chosen],
+        "expires_on": _iso_day(chosen[-1]["starts_at"]) if chosen else None,
+        "past": sum(1 for s in taken if session_end(s) <= now),
+        "short": max(0, want - len(chosen)),
+        "kept": len(kept),
+    }
+
+
 def renew_at_desk(repo, client_id: int, class_id: int, plan: str,
                   sessions_total: int, price: float = None,
                   paid_on: str = None) -> dict:
@@ -1325,7 +1451,8 @@ def add_plan(repo, client_id: int, class_id: int, plan: str, sessions_total: int
 def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
              expires_on: str = None, session_ids: list = None,
              paid_on: str = None, clear_paid_on: bool = False,
-             notes: str = None, class_id: int = None) -> dict:
+             notes: str = None, class_id: int = None, starts_on: str = None,
+             price: float = None) -> dict:
     """
     Change a plan's name, size, sessions, class or end date after it has been
     sold.
@@ -1351,6 +1478,11 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
     clear_paid_on marks the plan unpaid again. It exists because the route
     drops None fields before calling this, so paid_on=None cannot mean
     "erase it" — the same reason edit_session() carries clear_instructor.
+
+    starts_on and price are corrections of what was written down. starts_on
+    matters beyond bookkeeping: it is one of the two answers
+    sessions_from_start() derives a plan's dates from, so the forms re-pick
+    the sessions when it changes.
 
     Moving a plan to another class is a correction of "this was written down
     against the wrong class". It carries its slots with it: the new class's
@@ -1436,6 +1568,17 @@ def edit_plan(repo, sub_id: int, plan: str = None, sessions_total: int = None,
             fields["plan"] = plan
         if sessions_total is not None:
             fields["sessions_total"] = sessions_total
+        if starts_on is not None:
+            # A correction of when the plan began, which is also what the
+            # session dates are worked out from -- see sessions_from_start().
+            fields["starts_on"] = starts_on
+        if price is not None:
+            # Editable because a plan is often written down before the amount
+            # is settled, and because the desk takes the money with the client
+            # standing there. NULL still means "nobody wrote it down" and is
+            # reached by clearing the field, which the route turns into a 0
+            # only if somebody types one -- see PlanEdit.
+            fields["price"] = price
         if clear_paid_on:
             fields["paid_on"] = None
         elif paid_on is not None:

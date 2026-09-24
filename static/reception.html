@@ -129,7 +129,7 @@
   .swaprow .w{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .swaprow .t{font-family:var(--mono);font-size:11px;color:var(--mute)}
   .swapnone{color:var(--dim);font-size:12.5px;padding:10px 2px}
-  #manual,#swapGo,#renewBtn,#renewGo{display:none}
+  #manual,#swapGo,#renewBtn,#renewGo,#planBtn,#planGo{display:none}
 
   /* Renewing at the desk. Same panel idiom as the swap above — an inline
      block, not a modal: the kiosk has no modal machinery and does not want
@@ -140,6 +140,23 @@
   #renew.on{display:block}
   .renewgrid{display:grid;grid-template-columns:2fr 1fr 1fr 1.2fr;gap:12px}
   @media(max-width:900px){ .renewgrid{grid-template-columns:1fr 1fr} }
+
+  /* Correcting a plan at the desk -- in practice, taking the payment for
+     one. Same inline-panel idiom again. Six fields rather than the
+     renewal's four: this one can move the plan's dates, and when it does
+     the sessions follow from the start day and the count, worked out by
+     the same rule the profile's forms use (access.sessions_from_start()),
+     so there is still nothing here to tick. */
+  #planUpd{display:none;margin-bottom:20px}
+  #planUpd.on{display:block}
+  /* Six columns, and the widths are the fields' real shapes: a plan name
+     is words, a count is one or two digits, a date input carries its own
+     picker glyph and a price needs room for four figures beside the
+     number spinner -- given 1fr it clipped to "160(". */
+  .plangrid{display:grid;
+            grid-template-columns:1.7fr .7fr 1.2fr 1.2fr 1.1fr 1.2fr;gap:12px}
+  @media(max-width:1200px){ .plangrid{grid-template-columns:1fr 1fr 1fr} }
+  @media(max-width:900px){ .plangrid{grid-template-columns:1fr 1fr} }
 
   /* ---------- sidebar ---------- */
   aside{border-left:1px solid var(--line);background:#0A0E13;padding:20px 16px;
@@ -258,12 +275,41 @@
       </div>
     </div>
 
+    <!-- The plan behind this card has not been paid for and has had the one
+         session it is allowed on trust. This is where the money is actually
+         collectable: the client is standing here. Putting a date in PAID ON
+         and saving checks them in, as if the card had just been scanned
+         again. See POST /api/access/plan-update. -->
+    <div id="planUpd">
+      <div class="swaphead">
+        Update <b id="planClass"></b> — putting a date in PAID ON checks them
+        in straight away, as if they had scanned again.
+      </div>
+      <div class="plangrid">
+        <div><div class="swapk">PLAN NAME</div>
+          <input id="planName" type="text" autocomplete="off"></div>
+        <div><div class="swapk">SESSIONS</div>
+          <input id="planCount" type="number" min="1" max="200" inputmode="numeric"></div>
+        <div><div class="swapk">STARTS ON</div>
+          <input id="planStart" type="date"></div>
+        <div><div class="swapk">ENDS ON</div>
+          <input id="planEnds" type="date"></div>
+        <div><div class="swapk">PRICE (EGP)</div>
+          <input id="planPrice" type="number" inputmode="decimal"></div>
+        <div><div class="swapk">PAID ON</div>
+          <input id="planPaid" type="date"></div>
+      </div>
+      <div class="swapnone" id="planNote"></div>
+    </div>
+
     <div class="actions">
       <button id="manual">MANUAL CHECK-IN</button>
       <button id="renewBtn">RENEW PLAN</button>
+      <button id="planBtn">UPDATE PLAN</button>
       <button id="checkin">CHECK IN</button>
       <button id="swapGo">CHECK IN</button>
       <button id="renewGo">SAVE RENEWAL</button>
+      <button id="planGo">SAVE PLAN</button>
       <button id="undo" class="danger">Undo</button>
     </div>
     <div class="keys" id="keys">Esc to clear</div>
@@ -704,6 +750,7 @@ function show(r, opts){
      through it. */
   $('swap').classList.remove('on'); $('swapGo').style.display='none';
   $('renew').classList.remove('on'); $('renewGo').style.display='none';
+  $('planUpd').classList.remove('on'); $('planGo').style.display='none';
   $('stats').style.display=''; $('recent').style.display='';
 
   /* Three states, not two. A refusal the server marked "warn" is amber and
@@ -814,6 +861,11 @@ function show(r, opts){
      — the other half is doCheckIn(), for the client who walks in with
      exactly one session and spends it on the way past. */
   showRenew(renewOffered(r));
+  /* Unpaid, and the one session on trust is spent. The button opens the
+     plan so the payment can be taken here rather than at the admin screen
+     — and a saved payment checks them in, which is why this refusal is the
+     only one that offers it. */
+  $('planBtn').style.display = planUpdateOffered(r) ? 'inline-flex' : 'none';
   btn.style.background = 'var(--ok)';
   btn.disabled = auto;
   /* "CHECK IN ANYWAY" is the wording for a scan that matched nothing and is
@@ -1051,6 +1103,126 @@ async function doRenew(){
 $('renewBtn').onclick = openRenew;
 $('renewGo').onclick = doRenew;
 
+/* ================================================================
+   UPDATE PLAN — taking the payment at the desk
+
+   Where the unpaid refusal leads. The plan behind this card has had the
+   one session it is allowed on trust (access.UNPAID_GRACE_SESSIONS), and
+   the client is standing here, which is the only moment the money is
+   genuinely easy to collect.
+
+   Every field the profile's Edit offers is here except the class and the
+   session ticks: the class is the one the card proves, and the dates
+   follow from STARTS ON and SESSIONS through the same rule the profile's
+   forms use, so there is nothing to tick. Esc leaves without saving.
+   ================================================================ */
+function planUpdateOffered(r){
+  /* One condition, like the renewal's: this is the refusal that says the
+     plan is unpaid. Every other refusal gets no button, because a revoked
+     card or a frozen plan is not fixed by a payment. */
+  return !!(r && r.client_id && r.plan_id && r.code === 'unpaid_plan');
+}
+
+function openPlanUpdate(){
+  if(!current || !current.plan_id) return;
+  $('planBtn').style.display = 'none';
+  $('manual').style.display = 'none';
+  $('renewBtn').style.display = 'none';
+  $('checkin').style.display = 'none';
+  $('undo').classList.remove('on');
+  $('planClass').textContent = current.plan_class_name || 'this plan';
+  $('planName').value  = current.plan || '';
+  $('planCount').value = current.sessions_total || 1;
+  $('planStart').value = current.plan_starts_on || '';
+  $('planEnds').value  = current.expires_on || '';
+  $('planPrice').value = current.plan_price ?? '';
+  /* Paid today, because that is what this form is for. Clearing it saves
+     the plan still unpaid, which is a real answer — the client is then not
+     checked in, and the screen says so. */
+  $('planPaid').value  = todayISO();
+  $('planNote').textContent =
+    'Changing STARTS ON or SESSIONS re-picks the dates from the timetable. '
+    + 'Nothing is saved until SAVE PLAN.';
+  $('planUpd').classList.add('on');
+  $('planGo').style.display = 'inline-flex';
+  $('stats').style.display = 'none'; $('recent').style.display = 'none';
+  $('keys').textContent = 'Esc to cancel — nothing is saved until SAVE PLAN';
+  $('planPaid').focus();
+}
+
+async function doPlanUpdate(){
+  if(!current || !current.plan_id) return;
+  const name = $('planName').value.trim();
+  const n = Number($('planCount').value);
+  const starts = $('planStart').value;
+  const paid = $('planPaid').value;
+  if(!name){ $('reason').textContent = 'Give the plan a name'; $('planName').focus(); return; }
+  if(!n || n < 1){ $('reason').textContent = 'How many sessions?'; $('planCount').focus(); return; }
+  if(!starts){ $('reason').textContent = 'When does the plan start?'; $('planStart').focus(); return; }
+
+  const cid = current.client_id;
+  $('planGo').disabled = true;
+  let r;
+  try{
+    r = await (await fetch('/api/access/plan-update', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        plan_id: current.plan_id, plan: name, sessions_total: n,
+        starts_on: starts, expires_on: $('planEnds').value || null,
+        price: $('planPrice').value === '' ? null : Number($('planPrice').value),
+        paid_on: paid || null,
+      })})).json();
+  }catch(e){ r = {ok:false, error:'System not responding'}; }
+  $('planGo').disabled = false;
+  if(!r || !r.ok){
+    $('reason').textContent = (r && r.error) || 'Could not update the plan';
+    return;
+  }
+
+  /* Now scan them again — by asking the server, not by re-implementing it.
+     lookup() runs the very same _decide() a card does, so the verdict, the
+     automatic check-in, the deduction, the 60-second Undo and the day's
+     count are all the real ones rather than a second copy of them. That is
+     the whole reason this does not check anybody in server-side.
+
+     By client id rather than by the token just scanned, deliberately: a
+     change to the session count or the end date reissues the card, which
+     revokes the token in their hand, and re-verifying with it would answer
+     "revoked card" to somebody who has just paid.
+
+     Not fired when the plan was saved still unpaid — there would be
+     nothing to let them in on, and the next scan would refuse them again
+     for the same reason. */
+  if(!r.paid){
+    $('reason').textContent = 'Plan updated — still unpaid, so they are not checked in';
+    $('planUpd').classList.remove('on'); $('planGo').style.display = 'none';
+    $('stats').style.display = ''; $('recent').style.display = '';
+    $('keys').textContent = 'Esc to clear';
+    return;
+  }
+
+  let fresh;
+  try{
+    fresh = await (await fetch('/api/access/lookup', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({client_id: cid})})).json();
+  }catch(e){
+    $('reason').textContent = 'Paid and saved, but the screen could not refresh — scan again';
+    return;
+  }
+
+  show(fresh);          /* no noAuto: this *is* the scan, so it checks in */
+  if(r.card){
+    $('keys').textContent = r.card.ok
+      ? 'Paid. A new card was issued — print it from their profile, the old one no longer works · Esc to clear'
+      : 'Paid. The card could not be reissued — do it from their profile · Esc to clear';
+  }
+}
+$('planBtn').onclick = openPlanUpdate;
+$('planGo').onclick = doPlanUpdate;
+
+
+
 async function doCheckIn(){
   /* The auto path disables the button before calling in, so "already
      disabled" cannot be the guard any more — `done` is. */
@@ -1121,6 +1293,10 @@ function reset(){
   $('renew').classList.remove('on');
   $('renewGo').style.display = 'none';
   $('renewBtn').style.display = 'none';
+  // Nor does Esc out of a half-typed plan update record a payment.
+  $('planUpd').classList.remove('on');
+  $('planGo').style.display = 'none';
+  $('planBtn').style.display = 'none';
   $('stats').style.display = ''; $('recent').style.display = '';
   card.classList.remove('on'); idle.style.display='flex'; stage.className='';
   keysBase = 'Esc to clear';

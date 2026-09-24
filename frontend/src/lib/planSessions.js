@@ -1,3 +1,5 @@
+import { useEffect, useRef } from 'react';
+
 import { api } from '../api';
 
 /*
@@ -81,4 +83,54 @@ export function withinEndDate(sessions, endsOn, keep = []) {
   const limit = new Date(`${endsOn}T23:59:59`).getTime() / 1000;
   if (Number.isNaN(limit)) return sessions;
   return sessions.filter(s => s.starts_at <= limit || keep.includes(s.id));
+}
+
+/* A date input fires on every edit, so "2" on the way to "2026" arrives as a
+   real value. The project's usual answer is to apply a date range on a
+   button; a re-pick that is meant to feel automatic cannot do that, so it
+   waits instead — long enough for a year to finish being typed, and only for
+   a date that is actually complete. */
+const SETTLE_MS = 400;
+const looksLikeADay = d => /^\d{4}-\d{2}-\d{2}$/.test(d || '') && d >= '2000-01-01';
+
+/**
+ * Re-pick a plan's sessions whenever its start day or its session count
+ * changes, and move the end date to the last of them.
+ *
+ * The rule itself is server-side (access.sessions_from_start, through
+ * /plans/auto-sessions) because three forms need the same answer and one of
+ * them — the reception kiosk — has no session list to work it out from. This
+ * hook is only the plumbing: when to ask, and how not to let a stale answer
+ * land on top of a newer one.
+ *
+ * `apply` is handed {session_ids, expires_on, past, short}. It is deliberately
+ * not fired on the first render: opening a form must not silently rearrange a
+ * plan somebody already agreed. Nothing here locks the form afterwards —
+ * every tick, and the end date itself, can still be changed by hand before
+ * saving, which is the point of re-picking rather than deciding.
+ */
+export function useAutoPick({ classId, clientId, startsOn, total, planId, ready = true }, apply) {
+  const first = useRef(true);
+  const seq = useRef(0);
+
+  useEffect(() => {
+    if (!ready) return undefined;
+    if (first.current) { first.current = false; return undefined; }
+    if (!classId || !clientId || !looksLikeADay(startsOn) || !(total > 0)) return undefined;
+
+    const mine = ++seq.current;
+    const t = setTimeout(async () => {
+      try {
+        const r = await api('/plans/auto-sessions', { method: 'POST', body: {
+          class_id: classId, client_id: clientId, starts_on: startsOn,
+          sessions_total: Number(total), plan_id: planId ?? null,
+        } });
+        // A slower answer to an older question must never overwrite a newer
+        // one — the same guard the kiosk's name search uses.
+        if (mine === seq.current) apply(r);
+      } catch { /* leave the form exactly as reception left it */ }
+    }, SETTLE_MS);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startsOn, total, ready]);
 }

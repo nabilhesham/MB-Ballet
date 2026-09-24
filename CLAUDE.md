@@ -224,9 +224,10 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                    Toast, Avatar, Pill, Empty, ClassPick (the searchable
                    class list both plan pickers choose from).
   src/lib/         format.js (timestamp -> what a receptionist reads, and
-                   fmtISODay for a calendar-day column) and planSessions.js
-                   (the window a plan's slots are filled from — see the
-                   three-weeks-back rule and the ENDS ON cap below).
+                   fmtISODay/fmtISODayTime for a calendar-day column) and
+                   planSessions.js (the window a plan's slots are filled
+                   from, the ENDS ON cap, and useAutoPick — see the
+                   three-weeks-back rule and the start-day rule below).
 static/app/       Committed build output of frontend/ — what server.py
                   actually serves at `/`. Regenerate with `npm run build`
                   after any `frontend/src/` change; see Stack above.
@@ -793,8 +794,9 @@ system and everything else follows from it:
   column (68 of 70 rows have one), and **nullable on purpose**: NULL is
   read as unpaid and shown that way. It is set in the plan picker, edited
   from the plan's Edit button, and shows as a pill on the client profile,
-  as the payment history's PAID column, and as a tag at reception. It never
-  blocks a check-in — reception is told, and decides. The printed card
+  as the payment history's PAID column, and as a tag at reception. It is
+  good for one session on trust and then blocks a check-in — see the
+  unpaid rule below. The printed card
   deliberately omits it: that PNG is a snapshot nothing regenerates, so a
   card printed while unpaid would read UNPAID for the life of the card.
   `notes` is about *this purchase* — "paid half now, half in October" — and
@@ -1064,6 +1066,47 @@ session straight to `absent`, so the list marks past rows and says why, and
 "auto-fill earliest" skips them: creating absences is a decision to make one
 date at a time, never in bulk.
 
+**Stating when a plan starts and how many sessions it buys is stating which
+sessions those are.** `access.sessions_from_start()` answers that, and
+`POST /api/plans/auto-sessions` is how the forms ask: changing STARTS ON or
+NUMBER OF SESSIONS re-picks the ticks below and moves ENDS ON to the last
+of them. Everything stays editable afterwards — this only saves the common
+case being done twice by hand, and nothing is locked.
+
+**The rule is one function on the server because three forms need it**, and
+one of them — the kiosk's UPDATE PLAN panel — has no session list to work
+it out from at all. Three hand-written copies would have agreed on "the
+first four sessions from 1 October" and parted company on the edges, which
+are the part that matters:
+
+- **Already-attended sessions are kept whatever the start day says, and
+  they count toward the total.** `edit_plan()` refuses any edit that drops
+  one, so a rule that quietly excluded them would hand the form a set the
+  server will not accept. `kept` comes back so a form can say "n sessions
+  are already attended — the plan cannot go below that" instead of
+  miscounting.
+- **The plan's own upcoming slots are candidates again**, not obstacles.
+  `not_booked_by` rightly hides dates the client already holds; without
+  putting the plan's own back, changing 4 sessions to 5 would skip the four
+  it already had and offer four *different* dates.
+- **A day already gone is offered.** This is where it differs from
+  "auto-fill earliest", which skips the past deliberately because creating
+  absences in bulk is not a decision to take by accident. Here the start
+  day was *typed*, and writing a plan down after the client started coming
+  is exactly why the window reaches three weeks back. `past` counts what
+  would *become* an absence — finished, and not already attendance — and
+  the form says so before anything saves.
+- **A short timetable is reported, not padded** (`short`), the same way a
+  short timetable refuses a desk renewal.
+
+**The forms narrow the answer to what they can actually show.** The list on
+screen is a window and the rule is not, so a returned id with no row to
+tick would be the "12 of 12 chosen" disagreement nobody can debug from the
+screen. **And the request waits 400ms for a complete date**: a date input
+fires on every edit, so "2" on the way to "2026" arrives as a real value —
+the same problem the filter ranges solve with an Apply button, which a
+re-pick meant to feel automatic cannot use.
+
 **A typed ENDS ON narrows that window from the other end.** "Ends on the
 20th" and "pays for a session on the 25th" cannot both be true, so once
 reception states an end date the list stops offering dates past it —
@@ -1174,6 +1217,31 @@ Repeat weekly **skips** a clash rather than failing the batch, and returns
 `skipped` saying which dates and why — one taken evening in week 7 must not
 cost the other eleven. It is the same treatment a date already holding that
 class's own session has always had.
+
+**An unpaid plan is good for one session, then it is not.**
+`access.UNPAID_GRACE_SESSIONS` holds the number. A client who has genuinely
+forgotten their wallet gets today's class and pays next time, because
+turning a paying member away at the door over a payment reception could
+take in a minute helps nobody. From the second session it is no longer a
+forgotten wallet, and the refusal is what puts the payment in front of the
+receptionist *while the client is standing there* — which is the only
+moment it is easy to collect at all.
+
+Three things about where the check sits, all of them decisions:
+
+- **After a session of theirs has been found.** Somebody with nothing on
+  today is told that, not chased for money on a day they were never due.
+- **Before the `absent_today` branch**, whose MANUAL CHECK-IN spends a slot
+  exactly as a scan does — letting that through would be letting them in
+  unpaid by another door.
+- **After the frozen check.** A frozen plan needs unfreezing, and being
+  told to pay instead sends reception after the wrong thing.
+
+It counts this plan's own used slots from the bookings already in hand, and
+only when the booking belongs to the card's *live* plan: a slot left over
+from an already-renewed plan is finished business, not something reception
+would be collecting for. The refusal carries `code="unpaid_plan"`, which is
+what puts **UPDATE PLAN** on the kiosk — see below.
 
 **One check-in per day.** A second scan the same day is refused with the time of
 the first, and nothing is deducted.
@@ -1828,6 +1896,46 @@ of the plan just sold. Which is also why the button under it reads
 that matched nothing and is being let in regardless, and this one has a
 session and a slot to spend on it.
 
+### Taking the payment at the desk
+
+**UPDATE PLAN appears on exactly one refusal**, the unpaid one above, for
+the same reason RENEW PLAN appears on exactly one condition: a button that
+can show up for a reason nobody can name is worse than no button. A revoked
+card or a frozen plan is not fixed by a payment, so neither gets it.
+
+It opens the plan the scanned card just proved. Every field the profile's
+Edit offers is there except two the kiosk cannot answer: **the class**,
+which is the card's own and whose correction belongs on the profile, and
+**the session ticks**, because the dates follow from STARTS ON and SESSIONS
+through `access.sessions_from_start()` — the same rule the profile's forms
+use. That is what keeps the kiosk pickerless, which is the whole reason the
+renewal above chooses dates rather than offering them.
+
+**Putting a date in PAID ON checks them in, and the kiosk does that by
+asking to be scanned again.** `doPlanUpdate()` saves, then calls
+`/api/access/lookup` and renders the answer through the ordinary `show()`
+path — so the verdict, the automatic check-in, the deduction, the
+60-second Undo and the day's count are the real ones rather than a second
+implementation of them. `POST /api/access/plan-update` deliberately checks
+nobody in for that reason; saving a payment and spending a session stay
+separate, exactly as selling a plan and spending one do.
+
+**By client id, not by the token just scanned.** A change to the session
+count or the end date reissues the card, which revokes the token in their
+hand — re-verifying with it would answer "revoked card" to somebody who has
+just paid.
+
+**Saving still unpaid is a real answer**, not a half-finished save: the
+plan stays unpaid, nobody is checked in, and the screen says so rather than
+pretending otherwise. The next scan refuses them again for the same reason.
+
+**The card is left alone when only the money changed**, which is the common
+case here. Issuing revokes the card in the client's hand and there is no
+reason to do that to somebody who has just paid; the card prints the
+session count and the end date, a payment changes neither, and `paid_on` is
+deliberately not on the card at all. A change that *does* move those two
+reissues it, and the kiosk says so.
+
 **"Next class" is scoped to the card being held.** `_client_payload()` takes
 the credential's `class_id` and filters the lookup by it. A client taking
 Ballet and Flexibility was shown whichever came first across both, so the
@@ -1969,6 +2077,11 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       as a clean total while half its plans carry no amount at all. Either
       the sheet starts recording the amount, or the fee goes on the class,
       or the count comes back onto the screen.
+- [ ] The unpaid rule is one session of trust for everyone. There is no
+      per-client exception and no way to extend it from a screen —
+      `access.UNPAID_GRACE_SESSIONS` is a constant. If the academy ever
+      wants "this family always pays at the end of the month", that is a
+      field on the client, not a bigger number here.
 - [ ] Rotating phone tokens: `access.py` has the `kind='phone'` path with a 90s
       freshness window, but nothing generates them client-side.
 - [ ] `settle_past_sessions` runs in-process. If the laptop is off overnight it

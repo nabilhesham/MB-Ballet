@@ -165,3 +165,110 @@ def renew(body: RenewIn):
         return JSONResponse(r, status_code=200)
     finally:
         repo.close()
+
+
+class PlanUpdateIn(BaseModel):
+    """
+    A plan corrected at the kiosk, with the client standing there.
+
+    No `session_ids` and no `class_id`, for the same reason `RenewIn` has
+    neither: the kiosk has no session picker, so the dates are derived from
+    the start day and the count (see access.sessions_from_start()), and the
+    class is the one the scanned card proves — changing that is a correction
+    of a different kind and belongs on the profile.
+    """
+    plan_id: int
+    plan: str
+    sessions_total: int
+    starts_on: str
+    expires_on: Optional[str] = None
+    price: Optional[float] = None
+    paid_on: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/api/access/plan-update")
+def plan_update(body: PlanUpdateIn):
+    """
+    Fix a plan from the kiosk — in practice, take the payment for one.
+
+    This is where an unpaid plan's refusal leads. The card was scanned, the
+    plan behind it has had its one session on trust, and the receptionist is
+    looking at the client: that is the moment the money is actually
+    collectable, and walking to the admin screen for it is how it stops
+    being collected. Every field the profile's Edit offers is here except
+    the two the kiosk cannot answer (see PlanUpdateIn).
+
+    **It does not check anybody in.** Saving a payment and spending a
+    session are still separate, exactly as selling a plan and spending one
+    are — the kiosk re-reads the client afterwards and the ordinary scan
+    path does the rest, which is what makes the Undo, the deduction and the
+    day's count identical to a real scan rather than a second
+    implementation of them.
+    """
+    repo = data.connect()
+    try:
+        sub = repo.get("subscriptions", body.plan_id)
+        if sub is None:
+            return JSONResponse({"ok": False, "error": "no such plan"},
+                                status_code=404)
+
+        extra = {}
+        # The dates are re-derived only when one of the two answers they come
+        # from has actually changed. Left alone otherwise, so taking a payment
+        # never quietly moves the sessions somebody already agreed.
+        resequenced = (body.starts_on != sub["starts_on"]
+                       or body.sessions_total != sub["sessions_total"])
+        if resequenced:
+            auto = access.sessions_from_start(
+                repo, sub["class_id"], sub["client_id"], body.starts_on,
+                body.sessions_total, plan_id=body.plan_id)
+            if auto["short"]:
+                # Said as the thing to do about it rather than as a rule that
+                # was broken, the same way a short timetable is refused on a
+                # renewal. Nothing is saved.
+                have = body.sessions_total - auto["short"]
+                return JSONResponse({"ok": False, "error": (
+                    f"Only {have} session{'' if have == 1 else 's'} are "
+                    f"scheduled from {body.starts_on} — schedule more, or "
+                    f"put a smaller number on the plan.")}, status_code=400)
+            extra["session_ids"] = auto["session_ids"]
+            extra["expires_on"] = body.expires_on or auto["expires_on"]
+            # Sent only when it moved. edit_plan() reads a count on its own
+            # as "reassign these", and rightly refuses it without the dates
+            # -- so passing the unchanged number through would turn a
+            # payment into that refusal.
+            extra["sessions_total"] = body.sessions_total
+        elif body.expires_on and body.expires_on != sub["expires_on"]:
+            extra["expires_on"] = body.expires_on
+
+        r = access.edit_plan(
+            repo, body.plan_id, plan=body.plan.strip(),
+            starts_on=body.starts_on, price=body.price, notes=body.notes,
+            paid_on=body.paid_on or None, clear_paid_on=not body.paid_on,
+            **extra)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=r.get("status", 400))
+
+        # The card prints the session count and the end date, and nothing
+        # regenerates it -- so it is replaced when one of those changed, and
+        # left alone when only the money did. That second case is the common
+        # one here and is worth protecting: issuing revokes the card in the
+        # client's hand, and there is no reason to do that to somebody who
+        # has just paid. paid_on is deliberately not on the card at all (a
+        # print snapshot would read UNPAID for the card's whole life), so
+        # nothing about it goes stale.
+        reprinted = resequenced or bool(extra.get("expires_on"))
+        card = None
+        if reprinted:
+            try:
+                out = cards.issue(repo, sub["client_id"], sub["class_id"])
+                card = {"ok": bool(out.get("ok")),
+                        "error": None if out.get("ok") else out.get("error")}
+            except Exception as exc:                   # noqa: BLE001
+                card = {"ok": False, "error": str(exc)}
+        return JSONResponse({**r, "client_id": sub["client_id"],
+                             "paid": bool(body.paid_on), "card": card},
+                            status_code=200)
+    finally:
+        repo.close()

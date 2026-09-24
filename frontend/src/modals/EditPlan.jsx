@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../api';
 import { isoDay } from '../lib/format';
-import { fetchPlanSessions, withinEndDate } from '../lib/planSessions';
+import { fetchPlanSessions, useAutoPick, withinEndDate } from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import ClassPick from '../components/ClassPick';
@@ -38,6 +38,8 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   // only until the sessions on the plan change again — then it follows the
   // picks once more.
   const [endsTouched, setEndsTouched] = useState(false);
+  const [startsOn, setStartsOn] = useState(plan.starts_on || '');
+  const [price, setPrice] = useState(plan.price ?? '');
   const [paidOn, setPaidOn] = useState(plan.paid_on || '');
   const [notes, setNotes] = useState(plan.notes || '');
   const [sessions, setSessions] = useState([]);
@@ -49,6 +51,10 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
   // and the attended ones travel with the plan into whatever class it moves
   // to, since they are history and never move.
   const [own, setOwn] = useState([]);
+  // What the last re-pick came to: how many of the asked-for sessions it
+  // could fill, and how many of them are days already gone. Both are said
+  // out loud under the list rather than quietly accepted.
+  const [auto, setAuto] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -92,6 +98,34 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
     setChosen(c => (c.every(id => ok.has(id)) ? c : c.filter(id => ok.has(id))));
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [endsOn, endsTouched, sessions, loaded]);
+
+  // Stating when the plan starts and how many sessions it buys is stating
+  // which sessions those are, so both fields re-pick the list below and move
+  // the end date to the last of them. Attendance is never re-picked: an
+  // already-attended session stays on the plan whatever the start day says,
+  // and counts toward the total, because the server refuses any edit that
+  // drops one. Everything stays editable afterwards.
+  const shown = useRef([]);
+  useEffect(() => { shown.current = sessions; }, [sessions]);
+
+  useAutoPick(
+    { classId, clientId, startsOn, total: need, planId: plan.id, ready: loaded },
+    r => {
+      // Narrowed to what this list can actually show -- it is a window and
+      // the rule that answers is not. A ticked row that is not on screen is
+      // the "n of need chosen" disagreement nobody can debug from here.
+      const have = new Set(shown.current.map(x => x.id));
+      const ids = r.session_ids.filter(id => have.has(id));
+      // Belt and braces: locked ids are already in the answer, but a
+      // narrowing must never be what drops one.
+      const full = [...new Set([...locked, ...ids])];
+      setChosen(full);
+      const last = shown.current.reduce(
+        (m, x) => (full.includes(x.id) && x.starts_at > m ? x.starts_at : m), 0);
+      if (last) setEndsOn(isoDay(last));
+      setEndsTouched(false);
+      setAuto({ ...r, filled: full.length });
+    });
 
   const onClassChange = async id => {
     if (id === classId) return;
@@ -140,6 +174,7 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
         method: 'PUT',
         body: {
           plan: name, class_id: classId, sessions_total: Number(need), expires_on: endsOn,
+          starts_on: startsOn || null, price: price === '' ? null : Number(price),
           paid_on: paidOn || null, notes, session_ids: chosen,
         },
       });
@@ -212,6 +247,19 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
       </div>
       <div className="fieldrow">
         <div>
+          <label>STARTS ON</label>
+          <input type="date" value={startsOn}
+                 onChange={e => setStartsOn(e.target.value)} />
+          <div className="hint">Re-picks the sessions below, from this day on.</div>
+        </div>
+        <div>
+          <label>PRICE (EGP)</label>
+          <input type="number" placeholder="not recorded" value={price}
+                 onChange={e => setPrice(e.target.value)} />
+        </div>
+      </div>
+      <div className="fieldrow">
+        <div>
           <label>ENDS ON</label>
           <input type="date" value={endsOn}
                  onChange={e => { setEndsOn(e.target.value); setEndsTouched(true); }} />
@@ -241,6 +289,19 @@ export default function EditPlan({ clientId, plan, classes = [], onSaved }) {
         weeks. Sessions already attended are locked and always count toward the total
         {moved ? ', including the ones from the class this plan is moving out of' : ''}.
       </div>
+      {auto && (auto.filled < need || auto.past > 0) && (
+        <div className="warnline" style={{ margin: '0 0 10px' }}>
+          {auto.filled < need && (
+            <>Only {auto.filled} of {need} sessions could be filled from {startsOn} —
+              schedule more, or put a smaller number on the plan. </>
+          )}
+          {auto.past > 0 && (
+            <>{auto.past} of the dates picked have already been and gone, so
+              {auto.past === 1 ? ' it is' : ' they are'} recorded as absent when this
+              saves — untick {auto.past === 1 ? 'it' : 'them'} if that is not right.</>
+          )}
+        </div>
+      )}
       {chosen.length !== need && (
         <div className="warnline" style={{ margin: '0 0 10px' }}>
           {chosen.length} of {need} sessions picked — Save stays off until they match.

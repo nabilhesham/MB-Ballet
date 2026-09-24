@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { api } from '../api';
 import { isoDay, todayISO } from '../lib/format';
-import { earliestUpcoming, fetchPlanSessions, withinEndDate } from '../lib/planSessions';
+import { earliestUpcoming, fetchPlanSessions, useAutoPick, withinEndDate }
+  from '../lib/planSessions';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import ClassPick from '../components/ClassPick';
@@ -34,6 +35,10 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
   const [notes, setNotes] = useState('');
   const [sessions, setSessions] = useState([]);
   const [chosen, setChosen] = useState([]);
+  // How many of the auto-picked dates have already been and gone, and how
+  // many fewer than asked for exist at all. Both are said out loud rather
+  // than silently accepted -- see the lines under the list.
+  const [auto, setAuto] = useState(null);
 
   const load = async cid => {
     setSessions(await fetchPlanSessions(cid, clientId));
@@ -73,9 +78,36 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
     /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [endsOn, endsTouched, sessions]);
 
+  // Stating when the plan starts and how many sessions it buys is stating
+  // which sessions those are, so the ticks and the end date follow both
+  // fields instead of waiting to be filled in a second time. Everything
+  // stays editable afterwards; this only saves the common case being done
+  // by hand. The rule is server-side -- see useAutoPick().
+  // The list on screen is a window (three weeks back, six months on) while
+  // the rule that answers is not, so what comes back is narrowed to dates
+  // this form can actually show. A ticked session with no row to tick is the
+  // "12 of 12 chosen" disagreement nobody can debug from the screen.
+  const shown = useRef([]);
+  useEffect(() => { shown.current = sessions; }, [sessions]);
+
+  useAutoPick({ classId, clientId, startsOn: start, total: need }, r => {
+    const have = new Set(shown.current.map(x => x.id));
+    const ids = r.session_ids.filter(id => have.has(id));
+    setChosen(ids);
+    const last = shown.current.reduce(
+      (m, x) => (ids.includes(x.id) && x.starts_at > m ? x.starts_at : m), 0);
+    setEndsOn(last ? isoDay(last) : '');
+    // Back to following the picks. The cap applies to a date reception
+    // typed, and this answer supersedes it: keeping it would hide the very
+    // sessions just chosen for them.
+    setEndsTouched(false);
+    setAuto({ ...r, filled: ids.length });
+  });
+
   const onClassChange = id => {
     setClassId(id);
     load(id);
+    setAuto(null);
   };
 
   const onNeedChange = e => {
@@ -149,7 +181,11 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
         </div>
       </div>
       <div className="fieldrow">
-        <div><label>STARTS ON</label><input type="date" value={start} onChange={e => setStart(e.target.value)} /></div>
+        <div>
+          <label>STARTS ON</label>
+          <input type="date" value={start} onChange={e => setStart(e.target.value)} />
+          <div className="hint">Picks the sessions below, from this day on.</div>
+        </div>
         <div>
           <label>ENDS ON</label>
           <input type="date" value={endsOn}
@@ -182,6 +218,19 @@ export default function PlanPicker({ clientId, presetClassId, classes, onSaved }
         <span className={'pill ' + (chosen.length === need ? 'ok' : 'warn')}>{chosen.length} of {need} chosen</span>
       </div>
       <div className="sub" style={{ margin: '6px 0 10px' }}>{hint}</div>
+      {auto && (auto.filled < need || auto.past > 0) && (
+        <div className="warnline" style={{ margin: '0 0 10px' }}>
+          {auto.filled < need && (
+            <>Only {auto.filled} of {need} sessions could be filled from {start} —
+              schedule more, or sell a shorter plan. </>
+          )}
+          {auto.past > 0 && (
+            <>{auto.past} of the dates picked have already been and gone, so
+              {auto.past === 1 ? ' it is' : ' they are'} recorded as absent when this
+              saves — untick {auto.past === 1 ? 'it' : 'them'} if that is not right.</>
+          )}
+        </div>
+      )}
       <div className="row" style={{ marginBottom: 8 }}>
         <button className="sm" onClick={() => setChosen(earliestUpcoming(offered, need))}>Auto-fill earliest</button>
         <button className="sm" onClick={() => setChosen([])}>Clear</button>
