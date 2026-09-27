@@ -15,6 +15,7 @@ from pydantic import BaseModel
 import access
 import cards
 import db
+import door
 import repo as data
 
 router = APIRouter()
@@ -272,3 +273,35 @@ def plan_update(body: PlanUpdateIn):
                             status_code=200)
     finally:
         repo.close()
+
+
+@router.get("/api/access/door")
+def door_state():
+    """
+    Whether there is a door to open at all.
+
+    The kiosk asks once on load and hides its line and its button when the
+    answer is no -- which is the state a laptop with no lock settings in
+    `.env` is in, and is exactly how the screen behaved before the door
+    existed. One question with one answer; see door.configured().
+    """
+    return {"configured": door.configured()}
+
+
+@router.post("/api/access/door/open")
+def open_door():
+    """
+    Unlock the door.
+
+    Deliberately takes nothing. The door is not per-client -- it is a door --
+    and an argument-free call is what lets the manual button and the
+    automatic one after a check-in be the same request rather than two
+    paths that can drift.
+
+    **Always 200.** A failed unlock is an outcome to be shown, not an error
+    to be raised: by the time this is called the check-in is already
+    recorded, and answering with a 500 would make a slot that was spent look
+    like a request that failed. `ok` carries the verdict and `detail` is a
+    sentence reception can act on.
+    """
+    return door.open_door()

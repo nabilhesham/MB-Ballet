@@ -13,12 +13,19 @@ Two surfaces:
 - `/` — dashboard and all management screens
 - `/reception` — kiosk check-in screen, fullscreen
 
-**Phase 1 (current): laptop only, no door hardware.** Reception opens the door
-manually after seeing the verdict. The maglock/Raspberry Pi build is deferred
-until this has run with real clients. Do not add door-hardware code unless asked.
+**The door opens on a valid check-in.** The academy's lock is an **EZVIZ
+DL05**, and `door.py` unlocks it through EZVIZ's cloud — see "The door"
+below. Reception still opens it by hand whenever that fails, which is the
+whole reason the unlock is a step *after* the check-in rather than a gate on
+it.
 
-**Phase 2 (designed for, not built):** a Pi at the door calls the same
-`/api/access/verify` and drives a relay. Keep that contract stable.
+**This replaces the Raspberry-Pi-at-the-door design this document used to
+describe**, and the reasons are worth keeping: a Pi calling
+`/api/access/verify` would have forced the server onto the LAN, and
+`server.py` binds to `127.0.0.1` with no authentication at all — that is the
+entire security model. Driving the lock *outbound from the laptop* needs no
+authentication work, no port forwarding, no static IP and no inbound
+anything.
 
 ## Stack
 
@@ -197,6 +204,9 @@ identity.py       What makes two client records the same person: the mobile
                   them.
 tokens.py         Signed token issue/parse. HMAC-SHA256. No I/O.
 access.py         Access rules: verify / check_in / undo / swap_and_check_in.
+door.py           The smart lock. configured() and open_door(), which never
+                  raises -- the door is a step after the check-in, never a
+                  gate on it. See the door section below.
 cards.py          Member card PNG generation, and cards.issue() --
                   credential + PNG + stamped URL in one step, shared by
                   the profile's Issue/Reissue and the desk renewal.
@@ -299,7 +309,13 @@ cards/  photos/   Only on an install older than images.py: the files those
                   been read in. Not in git. `cleanup.sh` removes them.
 academy.db        The database, pictures included. Not in git. This IS the
                   business record.
-.env              ENTRY_SECRET and the MB_ settings. Not in git, ever.
+.ezviz_token.json  The door's cached EZVIZ session, and .bind beside it: the
+                  phone the lock is told the unlock came from. Both grant
+                  door access, so both are gitignored and written 0600.
+                  Beside academy.db on purpose -- see
+                  config.ezviz_token_file().
+.env              ENTRY_SECRET, the MB_ settings and the EZVIZ_ ones the
+                  door reads. Not in git, ever.
                   There is exactly ONE of these, here, in the source
                   folder -- a build bakes its values into the binary
                   rather than the app growing a second copy beside
@@ -1742,7 +1758,10 @@ fixes the key-autorepeat false positive. Blocked on having the hardware.
   shows.
 - **Camera** — `BarcodeDetector` where available, jsQR from CDN otherwise.
 - **Number** — the member number typed in, for an unplugged scanner or a card
-  the camera will not focus on.
+  the camera will not focus on. **Enter submits and there is no button**,
+  matching the name box beside it: typing a number and then reaching for
+  the mouse is two gestures for one intention, and the receptionist's hands
+  are already on the keyboard because she just typed it.
 - **Name** — search the client list and pick one, for the client who left the
   card at home and does not know their number, which is most of them.
 
@@ -1907,6 +1926,96 @@ of the plan just sold. Which is also why the button under it reads
 **CHECK IN** there rather than CHECK IN ANYWAY: that wording is for a scan
 that matched nothing and is being let in regardless, and this one has a
 session and a slot to spend on it.
+
+### The door
+
+The academy's lock is an **EZVIZ DL05**. `door.py` unlocks it; the kiosk
+calls `POST /api/access/door/open` after a check-in, and the **Open door**
+button under Dashboard in the sidebar is the same call.
+
+**The door is a step after the check-in, never a gate on it.** By the time
+anything in `door.py` runs, the slot is spent and the attendance is
+written. That ordering is the whole design and everything else follows from
+it: `open_door()` **never raises**, the route **always answers 200**, and a
+failure is an amber line under the verdict rather than a change to it. An
+exception on this path would turn a recorded check-in into a 500 on the
+kiosk; a red verdict would tell the room a paying client had been refused
+when the only thing that failed was a lock.
+
+**Two cloud calls, not four**, which is what makes it usable with somebody
+standing at the counter:
+
+```
+PUT .../DoorLockMgr/QueryRemoteUnlockRandomCode  -> randomCode
+PUT .../DoorLockMgr/RemoteUnlockReq              bindCode + randomCode
+```
+
+The two that were dropped are a login on every unlock (the library refreshes
+only on a real 401, so the cached session is used as-is) and a
+`get_terminals()` lookup for the phone bind (stable, so it is cached in
+`.ezviz_token.json.bind` and re-fetched only when missing, or once when the
+lock stops accepting it). The unlock is fired without being awaited by the
+screen, so the check-in confirmation is never behind it.
+
+**A rejection arrives as HTTP 200 with a code in the body**, so the library
+does not raise and a refused unlock read as an open door until `_checked()`
+existed. Every response goes through it.
+
+**The lock is told the unlock came from a bound phone**, which is why a
+terminal has to be named at all. The most recently used real phone on the
+account is picked, skipping this integration's own terminal — a bind
+pointing at the thing doing the asking is not a phone the lock accepts.
+
+**Outbound only, and that is what keeps the security model intact.** Nothing
+connects *to* the laptop: no port forward, no static IP, no LAN exposure,
+and `server.py` still binds to `127.0.0.1`. The cost is that the door is the
+one feature in this app that needs the internet, next to a rule that keeps
+reception on SQLite precisely so everything else does not. When the line is
+down the lock's keypad, fingerprint and key all still work, and the verdict
+is still on screen.
+
+**A failure has two halves**, the same split the deny messages use: `detail`
+is the whole sentence reception reads and ends in what to do ("The lock did
+not open — open the door by hand"), and `technical` carries the code or the
+exception. The kiosk shows the first and never the second; the route prints
+the second, which is the only thing that explains a fault weeks later.
+
+**`configured()` is one question with one answer: is `EZVIZ_LOCK_SERIAL`
+set?** There is deliberately no `DOOR_BACKEND` switch — "is a lock set up"
+is already answered by whether the settings are in `.env`, and two switches
+for one fact eventually disagree. Unset, the kiosk shows no door line and no
+button, which is exactly how the screen behaved before the door existed.
+
+**Every path that spends a slot opens the door**, which today is the
+automatic check-in after a scan or a lookup, and the MANUAL CHECK-IN swap. A
+client let in by one and not the other is a difference nobody can explain at
+the counter. Undo is the one asymmetry and cannot be otherwise: a door
+already opened cannot be un-opened, so undoing a check-in refunds the
+session and nothing else.
+
+**`pyezvizapi` needs Python 3.12**, so `requirements.txt` installs it under
+a version marker and `door.py` imports it *inside* its functions. Both are
+load-bearing rather than tidy: an unmarked requirement makes
+`pip install -r requirements.txt` fail outright on a 3.11 machine — taking
+the whole app down over the one optional feature — and a module-level import
+would do the same at startup. A laptop without it legitimately has no door,
+reported as a sentence. `tests/test_door.py` stubs the library for the same
+reason: a suite that imported it for real could not run on 3.11 either.
+
+**The cached session and the bind live beside `academy.db`**, from
+`config.ezviz_token_file()`, and not in the working directory. The script
+this came from defaulted to a relative path, and a packaged build reads its
+assets out of a folder that is wiped on exit — a session cached there is
+gone on every close, so every first unlock of the day would pay a full
+login, or fail outright on a laptop whose EZVIZ password is not in `.env`.
+Both files are written 0600 and are gitignored: they grant door access, so
+they are treated exactly like `.env`.
+
+**The first sign-in is not the app's job.** It can want an SMS code, and
+nothing here is attached to a console to type one into — so
+`unlock_dl05_fast.py`, the standalone script this was ported from, is where
+an interactive login belongs. The app uses the session it caches, and says
+so when there is none.
 
 ### Taking the payment at the desk
 
@@ -2094,6 +2203,17 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       `access.UNPAID_GRACE_SESSIONS` is a constant. If the academy ever
       wants "this family always pays at the end of the month", that is a
       field on the client, not a bigger number here.
+- [ ] The door has no audit trail. `access_events` records the scan and the
+      check-in; whether the lock physically opened is a hardware outcome
+      the receptionist is watching in real time, and storing it would be
+      schema churn for something nobody queries. Easy to add if it turns
+      out to be wanted -- and the one thing it would answer is "did the
+      door actually open for her on Tuesday", which is not currently
+      answerable.
+- [ ] The door depends on the internet and on EZVIZ's cloud staying up,
+      which is the one place this app does. Nothing here queues an unlock
+      for later: an unlock that arrives late is worse than one that never
+      arrived, since the person it was for has gone.
 - [ ] Rotating phone tokens: `access.py` has the `kind='phone'` path with a 90s
       freshness window, but nothing generates them client-side.
 - [ ] `settle_past_sessions` runs in-process. If the laptop is off overnight it
@@ -2693,3 +2813,10 @@ problem, and half of it is worse than none.
   refuses to start without it.
 - Binds to `127.0.0.1` only. Do not expose on the LAN without adding auth first.
 - `academy.db` is the entire business record. Back it up.
+- **The door's files grant door access.** `.ezviz_token.json` and
+  `.ezviz_token.json.bind` are as sensitive as `ENTRY_SECRET`: anyone
+  holding them can unlock the academy's front door from anywhere. Never
+  commit them, never paste them into a chat or an issue, and if one leaks,
+  change the EZVIZ password — which invalidates the session — rather than
+  just deleting the file. `door.py` writes both 0600, and the unlock stays
+  outbound so nothing on the network can ask this laptop to open it.

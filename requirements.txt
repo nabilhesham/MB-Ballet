@@ -24,3 +24,14 @@ pymongo>=4.6
 # without this the macOS binary dies at startup with CERTIFICATE_VERIFY_FAILED
 # against Atlas. See repo/mongo/client.py's ca_file().
 certifi
+
+# The door. Remote-unlocks the academy's EZVIZ DL05 after a check-in --
+# see door.py.
+#
+# The marker is load-bearing rather than tidy: this package requires Python
+# 3.12, and an unmarked line would make `pip install -r requirements.txt`
+# fail outright on a 3.11 machine -- taking the whole app down over the one
+# feature that is optional. Marked, a 3.11 laptop installs everything else
+# and simply has no door, which door.py reports as a sentence rather than a
+# crash. START.bat installs 3.12, so the reception laptop gets it.
+pyezvizapi>=1.0.5.0; python_version >= "3.12"

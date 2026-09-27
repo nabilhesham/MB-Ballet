@@ -1,0 +1,374 @@
+"""
+The door: unlocking the academy's EZVIZ DL05 after a check-in.
+
+`pyezvizapi` is stubbed throughout. It needs Python 3.12 and is installed
+under a marker, so a suite that imported it for real would be a suite that
+cannot run on a 3.11 machine -- and the point being protected here is not
+EZVIZ's wire format anyway. It is the shape around it:
+
+  * a failure is an answer, never an exception, because by the time the
+    door is touched the check-in is already recorded;
+  * that answer has two halves -- a sentence reception acts on, and the
+    code behind it, which the kiosk never shows;
+  * a rejection arrives as HTTP 200 with a code in the body, so it must not
+    read as a success;
+  * the cached bind is retried once when the lock stops accepting it;
+  * the token and bind files are written 0600 beside academy.db, and the
+    token is re-saved even when the unlock failed.
+"""
+
+import json
+import os
+import stat
+import sys
+import types
+
+import pytest
+
+import config
+import door
+
+
+# --------------------------------------------------------------- the stub
+class FakeClient:
+    """Records what door.py asks for, and answers what it is told to."""
+
+    def __init__(self, *a, **kw):
+        self.init_args, self.init_kw = a, kw
+        self.calls = []
+        self.closed = False
+        self._token = {"session_id": "s", "feature_code": "me"}
+        # Set by each test before use.
+        self.random_code = "4242"
+        self.unlock_code = 200
+        self.terminals = [{"sign": "SIGN", "userId": "UID", "name": "iphone",
+                           "lastModifytime": "2"}]
+        self.unlock_attempts = 0
+
+    def _request_json(self, method, path, json_body=None, **kw):
+        self.calls.append((method, path, json_body))
+        if path.endswith("QueryRemoteUnlockRandomCode"):
+            return {"meta": {"code": 200}, "data": {"randomCode": self.random_code}}
+        if path.endswith("RemoteUnlockReq"):
+            self.unlock_attempts += 1
+            code = (self.unlock_code(self.unlock_attempts)
+                    if callable(self.unlock_code) else self.unlock_code)
+            return {"meta": {"code": code, "message": "no",
+                             "moreInfo": {"msgDetail": "bad bind"}}}
+        raise AssertionError(f"unexpected call {path}")
+
+    def get_terminals(self, **kw):
+        self.calls.append(("get_terminals", None, None))
+        return {"terminals": self.terminals}
+
+    def login(self, sms_code=None):
+        self.calls.append(("login", None, None))
+        return {}
+
+    def close_session(self):
+        self.closed = True
+
+
+@pytest.fixture
+def ez(tmp_path, monkeypatch):
+    """A stubbed pyezvizapi, and a token file in a throwaway folder."""
+    made = []
+
+    class Auth(Exception):
+        pass
+
+    mod = types.ModuleType("pyezvizapi")
+
+    def factory(*a, **kw):
+        c = FakeClient(*a, **kw)
+        made.append(c)
+        return c
+
+    mod.EzvizClient = factory
+    mod.EzvizAuthVerificationCode = Auth
+    monkeypatch.setitem(sys.modules, "pyezvizapi", mod)
+
+    monkeypatch.setenv("EZVIZ_LOCK_SERIAL", "bk5433560")
+    monkeypatch.setenv("EZVIZ_TOKEN_FILE", str(tmp_path / ".ezviz_token.json"))
+    monkeypatch.delenv("EZVIZ_BIND_CODE", raising=False)
+    monkeypatch.delenv("EZVIZ_TERMINAL", raising=False)
+    monkeypatch.delenv("EZVIZ_EMAIL", raising=False)
+    monkeypatch.delenv("EZVIZ_PASSWORD", raising=False)
+    # A cached session, which is the warm path every unlock but the first
+    # takes.
+    (tmp_path / ".ezviz_token.json").write_text(
+        json.dumps({"session_id": "s", "feature_code": "me"}))
+    return types.SimpleNamespace(made=made, dir=tmp_path,
+                                 token=tmp_path / ".ezviz_token.json",
+                                 bind=tmp_path / ".ezviz_token.json.bind")
+
+
+# --------------------------------------------------------------- is there one
+def test_no_serial_means_no_door(monkeypatch):
+    """The state a laptop with no lock settings is in, and the one that has
+    to behave exactly as the app did before any of this existed."""
+    monkeypatch.delenv("EZVIZ_LOCK_SERIAL", raising=False)
+    assert door.configured() is False
+    r = door.open_door()
+    assert r["ok"] is False and "No door" in r["detail"]
+
+
+def test_a_serial_is_the_whole_question(monkeypatch):
+    monkeypatch.setenv("EZVIZ_LOCK_SERIAL", "BK5433560")
+    assert door.configured() is True
+
+
+def test_the_token_lives_beside_the_database(monkeypatch):
+    """Not in the working directory: a packaged build reads its assets from a
+    temporary folder that is wiped on exit, so a session cached there is
+    gone every time the app closes."""
+    monkeypatch.delenv("EZVIZ_TOKEN_FILE", raising=False)
+    assert os.path.dirname(config.ezviz_token_file()) == config.app_dir()
+
+
+# --------------------------------------------------------------- the unlock
+def test_the_warm_path_is_two_calls(ez):
+    ez.bind.write_text("SIGNUID")
+    r = door.open_door()
+    assert r["ok"] is True, r
+    assert r["detail"] == "Door opened"
+    paths = [c[1] for c in ez.made[0].calls]
+    assert len(paths) == 2, paths
+    assert paths[0].endswith("QueryRemoteUnlockRandomCode")
+    assert paths[1].endswith("RemoteUnlockReq")
+
+
+def test_the_serial_is_upper_cased_into_the_path(ez):
+    """`.env` may hold it in either case; the cloud path is the serial."""
+    ez.bind.write_text("SIGNUID")
+    door.open_door()
+    assert "/BK5433560/DoorLock/" in ez.made[0].calls[0][1]
+
+
+def test_the_one_time_code_is_carried_into_the_unlock(ez):
+    ez.bind.write_text("SIGNUID")
+    door.open_door()
+    sent = ez.made[0].calls[1][2]["value"]["unLockInfo"]
+    assert sent["randomCode"] == "4242"
+    assert sent["bindCode"] == "SIGNUID"
+    assert sent["type"] == door.REMOTE_UNLOCK_TYPE
+
+
+def test_a_rejection_is_not_a_success(ez):
+    """EZVIZ answers a refusal with HTTP 200 and a code in the body, so the
+    library does not raise. Without the check this read as an open door."""
+    ez.bind.write_text("SIGNUID")
+    client = None
+
+    def one_client(*a, **kw):
+        nonlocal client
+        client = FakeClient(*a, **kw)
+        client.unlock_code = 10002
+        return client
+
+    sys.modules["pyezvizapi"].EzvizClient = one_client
+    r = door.open_door()
+    assert r["ok"] is False
+    # The receptionist's half says what to do and carries no code...
+    assert r["detail"] == "The lock did not open — open the door by hand"
+    # ...and the code is kept, in the half the kiosk never shows.
+    assert "10002" in r["technical"]
+
+
+def test_nothing_raises_out_of_it(ez):
+    """The property the whole design rests on. A check-in is already
+    recorded by the time this runs; an exception here would turn a spent
+    slot into a 500 on the kiosk."""
+    def explode(*a, **kw):
+        raise ValueError("the network fell over")
+
+    sys.modules["pyezvizapi"].EzvizClient = explode
+    r = door.open_door()
+    assert r["ok"] is False
+    assert "open the door by hand" in r["detail"]
+    assert "fell over" in r["technical"]
+    assert isinstance(r["ms"], int)
+
+
+def test_a_missing_library_says_so(ez, monkeypatch):
+    """A 3.11 laptop installs everything but pyezvizapi -- see the marker in
+    requirements.txt -- and must still run, with no door."""
+    monkeypatch.delitem(sys.modules, "pyezvizapi")
+    monkeypatch.setattr(door, "_load_token", lambda: {"session_id": "s"})
+
+    import builtins
+    real = builtins.__import__
+
+    def no_ezviz(name, *a, **kw):
+        if name == "pyezvizapi":
+            raise ImportError("No module named 'pyezvizapi'")
+        return real(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_ezviz)
+    r = door.open_door()
+    assert r["ok"] is False
+    assert "not installed" in r["detail"]
+    assert "open the door by hand" in r["detail"]
+
+
+# --------------------------------------------------------------- the bind
+def test_the_bind_is_looked_up_once_and_cached(ez):
+    assert not ez.bind.exists()
+    assert door.open_door()["ok"] is True
+    assert ez.bind.read_text() == "SIGNUID"
+    assert any(c[0] == "get_terminals" for c in ez.made[0].calls)
+
+    # Second unlock: no lookup at all, which is the round trip this saves.
+    door.open_door()
+    assert not any(c[0] == "get_terminals" for c in ez.made[1].calls)
+
+
+def test_a_stale_bind_is_refetched_once(ez):
+    """The phone was re-registered or the app reinstalled. The first unlock
+    is refused, the bind is looked up again, and the second succeeds --
+    without the receptionist knowing anything happened."""
+    ez.bind.write_text("OLDBIND")
+    client = None
+
+    def one(*a, **kw):
+        nonlocal client
+        client = FakeClient(*a, **kw)
+        client.unlock_code = lambda n: 10002 if n == 1 else 200
+        return client
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    assert door.open_door()["ok"] is True
+    assert client.unlock_attempts == 2
+    assert ez.bind.read_text() == "SIGNUID"
+
+
+def test_a_freshly_fetched_bind_is_not_retried(ez):
+    """A genuine refusal must not be asked twice for nothing."""
+    client = None
+
+    def one(*a, **kw):
+        nonlocal client
+        client = FakeClient(*a, **kw)
+        client.unlock_code = 10002
+        return client
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    assert door.open_door()["ok"] is False
+    assert client.unlock_attempts == 1
+
+
+def test_a_bind_named_in_the_env_is_never_looked_up(ez, monkeypatch):
+    monkeypatch.setenv("EZVIZ_BIND_CODE", "FROMENV")
+    door.open_door()
+    assert not any(c[0] == "get_terminals" for c in ez.made[0].calls)
+    assert ez.made[0].calls[1][2]["value"]["unLockInfo"]["bindCode"] == "FROMENV"
+
+
+def test_this_integrations_own_terminal_is_not_chosen(ez):
+    """A bind pointing at the thing doing the asking is not a phone the lock
+    accepts. `feature_code` on the cached token is how it is recognised."""
+    def one(*a, **kw):
+        c = FakeClient(*a, **kw)
+        c.terminals = [
+            {"sign": "me", "userId": "U1", "name": "Hassio", "lastModifytime": "9"},
+            {"sign": "SIGN", "userId": "UID", "name": "iphone", "lastModifytime": "2"},
+        ]
+        ez.made.append(c)
+        return c
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    door.open_door()
+    assert ez.bind.read_text() == "SIGNUID"
+
+
+def test_no_bound_phone_says_what_to_do(ez):
+    def one(*a, **kw):
+        c = FakeClient(*a, **kw)
+        c.terminals = []
+        ez.made.append(c)
+        return c
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    r = door.open_door()
+    assert r["ok"] is False
+    assert "EZVIZ app" in r["detail"]
+    assert "open the door by hand" in r["detail"]
+
+
+# --------------------------------------------------------------- the files
+def test_both_files_are_private(ez):
+    door.open_door()
+    for f in (ez.token, ez.bind):
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f
+
+
+def test_the_session_is_kept_even_when_the_unlock_failed(ez):
+    """The library may have refreshed it mid-request, and throwing that away
+    would make the next unlock pay a login it does not need."""
+    ez.bind.write_text("SIGNUID")
+
+    def one(*a, **kw):
+        c = FakeClient(*a, **kw)
+        c.unlock_code = 10002
+        c._token = {"session_id": "refreshed", "feature_code": "me"}
+        ez.made.append(c)
+        return c
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    assert door.open_door()["ok"] is False
+    assert json.loads(ez.token.read_text())["session_id"] == "refreshed"
+
+
+def test_the_http_session_is_always_closed(ez):
+    ez.bind.write_text("SIGNUID")
+    door.open_door()
+    assert ez.made[0].closed is True
+
+
+def test_no_saved_session_and_no_password_is_a_sentence(ez):
+    """An interactive first login needs an SMS code typed at a console, and
+    nothing is attached to one here -- so it says where to do it instead."""
+    ez.token.unlink()
+    r = door.open_door()
+    assert r["ok"] is False
+    # Plain on screen, specific in the log.
+    assert "needs setting up again" in r["detail"]
+    assert "EZVIZ_EMAIL" in r["technical"]
+
+
+# --------------------------------------------------------------- over HTTP
+@pytest.fixture
+def client(academy):
+    from fastapi.testclient import TestClient
+    import server
+    with TestClient(server.app) as c:
+        yield c
+
+
+def test_the_kiosk_can_ask_whether_there_is_a_door(client, monkeypatch):
+    monkeypatch.delenv("EZVIZ_LOCK_SERIAL", raising=False)
+    assert client.get("/api/access/door").json() == {"configured": False}
+    monkeypatch.setenv("EZVIZ_LOCK_SERIAL", "BK5433560")
+    assert client.get("/api/access/door").json() == {"configured": True}
+
+
+def test_a_failed_unlock_is_still_a_200(client, monkeypatch):
+    """Not an error to raise: the check-in that led here is already
+    recorded, and a 500 would make a spent slot look like a failed
+    request."""
+    monkeypatch.setattr(door, "open_door",
+                        lambda: {"ok": False, "detail": "nope", "ms": 3})
+    r = client.post("/api/access/door/open")
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+
+
+def test_the_open_call_takes_no_arguments(client, monkeypatch):
+    """Which is what lets the manual button and the automatic unlock after a
+    check-in be the same request rather than two that can drift."""
+    seen = []
+    monkeypatch.setattr(door, "open_door",
+                        lambda: (seen.append(1), {"ok": True, "detail": "Door opened",
+                                                  "ms": 1})[1])
+    assert client.post("/api/access/door/open").json()["ok"] is True
+    assert len(seen) == 1

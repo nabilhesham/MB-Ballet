@@ -1,4 +1,11 @@
 .env
+
+# The door's cached EZVIZ session and the phone bind it unlocks with. Both
+# grant door access, so they are treated exactly like .env -- never
+# committed. door.py writes them 0600 beside academy.db.
+.ezviz_token.json
+.ezviz_token.json.bind
+
 academy.db
 academy.db-wal
 academy.db-shm

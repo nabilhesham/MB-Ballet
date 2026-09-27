@@ -246,3 +246,43 @@ def mongo_hosts() -> str:
     _, _, rest = uri.partition("://")          # drop mongodb:// or mongodb+srv://
     rest = rest.rpartition("@")[2] or rest     # drop user:pass@ if present
     return rest.split("/")[0].split("?")[0] or "an unnamed host"
+
+
+# ---------------------------------------------------------------- the door
+#
+# The smart lock's settings keep the EZVIZ_ names the standalone unlock
+# script used, rather than being renamed to MB_: the academy's `.env`
+# already carries them under those names, and a rename would be a silent
+# door that stops opening. They are read here rather than in door.py for
+# the one that is genuinely a "where do the files live" question -- see
+# ezviz_token_file().
+
+
+def ezviz_serial() -> str:
+    """The lock's serial, e.g. BK5433560. Empty means no door is set up."""
+    return (os.environ.get("EZVIZ_LOCK_SERIAL") or "").strip().upper()
+
+
+def ezviz_region() -> str:
+    return os.environ.get("EZVIZ_REGION") or "apiieu.ezvizlife.com"
+
+
+def ezviz_token_file() -> str:
+    """
+    Where the cached EZVIZ session lives.
+
+    **Beside `academy.db`, not in the working directory**, and that is the
+    same trap `app_dir()` exists for: the script this came from defaulted to
+    a relative `./.ezviz_token.json`, and a packaged build reads its assets
+    out of a temporary folder that is wiped on exit. A session cached there
+    is gone every time the app closes, so every first unlock of the day
+    would pay a full login -- or fail outright on a laptop whose EZVIZ
+    password is not in `.env`.
+
+    The file grants door access. It is written 0600 by door.py and is
+    gitignored, alongside `.env` and the database.
+    """
+    named = os.environ.get("EZVIZ_TOKEN_FILE")
+    if named:
+        return os.path.abspath(os.path.expanduser(named))
+    return os.path.join(app_dir(), ".ezviz_token.json")

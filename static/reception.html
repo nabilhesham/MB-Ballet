@@ -131,6 +131,15 @@
   .swapnone{color:var(--dim);font-size:12.5px;padding:10px 2px}
   #manual,#swapGo,#renewBtn,#renewGo,#planBtn,#planGo{display:none}
 
+  /* The door. Amber on failure rather than red, on purpose: a lock that did
+     not open means "go and open it", not "something is wrong with this
+     client" -- and the client's verdict is the red or green word above,
+     which the door never touches. */
+  .doorline{margin-top:12px;font-size:13.5px;min-height:19px;color:var(--dim);
+            font-family:var(--mono);letter-spacing:.02em;text-align:center}
+  .doorline.ok{color:var(--ok)}
+  .doorline.bad{color:var(--warn)}
+
   /* Renewing at the desk. Same panel idiom as the swap above — an inline
      block, not a modal: the kiosk has no modal machinery and does not want
      any, and a form the receptionist reads at arm's length is better wide
@@ -312,6 +321,10 @@
       <button id="planGo">SAVE PLAN</button>
       <button id="undo" class="danger">Undo</button>
     </div>
+    <!-- The door's own line, deliberately separate from the key hints
+         below it: the verdict above never changes because of the lock, and
+         a failed unlock must not read as a refused client. -->
+    <div class="doorline" id="doorline"></div>
     <div class="keys" id="keys">Esc to clear</div>
   </div>
 </main>
@@ -331,10 +344,12 @@
     <label style="margin-top:4px">MEMBER NUMBER</label>
     <input id="manualId" type="text" inputmode="numeric" placeholder="e.g. 7 or 00007"
            autocomplete="off">
-    <button class="pri sm" id="manualGo" style="width:100%;margin-top:8px;justify-content:center">
-      Look up client</button>
+    <!-- Enter submits, and there is no button. The name box beside this one
+         has never had one either: typing a number and reaching for the
+         mouse is two gestures for one intention, and the receptionist's
+         hands are already on the keyboard because she just typed it. -->
     <div class="sub" style="margin-top:8px;font-size:11px">
-      It is printed on the member card under the name.</div>
+      Press Enter. It is printed on the member card under the name.</div>
   </div>
 
   <!-- By name: for a client who has forgotten the card and does not know
@@ -366,7 +381,14 @@
 
   <div class="asidefoot">
     <a class="btn sm" href="/" style="width:100%;justify-content:center">Dashboard</a>
-  </div>
+    <!-- Letting somebody in without a scan: a parent collecting a child, an
+         instructor, a client whose unlock failed. Hidden entirely when no
+         lock is configured. Safe under the existing model for the same
+         reason every other screen here is -- the server answers on
+         127.0.0.1 only, from a laptop behind the counter. -->
+    <button class="btn sm" id="doorBtn"
+            style="width:100%;justify-content:center;margin-top:8px;display:none">
+      Open door</button>
 </aside>
 
 <script>
@@ -475,7 +497,6 @@ function lookupById(){
   $('manualId').value = '';
   lookupClient(id);
 }
-$('manualGo').onclick = lookupById;
 $('manualId').addEventListener('keydown', e => {
   if(e.key === 'Enter'){ e.preventDefault(); e.stopPropagation(); lookupById(); }
 });
@@ -751,6 +772,8 @@ function show(r, opts){
   $('swap').classList.remove('on'); $('swapGo').style.display='none';
   $('renew').classList.remove('on'); $('renewGo').style.display='none';
   $('planUpd').classList.remove('on'); $('planGo').style.display='none';
+  /* Last client's door result is not this one's. */
+  doorSay('');
   $('stats').style.display=''; $('recent').style.display='';
 
   /* Three states, not two. A refusal the server marked "warn" is amber and
@@ -969,6 +992,11 @@ async function doSwapCheckIn(){
     $('undo').classList.add('on');
     $('keys').textContent = keysBase = 'Esc to clear';
     beepOk();
+    /* A swap is a check-in — the same _log()/check_in() pair a scan goes
+       through — so it opens the door too. Every path that spends a slot
+       does; a client let in by one door and not the other is the kind of
+       difference nobody can explain at the counter. */
+    openDoor();
   }else{
     $('reason').textContent = r.error || 'Could not check them in';
     $('swapGo').disabled = false;
@@ -1223,6 +1251,57 @@ $('planGo').onclick = doPlanUpdate;
 
 
 
+/* ================================================================
+   THE DOOR
+
+   A valid check-in opens the lock. The order matters and is the whole
+   design: the check-in is recorded first and the door is a step after it,
+   never a gate on it. If the unlock fails the slot is still spent, the
+   attendance is still written, and reception opens the door by hand exactly
+   as they did before this existed — which is why the failure is an amber
+   line down here and not a change to the verdict above.
+
+   One call, no arguments (see POST /api/access/door/open), so the automatic
+   unlock and the Open door button in the sidebar are the same request.
+   ================================================================ */
+let doorHere = false;            /* is a lock configured at all? */
+
+async function doorReady(){
+  try{
+    const r = await (await fetch('/api/access/door')).json();
+    doorHere = !!r.configured;
+  }catch(e){ doorHere = false; }
+  /* No lock, no button and no line — the screen reverts to exactly what it
+     was before the door was wired in, with nothing to explain. */
+  $('doorBtn').style.display = doorHere ? 'inline-flex' : 'none';
+}
+
+function doorSay(text, cls){
+  const el = $('doorline');
+  el.textContent = text || '';
+  el.className = 'doorline' + (cls ? ' ' + cls : '');
+}
+
+async function openDoor(){
+  if(!doorHere) return;
+  const btn = $('doorBtn');
+  btn.disabled = true;
+  doorSay('opening the door…');
+  let r;
+  try{
+    r = await (await fetch('/api/access/door/open', {method:'POST'})).json();
+  }catch(e){ r = {ok:false,
+                  detail:'The app could not be reached — open the door by hand'}; }
+  btn.disabled = false;
+  /* Shown verbatim: door.py writes the whole sentence, ending in what to
+     do about it. `technical` is deliberately not read here -- the route
+     logs that, and a code on the kiosk is a code nobody can act on. */
+  doorSay(r.detail || (r.ok ? 'Door opened' : 'The door did not open'),
+          r.ok ? 'ok' : 'bad');
+  r.ok ? beepOk() : beepWarn();
+}
+$('doorBtn').onclick = openDoor;
+
 async function doCheckIn(){
   /* The auto path disables the button before calling in, so "already
      disabled" cannot be the guard any more — `done` is. */
@@ -1264,6 +1343,11 @@ async function doCheckIn(){
     }
     numbers(current);
     showRenew(renewOffered(current));
+    /* The door, now that the check-in is recorded. Deliberately not awaited
+       before the screen updates: the confirmation above is already on
+       screen, and the unlock is two cloud round trips that reception should
+       not be watching a frozen panel through. */
+    openDoor();
     if(r.sessions_remaining === 0){
       $('reason').textContent = 'That was their last session — offer a renewal';
     }
@@ -1293,6 +1377,7 @@ function reset(){
   $('renew').classList.remove('on');
   $('renewGo').style.display = 'none';
   $('renewBtn').style.display = 'none';
+  doorSay('');
   // Nor does Esc out of a half-typed plan update record a payment.
   $('planUpd').classList.remove('on');
   $('planGo').style.display = 'none';
@@ -1348,6 +1433,8 @@ async function refresh(){
 }
 
 updateIdle(); refresh(); setInterval(refresh, 20000);
+/* Asked once, on load: whether this laptop has a lock to open. */
+doorReady();
 </script>
 </body>
 </html>
