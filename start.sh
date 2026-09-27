@@ -9,9 +9,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; grn=$'\033[32m'; off=$'\033[0m'
+bold=$'\033[1m'; dim=$'\033[2m'; red=$'\033[31m'; grn=$'\033[32m'
+ylw=$'\033[33m'; off=$'\033[0m'
 step(){ printf "  %s%s%s\n" "$dim" "$1" "$off"; }
 ok(){   printf "  %s✓%s %s\n" "$grn" "$off" "$1"; }
+# Something is missing but the app still runs. Amber and no exit, unlike
+# die() -- the same distinction the kiosk makes between a stop and a warn.
+warn(){ printf "  %s!%s %s\n" "$ylw" "$off" "$1"; }
 die(){  printf "  %s✗ %s%s\n" "$red" "$1" "$off"; exit 1; }
 
 printf "\n  %sMB BALLET ACADEMY%s\n  %s──────────────────%s\n\n" "$bold" "$off" "$dim" "$off"
@@ -205,6 +209,24 @@ finally:
   esac
 fi
 ok "Database ready"
+
+# ---------------------------------------------------------------- the door
+# One line, and only when a lock is configured -- a laptop with no
+# EZVIZ_LOCK_SERIAL in .env has no door and nothing to report about it.
+#
+# The failure worth naming is the quiet one: pyezvizapi needs Python 3.12
+# and requirements.txt skips it below that without a word, so a machine on
+# 3.10 or 3.11 runs perfectly and simply never opens the lock. This is the
+# only place that says so before somebody is standing at the counter
+# wondering why the button is missing. Never blocks the launch -- same rule
+# pymongo follows above.
+if grep -qE '^EZVIZ_LOCK_SERIAL=.+' .env 2>/dev/null; then
+  if "$VPY" -c "import pyezvizapi" >/dev/null 2>&1; then
+    ok "Door ready"
+  else
+    warn "No door: pyezvizapi is missing, and it needs Python 3.12 (this is $("$VPY" -c 'import sys; print(sys.version.split()[0])')). Check-ins still work; reception opens the door by hand."
+  fi
+fi
 
 # ---------------------------------------------------------------- go
 printf "\n  %sStarting on http://127.0.0.1:8000%s\n" "$bold" "$off"

@@ -134,7 +134,13 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          # 3.12, not 3.11, and that is the door's requirement rather than a
+          # preference: pyezvizapi needs it, requirements.txt installs that
+          # under a `python_version >= "3.12"` marker, and on 3.11 pip skips
+          # the line without a word. The binary then builds, passes the smoke
+          # test, and has no door -- with nothing but a PyInstaller warning
+          # to say so. The step below turns that into a failed build instead.
+          python-version: '3.12'
           # macOS minutes cost 10x, so the dependency download is worth
           # caching even though it is the cheap half of this job.
           cache: 'pip'
@@ -164,10 +170,31 @@ jobs:
         # not one -- it is a decision, and one visible switch beats two
         # sources of truth that can disagree. The URI and database name stay
         # secrets, because the URI carries the password.
+        #
+        # **The door is the same trap one step along.** A packaged build
+        # reads the baked values and never a file, so the lock's serial has
+        # to be here or the binary has no door at all -- silently, because
+        # door.configured() answering "no" is a legitimate state and the
+        # kiosk simply shows nothing. EZVIZ_LOCK_SERIAL is therefore a
+        # secret like the others, and the step after this one fails the
+        # build when it was not given rather than shipping a door-less
+        # binary.
+        #
+        # **EZVIZ_EMAIL and EZVIZ_PASSWORD are deliberately NOT given to
+        # CI**, and academy.spec refuses to bake them even from a local
+        # `.env`. They are the account that opens the academy's front door,
+        # the app does not need them (the cached session beside the binary
+        # is the warm path, and an interactive first sign-in cannot happen
+        # in a server anyway), and anyone who can download an artifact can
+        # read what is inside it. A serial is a device id, useless on its
+        # own; a password is not.
         env:
           ENTRY_SECRET: ${{ secrets.ENTRY_SECRET }}
           MB_MONGO_URI: ${{ secrets.MB_MONGO_URI }}
           MB_MONGO_DB: ${{ secrets.MB_MONGO_DB }}
+          EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL }}
+          EZVIZ_REGION: ${{ secrets.EZVIZ_REGION }}
+          EZVIZ_TERMINAL: ${{ secrets.EZVIZ_TERMINAL }}
           BACKEND: ${{ inputs.backend }}
         run: |
           if [ -z "$ENTRY_SECRET" ]; then
@@ -197,8 +224,50 @@ jobs:
             echo "Baking: SQLite, an academy.db beside the binary."
             echo "Re-run with the backend input set to 'mongo' for a hosted build."
           fi
+
+          if [ -n "$EZVIZ_LOCK_SERIAL" ]; then
+            printf 'EZVIZ_LOCK_SERIAL=%s\n' "$EZVIZ_LOCK_SERIAL" >> .env
+            [ -n "$EZVIZ_REGION" ]   && printf 'EZVIZ_REGION=%s\n' "$EZVIZ_REGION" >> .env
+            [ -n "$EZVIZ_TERMINAL" ] && printf 'EZVIZ_TERMINAL=%s\n' "$EZVIZ_TERMINAL" >> .env
+            echo "Baking: the door. The binary still needs .ezviz_token.json"
+            echo "beside it -- the session is never baked in."
+          else
+            echo "Baking: NO DOOR. The EZVIZ_LOCK_SERIAL secret is not set,"
+            echo "so this binary will not open the lock and the kiosk will"
+            echo "show no door line and no Open door button."
+          fi
           # The keys only -- the URI carries the password and this is a log.
           echo "Baked keys: $(cut -d= -f1 .env | tr '\n' ' ')"
+
+      - name: Check the door made it in
+        # Two ways a door-less binary used to be buildable without a word,
+        # and both of them shipped: pip skips pyezvizapi on any Python below
+        # 3.12 because of the marker in requirements.txt, and a missing
+        # hiddenimport is a PyInstaller *warning*. Neither fails a build,
+        # the smoke test below does not touch the lock, and the symptom is a
+        # kiosk with no Open door button -- which is also what a correctly
+        # built binary looks like when no serial was given. Indistinguishable
+        # afterwards, so it is checked here instead.
+        #
+        # Skipped when no serial was baked, since a deliberately door-less
+        # build is a legitimate thing to ask for -- the step above says so in
+        # the log either way.
+        env:
+          EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL }}
+        run: |
+          if [ -z "$EZVIZ_LOCK_SERIAL" ]; then
+            echo "No serial baked, so there is no door to check."
+            exit 0
+          fi
+          python3 -c 'import pyezvizapi, sys; print("pyezvizapi", getattr(pyezvizapi, "__version__", "?"), "is present")' && exit 0
+          echo "pyezvizapi did not install."
+          python3 -VV
+          echo
+          echo "That package needs Python 3.12, and requirements.txt skips it"
+          echo "below that (the marker on its line) without a word. The binary"
+          echo "would build fine, pass the smoke test, and have no door."
+          echo "Fix python-version in this workflow rather than shipping it."
+          exit 1
 
       - name: Check the committed interface is there
         # static/app/ is the built React admin and is used exactly as
@@ -365,6 +434,31 @@ jobs:
               echo 'because the checkout has no `.env` at all.'
             fi
             echo
+            echo "### The door"
+            echo
+            if [ -n "${{ secrets.EZVIZ_LOCK_SERIAL }}" ]; then
+              echo 'This binary can unlock the academy'"'"'s EZVIZ lock on a check-in,'
+              echo 'and the kiosk shows an **Open door** button.'
+              echo
+              echo '**It needs the saved EZVIZ session beside it.** Copy'
+              echo '`.ezviz_token.json` (and `.ezviz_token.json.bind` if you have one)'
+              echo 'into the same folder as the binary, next to `academy.db`. The'
+              echo 'session is deliberately **not** baked in: it grants door access,'
+              echo 'and anyone who can download this artifact could read it.'
+              echo
+              echo 'Without that file the app still runs and check-ins still work —'
+              echo 'the kiosk just says the door needs setting up again, and reception'
+              echo 'opens it by hand.'
+            else
+              echo 'This binary has **no door**: the `EZVIZ_LOCK_SERIAL` secret was not'
+              echo 'set, so the kiosk shows no door line and no **Open door** button.'
+              echo 'Check-ins are unaffected.'
+              echo
+              echo 'Add `EZVIZ_LOCK_SERIAL` under Settings -> Secrets and variables ->'
+              echo 'Actions and re-run to get one. `EZVIZ_EMAIL` and `EZVIZ_PASSWORD`'
+              echo 'are deliberately never given to CI — the app does not need them.'
+            fi
+            echo
             echo
             echo 'If it starts and then exits, an `error.log` appears next to it. If it'
             echo 'says `bad CPU type in executable` it never started, so there is no'
@@ -450,15 +544,19 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: '3.11'
+          # Kept in step with `build` above, deliberately -- a canary testing
+          # a different Python from the one the build uses cannot catch the
+          # thing it exists to catch. See the door note there for why 3.12.
+          python-version: '3.12'
 
       - name: Prove Python is the version the build assumes
-        # If '3.11' ever stops being available on the image, the real build
+        # If '3.12' ever stops being available on the image, the real build
         # would either fail here or quietly embed something else in the
-        # binary reception runs.
+        # binary reception runs -- and on 3.11 specifically it would embed a
+        # binary with no door.
         run: |
           python3 -VV
-          python3 -c "import sys; assert sys.version_info[:2] == (3, 11), sys.version"
+          python3 -c "import sys; assert sys.version_info[:2] == (3, 12), sys.version"
 
       - name: Upload something, to exercise the artifact path
         # upload-artifact is the action whose majors do not line up with the

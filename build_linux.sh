@@ -127,6 +127,15 @@ BPY="$BUILD_VENV/bin/python"
 "$BPY" -m pip install --upgrade pyinstaller --quiet || die "Could not install the build tool"
 "$BPY" -m pip install -r requirements.txt --quiet || die "Could not install the app's own dependencies"
 
+# Did the door make it in? pyezvizapi needs Python 3.12, and
+# requirements.txt skips its line below that without a word -- so a build on
+# 3.10 or 3.11 produces a working binary with no door, and a missing hidden
+# import is only a PyInstaller warning nobody reads. Reported at the end
+# rather than fatal: a door-less build is a legitimate thing to want, and
+# `.env` decides whether there is a lock at all.
+DOOR=no
+"$BPY" -c "import pyezvizapi" >/dev/null 2>&1 && DOOR=yes
+
 step "[2/4] Refreshing the web interface…"
 # static/app/ (the built React interface) is already committed to the
 # repository, so this is a freshness check, not a requirement — a machine
@@ -166,6 +175,24 @@ printf "    Back up that whole folder, not just the file.\n\n"
 printf "    It needs no .env: the settings and the card-signing\n"
 printf "    key were built into it from this project's own .env,\n"
 printf "    so cards already printed still scan.\n\n"
+
+# The one thing in .env that is deliberately NOT inside the binary is the
+# EZVIZ password -- academy.spec drops it, because the binary is a file
+# people copy around and that password opens the academy's front door. The
+# saved session is not baked either, for the same reason, which is why it
+# has to be copied in by hand.
+if [ "$DOOR" = yes ]; then
+  printf "    The door is in. Copy .ezviz_token.json from this\n"
+  printf "    folder in beside the binary too: the saved EZVIZ\n"
+  printf "    session is deliberately not built in, because it\n"
+  printf "    opens the front door.\n\n"
+else
+  printf "    NO DOOR in this build: pyezvizapi is not installed\n"
+  printf "    in the build environment, and it needs Python 3.12.\n"
+  printf "    This one is %s. The binary works and check-ins work;\n" \
+         "$("$BPY" -V 2>&1)"
+  printf "    the kiosk just shows no Open door button.\n\n"
+fi
 printf "    Test it here first. If it exits immediately, an error.log\n"
 printf "    file will be sitting next to it explaining why.\n"
 printf "  ------------------------------------------------------------\n\n"

@@ -184,6 +184,8 @@ if "%DBSTATE%"=="empty" (
     echo    [6/7]  Database found
 )
 
+call :check_door
+
 echo    [7/7]  Starting
 echo.
 echo    ----------------------------------------------------------
@@ -367,6 +369,33 @@ REM start, and one that is offline at that moment would retry forever while
 REM SQLite -- the backend it actually runs -- needs none of it.
 "%VPY%" -c "import pymongo" >nul 2>&1
 if errorlevel 1 "%VPY%" -m pip install "pymongo>=4.6" --quiet --no-warn-script-location >nul 2>&1
+exit /b 0
+
+
+:check_door
+REM The door, and it NEVER blocks the launch -- same rule :check_mongo
+REM follows above. Only reported when a lock is configured: a laptop with no
+REM EZVIZ_LOCK_SERIAL in .env has no door and nothing to say about it.
+REM
+REM The failure worth naming is the quiet one. pyezvizapi needs Python 3.12
+REM and requirements.txt skips its line below that without a word, so a
+REM machine on 3.10 or 3.11 runs perfectly and simply never opens the lock.
+REM This is the only place that says so before somebody is at the counter
+REM wondering where the Open door button went.
+REM
+REM Every command here with a pipe or a redirect is outside the if-blocks
+REM below, for the parenthesis reason at the top of this file.
+set "HAVEDOOR="
+findstr /r /c:"^EZVIZ_LOCK_SERIAL=..*" .env >nul 2>&1 && set "HAVEDOOR=1"
+if not defined HAVEDOOR exit /b 0
+set "DOORLIB="
+"%VPY%" -c "import pyezvizapi" >nul 2>&1 && set "DOORLIB=1"
+if defined DOORLIB (
+    echo           Door ready
+) else (
+    echo           No door: the lock software needs Python 3.12 and is not
+    echo           installed here. Check-ins still work; open the door by hand.
+)
 exit /b 0
 
 

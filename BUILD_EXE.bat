@@ -67,6 +67,16 @@ echo   [1/4] Installing the build tool...
 "%PY%" -m pip install --upgrade pip pyinstaller --quiet
 "%PY%" -m pip install -r requirements.txt --quiet
 
+REM  Did the door make it in? pyezvizapi needs Python 3.12 and
+REM  requirements.txt skips its line below that without a word, so a build
+REM  on 3.10 or 3.11 produces a perfectly working exe with no door -- and a
+REM  missing hidden import is only a PyInstaller warning nobody reads. Said
+REM  here rather than discovered at the counter. Not fatal: a door-less
+REM  build is a legitimate thing to want, and the .env decides whether
+REM  there is a lock at all.
+set "DOOR=no"
+"%PY%" -c "import pyezvizapi" >nul 2>&1 && set "DOOR=yes"
+
 echo   [2/4] Refreshing the web interface...
 REM  static\app\ (the built React interface) is already committed to the
 REM  repository, so this step is a freshness check, not a requirement — a
@@ -125,6 +135,7 @@ echo     It needs no .env: the settings and the card-signing
 echo     key were built into it from this project's own .env,
 echo     so cards already printed still scan.
 echo.
+call :door_note
 echo     Test it here first. If the window opens and closes
 echo     straight away, an error.log file will be sitting next
 echo     to the .exe explaining why.
@@ -160,4 +171,23 @@ for %%C in (npm.cmd npm.exe) do (
         )
     )
 )
+exit /b 0
+
+
+REM  A subroutine for the same reason the others are: the if/else block
+REM  below is parsed as one group, so nothing inside it may contain a
+REM  parenthesis, a pipe or a redirect. Check the echo lines before editing.
+:door_note
+if "%DOOR%"=="yes" (
+    echo     The door is in. Copy .ezviz_token.json from this
+    echo     folder in beside the .exe as well -- the saved EZVIZ
+    echo     session is deliberately NOT built into the binary,
+    echo     because it opens the front door.
+) else (
+    echo     NO DOOR in this build: pyezvizapi is not installed
+    echo     here, and it needs Python 3.12. This machine has
+    echo     %PYVER%. The exe works, check-ins work, the kiosk
+    echo     just shows no Open door button. Build on 3.12 for one.
+)
+echo.
 exit /b 0

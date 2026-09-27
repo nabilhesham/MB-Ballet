@@ -85,6 +85,26 @@ def _bake_env(spec_dir, work_dir):
             "  checkout, running ./start.sh (or START.bat) once generates\n"
             "  one for you.\n".format(env_path))
 
+    # The door's password never travels inside the binary.
+    #
+    # Everything else in `.env` is baked, deliberately -- that is the whole
+    # point of this function. These two are the exception because they are
+    # the EZVIZ account that opens the academy's front door, the app does
+    # not need them (the cached session beside the binary is the warm path,
+    # and an interactive first sign-in with its SMS code cannot happen in a
+    # server anyway), and anyone who can get hold of the binary can read
+    # what is compiled into it. A serial is a device id and stays; a
+    # password that opens a door does not.
+    #
+    # Dropped here rather than asked of whoever runs the build, because a
+    # step like "remember to comment those two lines out first" gets skipped
+    # exactly when it matters.
+    DOOR_SECRETS = ("EZVIZ_EMAIL", "EZVIZ_PASSWORD")
+    dropped = [k for k in DOOR_SECRETS if values.pop(k, None)]
+    if dropped:
+        print("  Not baking {} -- they open the front door, and the app "
+              "does not need them.".format(", ".join(dropped)))
+
     baked_dir = os.path.join(work_dir, "baked")
     os.makedirs(baked_dir, exist_ok=True)
     with open(os.path.join(baked_dir, "_baked_env.py"), "w", encoding="utf-8") as f:

@@ -514,6 +514,21 @@ wrong-platform binary — `BUILD_EXE.bat` gets no equivalent guard, since a
 script that WSL, Git Bash, a Linux box and a Mac terminal can all run
 without complaint.
 
+**Every build says whether the door made it in**, because the one way it
+fails is silent. `BUILD_EXE.bat`, `build_mac.sh` and `build_linux.sh` each
+probe for `pyezvizapi` after installing the requirements and print the
+answer in their closing notes -- with the build Python's version, since 3.11
+is the whole reason it would be missing. Deliberately not fatal: a door-less
+build is a legitimate thing to want, and `.env` is what decides whether
+there is a lock at all.
+
+`start.sh` and `START.bat` report the same thing on the reception laptop,
+and only when a serial is configured -- one amber line, never blocking the
+launch, the same rule `pymongo` follows there. A receptionist finding the
+**Open door** button missing has no way to tell "no lock configured" from
+"the lock software is not installed", and this is the only place that
+distinction is visible.
+
 **No Mac to build on?** `.github/workflows/build-macos.yml` builds the macOS
 binary on a real GitHub-hosted Mac instead — trigger it from the Actions tab
 or `gh workflow run build-macos.yml` (both reachable from Windows/WSL), then
@@ -601,7 +616,7 @@ lands on the day somebody urgently needs a binary.
   costs no Actions minutes, running on GitHub's own infrastructure.
 - **The `canary` job** runs monthly (`0 7 1 * *`, UTC) and does only the
   fragile half: check out, prove the runner label still means the
-  architecture the matrix claims, set Python up and confirm it is 3.11,
+  architecture the matrix claims, set Python up and confirm it is 3.12,
   upload something. No PyInstaller and no smoke test, so about a minute of
   wall clock -- roughly 20-40 billed minutes a month across two
   architectures at the 10x multiplier, one to two percent of the free-tier
@@ -670,6 +685,35 @@ one thing about CI builds that has to be understood rather than remembered:
 not a thing that can happen. CI has never seen that file. `academy.spec` bakes
 whatever `.env` is in the tree at build time, and the workflow's own step is
 what puts one there, from repository secrets.
+
+**The door is the same trap one step along, and CI needs one more secret for
+it.** A packaged build reads the baked values and never a file, so
+`EZVIZ_LOCK_SERIAL` has to be among them or the binary has no door -- and
+silently, because `door.configured()` answering "no" is a legitimate state
+that the kiosk expresses by showing nothing at all. It is a repository
+secret (`EZVIZ_REGION` and `EZVIZ_TERMINAL` optionally beside it), the run
+summary says which way the binary came out, and a **"Check the door made it
+in"** step fails the build when a serial was given but the library is
+missing. Two things made that check necessary rather than paranoid:
+`pyezvizapi` is skipped by pip on any Python below 3.12 (the marker in
+`requirements.txt`), and a missing hidden import is only a PyInstaller
+*warning*. Neither fails a build, the smoke test does not touch the lock,
+and a door-less binary is indistinguishable afterwards from a correctly
+built one that was never given a serial. **The workflow therefore pins
+Python 3.12, and the canary asserts the same version** -- a canary on a
+different Python cannot catch the thing it exists for.
+
+**`EZVIZ_EMAIL` and `EZVIZ_PASSWORD` are deliberately never given to CI, and
+`academy.spec` refuses to bake them even from a local `.env`.** That is the
+one exception to "the spec bakes the whole file" and it earns it: they are
+the account that opens the academy's front door, the app does not need them
+(the cached session beside the binary is the warm path, and an interactive
+first sign-in with its SMS code cannot happen in a server anyway), and
+anyone who can get hold of a binary can read what is compiled into it. The
+build prints which keys it dropped. A serial is a device id and stays; a
+password that opens a door does not. The session file is not baked either --
+it is copied in beside the binary by hand, which is what the run summary and
+the local build scripts now say.
 
 That is how a build came out talking to SQLite while the developer's `.env`
 said `mongo`. Nothing was broken: the settings were never given to CI, and
@@ -2010,6 +2054,15 @@ gone on every close, so every first unlock of the day would pay a full
 login, or fail outright on a laptop whose EZVIZ password is not in `.env`.
 Both files are written 0600 and are gitignored: they grant door access, so
 they are treated exactly like `.env`.
+
+**A packaged build carries the serial and not the session.** The serial is
+baked from `.env` at build time like every other setting, because a frozen
+build never reads a file; the session is copied in beside the binary by
+hand. That split is the security one -- a serial identifies a device and is
+useless alone, a session opens a door -- and it is why `academy.spec` drops
+`EZVIZ_EMAIL`/`EZVIZ_PASSWORD` from what it bakes, and why CI is given the
+serial as a secret but never the credentials. See the CI note in the Files
+section.
 
 **The first sign-in is not the app's job.** It can want an SMS code, and
 nothing here is attached to a console to type one into — so
