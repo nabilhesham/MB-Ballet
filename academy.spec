@@ -105,6 +105,20 @@ def _bake_env(spec_dir, work_dir):
         print("  Not baking {} -- they open the front door, and the app "
               "does not need them.".format(", ".join(dropped)))
 
+    # Nor a setting only the test suite reads.
+    #
+    # `.env.example` documents MB_TEST_MONGO_URI because tests/conftest.py
+    # reads `.env` the way the app does -- but nothing in the running app
+    # ever looks at it, and it carries an Atlas password. Baking it put a
+    # live database credential inside a binary that gets handed around, in
+    # exchange for nothing at all: a value no running code reads cannot even
+    # be the reason a build behaves differently.
+    TEST_ONLY = ("MB_TEST_MONGO_URI",)
+    test_keys = [k for k in TEST_ONLY if values.pop(k, None)]
+    if test_keys:
+        print("  Not baking {} -- the test suite reads it, the app never "
+              "does.".format(", ".join(test_keys)))
+
     baked_dir = os.path.join(work_dir, "baked")
     os.makedirs(baked_dir, exist_ok=True)
     with open(os.path.join(baked_dir, "_baked_env.py"), "w", encoding="utf-8") as f:
@@ -165,13 +179,21 @@ hiddenimports = [
     # which is the same state a 3.11 install is in. See requirements.txt.
     "pyezvizapi", "pyezvizapi.client", "pyezvizapi.exceptions",
     "requests",
+    # A Windows build of this prints `Hidden import "tzdata" not found!` and
+    # that warning is noise -- checked rather than assumed, because it names
+    # the door's library and Windows has no system timezone database. zoneinfo
+    # itself is stdlib and imports with no tz data at all; the one function
+    # that constructs a ZoneInfo (utils.parse_timezone_value) catches
+    # ZoneInfoNotFoundError and falls back to the machine's own offset, and it
+    # is reached only from camera.py, which nothing in door.py touches. Do not
+    # add tzdata to requirements.txt to silence it.
     # The CA bundle Atlas is verified against. PyInstaller's own hook
     # collects certifi's cacert.pem as a data file; naming the module here is
     # what makes sure the hook runs at all.
     "certifi",
     "api", "api.clients", "api.plans", "api.classes",
     "api.instructors", "api.sessions", "api.access_routes", "api.dashboard",
-    "api.images",
+    "api.images", "api.appointments",
 ]
 
 a = Analysis(

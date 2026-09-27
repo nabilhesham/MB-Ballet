@@ -514,6 +514,35 @@ wrong-platform binary — `BUILD_EXE.bat` gets no equivalent guard, since a
 script that WSL, Git Bash, a Linux box and a Mac terminal can all run
 without complaint.
 
+**`BUILD_EXE.bat` claims `dist\MB Ballet Academy.exe` before it packages,
+and that guard is Windows-only for a reason.** PyInstaller's last step
+deletes and rewrites the exe, and Windows refuses to delete a file a running
+process was started from — so a rebuild started while the exe from the last
+build is still open spent a minute packaging and then died on
+
+```
+PermissionError: [WinError 5] Access is denied: 'D:\MB Ballet\dist\MB Ballet Academy.exe'
+```
+
+a raw traceback naming a cause nobody can act on, after the whole build. It
+is also the commonest failure there is, since testing the exe is the step
+straight before rebuilding it. `:free_dist` now deletes the file up front
+(PyInstaller is going to a step later anyway) and, if it survives, says to
+close the console window titled MB Ballet Academy — there is no way to ask
+Windows whether a file is locked that is not itself an attempted open.
+`build_mac.sh` and `build_linux.sh` need none of this: unlinking a running
+binary is ordinary on both.
+
+**`Hidden import "tzdata" not found!` on a Windows build is expected and
+harmless.** It names the door's library, and Windows has no system timezone
+database, so it reads like exactly the kind of silent packaging gap that has
+bitten this project before — it was checked rather than assumed. `zoneinfo`
+itself is stdlib and imports with no tz data at all; the one function that
+constructs a `ZoneInfo` catches `ZoneInfoNotFoundError` and falls back to
+the machine's own offset, and it is reached only from `pyezvizapi`'s camera
+code, which nothing in `door.py` touches. Do not add `tzdata` to
+`requirements.txt` to silence it.
+
 **Building needs Python 3.12; running the app still needs only 3.10.** That
 gap is deliberate and it is the door's. All three build scripts
 (`BUILD_EXE.bat`, `build_mac.sh`, `build_linux.sh`) refuse below 3.12 and
@@ -718,8 +747,9 @@ Python 3.12, and the canary asserts the same version** -- a canary on a
 different Python cannot catch the thing it exists for.
 
 **`EZVIZ_EMAIL` and `EZVIZ_PASSWORD` are deliberately never given to CI, and
-`academy.spec` refuses to bake them even from a local `.env`.** That is the
-one exception to "the spec bakes the whole file" and it earns it: they are
+`academy.spec` refuses to bake them even from a local `.env`.** That is one
+of the two exceptions to "the spec bakes the whole file" and it earns it:
+they are
 the account that opens the academy's front door, the app does not need them
 (the cached session beside the binary is the warm path, and an interactive
 first sign-in with its SMS code cannot happen in a server anyway), and
@@ -728,6 +758,18 @@ build prints which keys it dropped. A serial is a device id and stays; a
 password that opens a door does not. The session file is not baked either --
 it is copied in beside the binary by hand, which is what the run summary and
 the local build scripts now say.
+
+**`MB_TEST_MONGO_URI` is the other one, and it is the same trade with
+nothing on the other side of it.** It legitimately sits in `.env` — the test
+suite reads that file the way the app does, which is why a URI left there
+opts every `pytest` run into the Mongo half — but no running code ever looks
+at it, and it carries an Atlas password. A setting the app never reads cannot
+even be the reason a build behaves differently, so baking it only put a live
+database credential inside a file that gets handed around. `tests/test_bake_env.py`
+holds both exclusions, that the serial and `ENTRY_SECRET` do still travel,
+and that the spec's duplicated `.env` parser still agrees with
+`config.load_env()` — which is the "keep the two in step" instruction below,
+asserted instead of remembered.
 
 That is how a build came out talking to SQLite while the developer's `.env`
 said `mongo`. Nothing was broken: the settings were never given to CI, and
@@ -2429,9 +2471,12 @@ first run does too.
 
 The consequences, both deliberate: the `.env` parser now exists twice (in
 `config.load_env()` and `academy.spec::_read_env`, since the spec runs before
-anything of the app is importable — **keep the two in step**), and every
-setting in this folder's `.env` is embedded in any binary built from it, the
-Mongo URI included. A generated module rather than a `datas` entry because
+anything of the app is importable — **keep the two in step**, which
+`tests/test_bake_env.py` now checks), and every setting in this folder's
+`.env` is embedded in any binary built from it, the Mongo URI included. The
+two exceptions are the door's `EZVIZ_EMAIL`/`EZVIZ_PASSWORD` and the test
+suite's `MB_TEST_MONGO_URI`, each dropped with a printed line saying so —
+see the CI note in the Files section for why those three and nothing else. A generated module rather than a `datas` entry because
 `datas` unpacks to `sys._MEIPASS`, a real directory on disk while the app
 runs.
 
