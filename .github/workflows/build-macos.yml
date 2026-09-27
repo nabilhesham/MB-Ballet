@@ -192,9 +192,17 @@ jobs:
           ENTRY_SECRET: ${{ secrets.ENTRY_SECRET }}
           MB_MONGO_URI: ${{ secrets.MB_MONGO_URI }}
           MB_MONGO_DB: ${{ secrets.MB_MONGO_DB }}
-          EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL }}
-          EZVIZ_REGION: ${{ secrets.EZVIZ_REGION }}
-          EZVIZ_TERMINAL: ${{ secrets.EZVIZ_TERMINAL }}
+          # A secret OR a repository variable, whichever it was put in as.
+          # Neither is wrong for these three -- a lock serial and a region
+          # are device settings rather than credentials, so `vars` is a
+          # perfectly reasonable place for them -- and reading only one of
+          # the two would silently build a door-less binary because the
+          # value was entered on the other tab. || picks whichever is set.
+          # (The genuinely secret one, ENTRY_SECRET, stays secrets-only; so
+          # does the Mongo URI, which carries a password.)
+          EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL || vars.EZVIZ_LOCK_SERIAL }}
+          EZVIZ_REGION: ${{ secrets.EZVIZ_REGION || vars.EZVIZ_REGION }}
+          EZVIZ_TERMINAL: ${{ secrets.EZVIZ_TERMINAL || vars.EZVIZ_TERMINAL }}
           BACKEND: ${{ inputs.backend }}
         run: |
           if [ -z "$ENTRY_SECRET" ]; then
@@ -232,9 +240,10 @@ jobs:
             echo "Baking: the door. The binary still needs .ezviz_token.json"
             echo "beside it -- the session is never baked in."
           else
-            echo "Baking: NO DOOR. The EZVIZ_LOCK_SERIAL secret is not set,"
-            echo "so this binary will not open the lock and the kiosk will"
-            echo "show no door line and no Open door button."
+            echo "Baking: NO DOOR. EZVIZ_LOCK_SERIAL is set neither as a"
+            echo "secret nor as a repository variable, so this binary will"
+            echo "not open the lock, and the kiosk will show no door line"
+            echo "and no Open door button."
           fi
           # The keys only -- the URI carries the password and this is a log.
           echo "Baked keys: $(cut -d= -f1 .env | tr '\n' ' ')"
@@ -253,7 +262,7 @@ jobs:
         # build is a legitimate thing to ask for -- the step above says so in
         # the log either way.
         env:
-          EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL }}
+          EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL || vars.EZVIZ_LOCK_SERIAL }}
         run: |
           if [ -z "$EZVIZ_LOCK_SERIAL" ]; then
             echo "No serial baked, so there is no door to check."
@@ -436,7 +445,7 @@ jobs:
             echo
             echo "### The door"
             echo
-            if [ -n "${{ secrets.EZVIZ_LOCK_SERIAL }}" ]; then
+            if [ -n "${{ secrets.EZVIZ_LOCK_SERIAL || vars.EZVIZ_LOCK_SERIAL }}" ]; then
               echo 'This binary can unlock the academy'"'"'s EZVIZ lock on a check-in,'
               echo 'and the kiosk shows an **Open door** button.'
               echo
@@ -450,13 +459,13 @@ jobs:
               echo 'the kiosk just says the door needs setting up again, and reception'
               echo 'opens it by hand.'
             else
-              echo 'This binary has **no door**: the `EZVIZ_LOCK_SERIAL` secret was not'
-              echo 'set, so the kiosk shows no door line and no **Open door** button.'
-              echo 'Check-ins are unaffected.'
+              echo 'This binary has **no door**: `EZVIZ_LOCK_SERIAL` is set neither as'
+              echo 'a secret nor as a repository variable, so the kiosk shows no door'
+              echo 'line and no **Open door** button. Check-ins are unaffected.'
               echo
-              echo 'Add `EZVIZ_LOCK_SERIAL` under Settings -> Secrets and variables ->'
-              echo 'Actions and re-run to get one. `EZVIZ_EMAIL` and `EZVIZ_PASSWORD`'
-              echo 'are deliberately never given to CI — the app does not need them.'
+              echo 'Add it under Settings -> Secrets and variables -> Actions — either'
+              echo 'tab works — and re-run. `EZVIZ_EMAIL` and `EZVIZ_PASSWORD` are'
+              echo 'deliberately never given to CI; the app does not need them.'
             fi
             echo
             echo

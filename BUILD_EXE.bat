@@ -42,17 +42,34 @@ if not defined PY (
     exit /b 1
 )
 
-REM The app needs 3.10 or newer -- it uses "int | None" annotations, which
-REM 3.9 evaluates at runtime and rejects. START.bat has always enforced this
-REM and the build scripts did not, so a build on an older Python succeeded
-REM and produced an exe that died at import. Version is compared as plain
-REM text for the reason at the top of START.bat: a parenthesised comparison
-REM inside an if-block is parsed before it runs and breaks the block.
+REM Building needs 3.12 or newer, and that is a higher bar than *running*
+REM the app, deliberately.
+REM
+REM The app itself needs 3.10 -- it uses "int | None" annotations, which 3.9
+REM evaluates at runtime and rejects -- and start.sh/START.bat still accept
+REM that, because an academy on 3.11 should go on working. But this script
+REM produces the .exe reception runs, and the door's library (pyezvizapi)
+REM needs 3.12: below it, requirements.txt skips that line without a word
+REM and the exe comes out with no door at all. A missing hidden import is
+REM only a PyInstaller warning, and afterwards a door-less exe looks exactly
+REM like one built on a machine with no lock configured.
+REM
+REM So a build refuses rather than shipping that. The developer machine this
+REM is written for runs 3.12.4.
+REM
+REM Version is compared as plain text for the reason at the top of
+REM START.bat: a parenthesised comparison inside an if-block is parsed
+REM before it runs and breaks the block.
 call :check_version
 if errorlevel 1 (
-    echo   Python 3.10 or newer is needed to build this.
+    echo   Python 3.12 or newer is needed to BUILD this.
     echo   This machine has %PYVER%.
-    echo   Install a newer one from python.org and run this again.
+    echo.
+    echo   The app itself runs on 3.10 and up, so START.bat is happy with
+    echo   less -- but the smart lock needs 3.12, and an .exe built with
+    echo   less would work perfectly and never open the door.
+    echo.
+    echo   Install Python 3.12 from python.org and run this again.
     pause
     exit /b 1
 )
@@ -67,13 +84,11 @@ echo   [1/4] Installing the build tool...
 "%PY%" -m pip install --upgrade pip pyinstaller --quiet
 "%PY%" -m pip install -r requirements.txt --quiet
 
-REM  Did the door make it in? pyezvizapi needs Python 3.12 and
-REM  requirements.txt skips its line below that without a word, so a build
-REM  on 3.10 or 3.11 produces a perfectly working exe with no door -- and a
-REM  missing hidden import is only a PyInstaller warning nobody reads. Said
-REM  here rather than discovered at the counter. Not fatal: a door-less
-REM  build is a legitimate thing to want, and the .env decides whether
-REM  there is a lock at all.
+REM  Did the door make it in? The version check above means it should
+REM  have, so this is the belt to that braces -- it catches the download
+REM  failing, a stale cached wheel, or a hand-edited requirements.txt.
+REM  Reported rather than fatal: a door-less build is a legitimate thing to
+REM  want, and .env decides whether there is a lock at all.
 set "DOOR=no"
 "%PY%" -c "import pyezvizapi" >nul 2>&1 && set "DOOR=yes"
 
@@ -158,7 +173,7 @@ for /f "tokens=1,2 delims=." %%A in ("%PYVER%") do (
 )
 if not defined PYMINOR exit /b 1
 if %PYMAJOR% LSS 3 exit /b 1
-if %PYMAJOR% EQU 3 if %PYMINOR% LSS 10 exit /b 1
+if %PYMAJOR% EQU 3 if %PYMINOR% LSS 12 exit /b 1
 exit /b 0
 
 
@@ -184,10 +199,10 @@ if "%DOOR%"=="yes" (
     echo     session is deliberately NOT built into the binary,
     echo     because it opens the front door.
 ) else (
-    echo     NO DOOR in this build: pyezvizapi is not installed
-    echo     here, and it needs Python 3.12. This machine has
-    echo     %PYVER%. The exe works, check-ins work, the kiosk
-    echo     just shows no Open door button. Build on 3.12 for one.
+    echo     NO DOOR in this build: pyezvizapi did not install,
+    echo     although Python %PYVER% is new enough for it. The exe
+    echo     works and check-ins work; the kiosk just shows no
+    echo     Open door button. Re-run this with the laptop online.
 )
 echo.
 exit /b 0

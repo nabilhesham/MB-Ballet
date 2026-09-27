@@ -56,8 +56,16 @@ printf "  Building a standalone program file. This takes a few minutes.\n\n"
 # interpreter is often installed somewhere the current shell does not look.
 # On a Mac that is usually Homebrew's, with /opt/homebrew/bin missing from a
 # PATH that still has /usr/bin and its 3.9 in it.
+# 3.12, not 3.10, and that is a higher bar than *running* the app --
+# deliberately. The app needs 3.10 (see above) and start.sh still accepts
+# it, because an academy on 3.11 should go on working. But this script
+# produces the binary reception runs, and the door's library needs 3.12:
+# below it, requirements.txt skips that line without a word and the binary
+# comes out with no door, which a PyInstaller warning is the only hint of.
+# Afterwards it is indistinguishable from one built where no lock was
+# configured. So a build refuses rather than shipping that.
 MIN_MAJOR=3
-MIN_MINOR=10
+MIN_MINOR=12
 
 version_number() {
   # "3.14" -> 314, so versions compare as integers. Empty if it will not run.
@@ -93,7 +101,7 @@ do
 done
 if [ -z "$PY" ]; then
   if [ -n "$FOUND" ]; then
-    die "Python $MIN_MAJOR.$MIN_MINOR or newer is needed to build this. Found: $FOUND. Install a newer one — 'brew install python@3.12' or python.org — then run this again."
+    die "Python $MIN_MAJOR.$MIN_MINOR or newer is needed to BUILD this. Found: $FOUND. The app itself runs on 3.10 and up, so start.sh is happy with less — but the smart lock needs 3.12, and a binary built with less would work perfectly and never open the door. Install one — 'brew install python@3.12' or python.org — then run this again."
   fi
   die "Python 3 is needed to BUILD this — the finished program won't need it. Install it from python.org, then run this again."
 fi
@@ -127,10 +135,9 @@ BPY="$BUILD_VENV/bin/python"
 "$BPY" -m pip install --upgrade pyinstaller --quiet || die "Could not install the build tool"
 "$BPY" -m pip install -r requirements.txt --quiet || die "Could not install the app's own dependencies"
 
-# Did the door make it in? pyezvizapi needs Python 3.12, and
-# requirements.txt skips its line below that without a word -- so a build on
-# 3.10 or 3.11 produces a working binary with no door, and a missing hidden
-# import is only a PyInstaller warning nobody reads. Reported at the end
+# Did the door make it in? The version floor above means it should have, so
+# this is the belt to that braces -- it catches the download failing, a
+# stale cached wheel, or a hand-edited requirements.txt. Reported at the end
 # rather than fatal: a door-less build is a legitimate thing to want, and
 # `.env` decides whether there is a lock at all.
 DOOR=no
@@ -187,11 +194,11 @@ if [ "$DOOR" = yes ]; then
   printf "    session is deliberately not built in, because it\n"
   printf "    opens the front door.\n\n"
 else
-  printf "    NO DOOR in this build: pyezvizapi is not installed\n"
-  printf "    in the build environment, and it needs Python 3.12.\n"
-  printf "    This one is %s. The binary works and check-ins work;\n" \
+  printf "    NO DOOR in this build: pyezvizapi did not install,\n"
+  printf "    although %s is new enough for it. The binary works\n" \
          "$("$BPY" -V 2>&1)"
-  printf "    the kiosk just shows no Open door button.\n\n"
+  printf "    and check-ins work; the kiosk just shows no Open door\n"
+  printf "    button. Re-run this while online.\n\n"
 fi
 printf "    Test it here first. If it exits immediately, an error.log\n"
 printf "    file will be sitting next to it explaining why.\n"

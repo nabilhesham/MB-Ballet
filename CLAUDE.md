@@ -514,12 +514,21 @@ wrong-platform binary — `BUILD_EXE.bat` gets no equivalent guard, since a
 script that WSL, Git Bash, a Linux box and a Mac terminal can all run
 without complaint.
 
-**Every build says whether the door made it in**, because the one way it
-fails is silent. `BUILD_EXE.bat`, `build_mac.sh` and `build_linux.sh` each
-probe for `pyezvizapi` after installing the requirements and print the
-answer in their closing notes -- with the build Python's version, since 3.11
-is the whole reason it would be missing. Deliberately not fatal: a door-less
-build is a legitimate thing to want, and `.env` is what decides whether
+**Building needs Python 3.12; running the app still needs only 3.10.** That
+gap is deliberate and it is the door's. All three build scripts
+(`BUILD_EXE.bat`, `build_mac.sh`, `build_linux.sh`) refuse below 3.12 and
+say why, because each one produces the binary reception runs and
+`pyezvizapi` is skipped by pip below that without a word -- a build that
+succeeds and a door that never opens, indistinguishable afterwards from a
+binary built where no lock was configured. `start.sh` and `START.bat` keep
+the 3.10 floor: an academy on 3.11 should go on working, with a warning and
+no door, rather than being refused the whole app over one feature.
+
+**Each build still probes for the library afterwards** and prints the
+answer in its closing notes. With the floor above that is belt to braces --
+it catches the download failing, a stale wheel, or a hand-edited
+`requirements.txt` -- and it stays a report rather than a refusal, because
+a door-less build is a legitimate thing to want and `.env` decides whether
 there is a lock at all.
 
 `start.sh` and `START.bat` report the same thing on the reception laptop,
@@ -690,9 +699,14 @@ what puts one there, from repository secrets.
 it.** A packaged build reads the baked values and never a file, so
 `EZVIZ_LOCK_SERIAL` has to be among them or the binary has no door -- and
 silently, because `door.configured()` answering "no" is a legitimate state
-that the kiosk expresses by showing nothing at all. It is a repository
-secret (`EZVIZ_REGION` and `EZVIZ_TERMINAL` optionally beside it), the run
-summary says which way the binary came out, and a **"Check the door made it
+that the kiosk expresses by showing nothing at all. It is read as
+`secrets.EZVIZ_LOCK_SERIAL || vars.EZVIZ_LOCK_SERIAL` -- **either tab
+works**, with `EZVIZ_REGION` and `EZVIZ_TERMINAL` optionally beside it, and
+reading only one of the two would silently build a door-less binary because
+the value was entered on the other. Neither is wrong for these three: a
+serial and a region are device settings, not credentials. `ENTRY_SECRET`
+and the Mongo URI stay secrets-only, because those are. The run summary
+says which way the binary came out, and a **"Check the door made it
 in"** step fails the build when a serial was given but the library is
 missing. Two things made that check necessary rather than paranoid:
 `pyezvizapi` is skipped by pip on any Python below 3.12 (the marker in
