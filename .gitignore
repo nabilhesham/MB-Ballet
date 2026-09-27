@@ -12,6 +12,7 @@ academy.db-shm
 cards/
 photos/
 frontend/node_modules
+ezviz
 
 # The academy's own workbooks: real names and mobile numbers, same as the
 # database. seed.py reads them from here; copy them in by hand.
