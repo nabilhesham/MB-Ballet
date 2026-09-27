@@ -118,6 +118,35 @@ echo         Refreshing the web interface failed. Using the build already
 echo         committed in static\app instead.
 
 :after_frontend
+REM  Is the last build still running? PyInstaller's final step deletes and
+REM  rewrites dist\MB Ballet Academy.exe, and Windows will not let anything
+REM  delete a file an executable is running from -- so a rebuild started while
+REM  the previous exe is still open spends a minute packaging and then dies
+REM  with
+REM
+REM      PermissionError: [WinError 5] Access is denied
+REM
+REM  as a raw PyInstaller traceback, a minute in, naming a cause nobody can
+REM  act on. Every other failure in this script says what to do in plain
+REM  language, and this is the commonest one there is: the exe you built to
+REM  test is still on screen. So the file is claimed up front, before the
+REM  minute is spent.
+call :free_dist
+if errorlevel 1 (
+    echo.
+    echo   Cannot replace dist\MB Ballet Academy.exe -- something is
+    echo   holding that file open.
+    echo.
+    echo   Almost always this is the program itself, still running from the
+    echo   last build. Look for a black console window titled
+    echo   MB Ballet Academy, close it, and run this again.
+    echo.
+    echo   If nothing of ours is running, an antivirus scan or a file-sync
+    echo   client can hold it for a moment -- wait and try once more.
+    pause
+    exit /b 1
+)
+
 echo   [3/4] Packaging...
 REM  The hidden imports live in academy.spec rather than on this line: uvicorn
 REM  loads several modules by string name at runtime, PyInstaller cannot see
@@ -174,6 +203,22 @@ for /f "tokens=1,2 delims=." %%A in ("%PYVER%") do (
 if not defined PYMINOR exit /b 1
 if %PYMAJOR% LSS 3 exit /b 1
 if %PYMAJOR% EQU 3 if %PYMINOR% LSS 12 exit /b 1
+exit /b 0
+
+
+REM  A subroutine because of the parenthesis trap at the top of START.bat:
+REM  the del below carries redirects, and cmd.exe parses the whole if-block
+REM  that calls this before running any of it -- a redirect inside that block
+REM  would terminate it early.
+REM
+REM  Deleting rather than testing: there is no way to ask Windows "is this
+REM  file locked" that is not itself an attempted open, and PyInstaller is
+REM  going to delete this file anyway one step later. If the delete works the
+REM  lock was never there; if it does not, neither would the build.
+:free_dist
+if not exist "dist\MB Ballet Academy.exe" exit /b 0
+del /f /q "dist\MB Ballet Academy.exe" >nul 2>&1
+if exist "dist\MB Ballet Academy.exe" exit /b 1
 exit /b 0
 
 
