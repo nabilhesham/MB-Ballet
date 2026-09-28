@@ -325,15 +325,81 @@ def test_the_http_session_is_always_closed(ez):
     assert ez.made[0].closed is True
 
 
-def test_no_saved_session_and_no_password_is_a_sentence(ez):
-    """An interactive first login needs an SMS code typed at a console, and
-    nothing is attached to one here -- so it says where to do it instead."""
+def test_a_session_never_copied_in_says_to_copy_it_in(ez):
+    """
+    The state a freshly installed build is in, and the one this actually
+    reached the academy in: the binary carries the serial (baked from .env)
+    and never the session, so until somebody copies `.ezviz_token.json` in
+    beside the database there is nothing to unlock with.
+
+    It used to answer "run the unlock script once to sign in", which is the
+    wrong remedy for the commonest cause -- the session usually already
+    exists, on whichever machine signed in. An interactive login is still
+    offered, second, for when it genuinely does not.
+    """
     ez.token.unlink()
     r = door.open_door()
     assert r["ok"] is False
-    # Plain on screen, specific in the log.
-    assert "needs setting up again" in r["detail"]
+    assert "copy .ezviz_token.json in" in r["detail"]
+    assert "run the unlock script" in r["detail"]
+    # Plain on screen, specific in the log -- including *where* it looked,
+    # which is the one thing that settles this from a console.
+    assert str(ez.token) in r["technical"]
     assert "EZVIZ_EMAIL" in r["technical"]
+
+
+def test_a_session_that_cannot_be_read_is_a_different_sentence(ez):
+    """
+    A file that is there and unusable is a different problem with a
+    different fix -- half-copied, truncated, wrong permissions -- and
+    `_load_token()` answers None to that exactly as it does to a missing
+    file. Collapsing the two would tell somebody to copy in a file they are
+    looking straight at.
+    """
+    ez.token.write_text("{ not json")
+    r = door.open_door()
+    assert r["ok"] is False
+    assert "could not be read" in r["detail"]
+    assert "run the unlock script" not in r["detail"]
+    assert str(ez.token) in r["technical"]
+
+
+def test_the_failure_is_still_an_answer_not_an_exception(ez):
+    """Whichever of the two it is, the check-in is already recorded."""
+    ez.token.unlink()
+    assert door.open_door()["ok"] is False
+    ez.token.write_text("nonsense")
+    assert door.open_door()["ok"] is False
+
+
+# ------------------------------------------------- what the banner reports
+def test_the_banner_is_quiet_when_there_is_a_session(ez):
+    assert door.session_problem() == ""
+
+
+def test_the_banner_names_a_missing_session_and_where_it_looked(ez):
+    """
+    The launchers cannot answer this for the machine that matters: the
+    reception laptop double-clicks a binary and runs neither of them. So the
+    app says it itself, at startup, instead of the first news being an amber
+    line under a client's verdict.
+    """
+    ez.token.unlink()
+    problem = door.session_problem()
+    assert str(ez.token) in problem
+
+
+def test_the_banner_is_quiet_when_it_can_sign_in_for_itself(ez, monkeypatch):
+    """
+    A source checkout with the credentials in `.env` mints its own session
+    on the first unlock, so a missing file is not a problem there -- the
+    same condition `_client()` falls through on, which is why both ask one
+    function.
+    """
+    ez.token.unlink()
+    monkeypatch.setenv("EZVIZ_EMAIL", "reception@example.com")
+    monkeypatch.setenv("EZVIZ_PASSWORD", "x")
+    assert door.session_problem() == ""
 
 
 # --------------------------------------------------------------- over HTTP

@@ -2126,6 +2126,32 @@ nothing here is attached to a console to type one into — so
 an interactive login belongs. The app uses the session it caches, and says
 so when there is none.
 
+**"No session" is two states with two different fixes, and saying only one
+of them sent the academy after the wrong thing.** A freshly installed build
+carries the serial and no session — that split is the whole point — so until
+somebody copies `.ezviz_token.json` in beside the database there is nothing
+to unlock with, and that is by far the commonest way to arrive here. The one
+sentence this used to have, "run the unlock script once to sign in", is the
+remedy for the *other* state: no session anywhere. It named a sign-in to
+somebody whose session already existed, on the machine that had signed in.
+`door._no_session()` tells them apart on whether the file is there at all —
+missing says to copy it in (and offers the sign-in second), unreadable says
+to copy it in *again*, since telling somebody to copy in a file they are
+looking straight at explains nothing. Both name the path in `technical`,
+which is the only thing that settles it from a console.
+
+**The startup banner reports it, and the launchers cannot.** `start.sh` and
+`START.bat` check for the *library*, which is about the environment they
+built — but the machine that matters double-clicks a binary and runs
+neither, so a check living there never runs where it is needed. The first
+anyone heard of a missing session was an amber line under a client's
+verdict, with the client standing at the counter. `server.py`'s lifespan
+asks `door.session_problem()` — the same question `_client()` asks, so the
+two cannot drift — and prints one line naming the path it looked at. It
+never blocks the start: a door-less install is a legitimate one. A source
+checkout with `EZVIZ_EMAIL`/`EZVIZ_PASSWORD` in `.env` can mint its own
+session on the first unlock, so it says nothing there.
+
 ### Taking the payment at the desk
 
 **UPDATE PLAN appears on exactly one refusal**, the unpaid one above, for
