@@ -26,6 +26,7 @@ import config
 config.load_env()
 
 import access  # noqa: E402
+import door  # noqa: E402
 import images  # noqa: E402
 import repo as data  # noqa: E402
 
@@ -106,6 +107,25 @@ async def _lifespan(app):
             print(f"  Moved {moved} photo(s) and card(s) into the database.")
     finally:
         starter.close()
+
+    # The door, when a lock is configured at all.
+    #
+    # `door.configured()` is the serial and nothing else, and a build can
+    # carry one while holding no session to unlock with -- that split is
+    # deliberate (a serial identifies a device, a session opens a door), and
+    # it means the session has to be copied in beside the database by hand.
+    # Said here rather than in the launchers because the machine that
+    # matters double-clicks a binary and runs neither of them, so the first
+    # anyone heard of it was an amber line under a client's verdict with the
+    # client standing at the counter. Never blocks the start: a door-less
+    # install is a legitimate one, and check-ins are the app's real job.
+    if door.configured():
+        problem = door.session_problem()
+        if problem:
+            print(f"  No door yet: {problem}.")
+            print("  Copy .ezviz_token.json in beside the database. Check-ins "
+                  "still work;")
+            print("  reception opens the door by hand.")
 
     # Held in a local: asyncio keeps only a weak reference to a running
     # task, so a bare create_task() may be collected mid-sweep.

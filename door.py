@@ -109,6 +109,61 @@ def _load_bind() -> str | None:
         return None
 
 
+# ------------------------------------------------- no session to unlock with
+# Two states, not one, and they need different things done about them.
+#
+# A packaged build is handed the serial and never the session -- the serial
+# identifies a device, the session opens a door -- so the file is copied in
+# beside the database by hand. Which means the commonest way to arrive here
+# is a build somebody has just installed and not copied it into yet, and the
+# only sentence this used to have ("run the unlock script once to sign in")
+# named the wrong remedy for it: the session usually already exists, on the
+# machine it was signed in on.
+#
+# The other state is a file that is there and cannot be read -- truncated,
+# half-copied, wrong permissions. `_load_token()` answers None to both, so
+# the existence check is what tells them apart.
+_MISSING = (
+    "No EZVIZ session is saved on this computer — copy .ezviz_token.json in "
+    "beside the database, or run the unlock script once to sign in. Open the "
+    "door by hand for now",
+    "no session file at {path}, and no EZVIZ_EMAIL/EZVIZ_PASSWORD to sign "
+    "in with")
+_UNREADABLE = (
+    "The saved EZVIZ session could not be read — copy .ezviz_token.json in "
+    "again beside the database. Open the door by hand for now",
+    "{path} is there but is not readable JSON")
+
+
+def _no_session() -> tuple[str, str]:
+    """The sentence for the screen and the one for the log, as a pair."""
+    path = config.ezviz_token_file()
+    pair = _MISSING if not os.path.exists(path) else _UNREADABLE
+    return pair[0], pair[1].format(path=path)
+
+
+def session_problem() -> str:
+    """
+    Why this machine could not unlock anything yet, or "" when it can.
+
+    The startup banner's half of the question above, so the two cannot
+    drift. It exists because the launchers cannot answer it for the machine
+    that matters: the reception laptop double-clicks a binary, so a check
+    living in `start.sh` or `START.bat` is a check that never runs there,
+    and the first anyone hears of a missing session is an amber line under a
+    client's verdict with the client standing at the counter.
+
+    A source checkout with EZVIZ_EMAIL/EZVIZ_PASSWORD in `.env` can sign in
+    for itself, so a missing file is not a problem there and this says
+    nothing -- the same condition `_client()` falls through on.
+    """
+    if _load_token():
+        return ""
+    if os.environ.get("EZVIZ_EMAIL") and os.environ.get("EZVIZ_PASSWORD"):
+        return ""
+    return _no_session()[1]
+
+
 # ---------------------------------------------------------------- the calls
 def _client():
     """
@@ -129,10 +184,8 @@ def _client():
     email = os.environ.get("EZVIZ_EMAIL")
     password = os.environ.get("EZVIZ_PASSWORD")
     if not (email and password):
-        raise DoorTrouble(
-            "The door needs setting up again — run the unlock script once to "
-            "sign in, then open the door by hand for now",
-            "no cached token and no EZVIZ_EMAIL/EZVIZ_PASSWORD")
+        plain, technical = _no_session()
+        raise DoorTrouble(plain, technical)
     client = EzvizClient(email, password, config.ezviz_region(),
                          timeout=TIMEOUT_S)
     client.login()
