@@ -249,25 +249,6 @@ class ClientsPort(ABC):
         """
 
     @abstractmethod
-    def plan_slot_times(self, sub_ids: list) -> dict:
-        """
-        `{sub_id: [starts_at, ...]}` ascending -- when each slot a plan holds
-        actually falls, cancelled sessions left out.
-
-        This is what makes "how many sessions did they have left *on the
-        12th*" answerable at all. `plan_rows()` counts a plan's bookings as
-        they stand now, which answers only "today"; a day filter needs to
-        know *when* each slot sits, and a plan that ran out last Tuesday is a
-        different row from one that ran out this morning.
-
-        One round trip for every plan asked about, because the dashboard asks
-        it of every live plan in the academy. Cancelled sessions are dropped
-        here rather than by the caller: a cancelled date is not a session
-        anybody attended, so counting it as spent would retire a plan that
-        still has the slot.
-        """
-
-    @abstractmethod
     def joined_counts(self, windows: list) -> list:
         """
         How many active clients joined in each `(from, to)` half-open range,
@@ -369,6 +350,25 @@ class PlansPort(ABC):
     @abstractmethod
     def max_starts_at(self, session_ids: list):
         """The latest `starts_at` among the given sessions, or None."""
+
+    @abstractmethod
+    def plan_slot_times(self, sub_ids: list) -> dict:
+        """
+        `{sub_id: [starts_at, ...]}` ascending -- when each slot a plan holds
+        actually falls, cancelled sessions left out.
+
+        This is what makes "how many sessions did they have left *on the
+        12th*" answerable at all. `plan_rows()` counts a plan's bookings as
+        they stand now, which answers only "today"; a day filter needs to
+        know *when* each slot sits, and a plan that ran out last Tuesday is a
+        different row from one that ran out this morning.
+
+        One round trip for every plan asked about, because the dashboard asks
+        it of every live plan in the academy. Cancelled sessions are dropped
+        here rather than by the caller: a cancelled date is not a session
+        anybody attended, so counting it as spent would retire a plan that
+        still has the slot.
+        """
 
     @abstractmethod
     def plan_rows(self, sub_ids: list) -> dict:
