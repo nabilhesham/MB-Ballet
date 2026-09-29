@@ -131,6 +131,55 @@ second filter back to make it add up — `revenue` is the number that is
 period-bound, and the card says "new or returning" under it for exactly that
 contrast.
 
+**The rest of the dashboard is about today, and two of its figures are
+about *this* day rather than about a standing condition.**
+
+**TAKEN TODAY is keyed on `paid_on`, never on when the plan was typed in**
+(`access.day_income()`). Reception writes a plan down when the client asks
+for it and dates the payment for the day it is due, so a plan entered on
+Tuesday for Thursday's money belongs to Thursday — open the dashboard on
+Thursday and there it is. Dating it by entry would put Thursday's cash in
+Tuesday's till and take it out again the next morning. An unpaid plan has no
+date at all and falls out of every day rather than counting as zero in one,
+which is the rule the month's figures already follow; a plan paid with no
+amount written down is still counted separately, never as zero.
+
+**Needs attention asks three questions about one day**
+(`access.day_attention()`), and the day is passed in — which is what lets
+the dashboard ask about today and the Cards screen ask about any date, one
+rule with two callers rather than a second copy to drift:
+
+| | what it means |
+|---|---|
+| `renew` | the plan ends on that day |
+| `ran_out` | the last slot they hold falls on that day, so they finish with nothing for next week |
+| `one_left` | one session stands between them and that, **and a dated session is still to come** |
+
+It replaced "two or fewer left, expiring inside a week, or slots with no
+dates" — a fair description of a client and a poor description of a day's
+work. The same twenty names sat on it for a fortnight, so it stopped being
+read, and the day a plan actually ran out looked exactly like the four days
+either side of it.
+
+**Two things in that table are decisions, not details.** `ran_out` is the
+day it *happened*, not "is at zero" — otherwise every client who never
+renewed stays on every list for ever, which is the failure being fixed. And
+`one_left` needs something still dated ahead of it, because a plan holding
+one slot nobody has booked a date against sits at "1 left" indefinitely and
+would reappear on every future day the screen could be set to. Whether they
+are down to their last is a fact about a day; whether anything is still
+coming is what makes it *that* day's business. A slot with no date is still
+theirs and still wants booking — the standing list
+(`/api/clients?status=attention` with no `on=`) is where that is said, and
+it keeps the old rules unchanged.
+
+Remaining is counted **as of that day**, from where each slot actually falls
+(`repo.plan_slot_times()`): everything on or before it is spent, everything
+after is still theirs, and a cancelled session spends nothing because nobody
+attended a class that did not run. `plan_rows()` cannot answer this — it
+counts a plan's bookings as they stand now, which only ever means today.
+A frozen plan is never on the list at all; it is deliberately paused.
+
 **Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
 a controlled component that replaced app.js's old `enhanceTables()`. Click a
 column header to sort; a long table gets a capped scrolling body whose header
@@ -147,6 +196,14 @@ unsortable. The scroll cap applies to every table regardless of whether it
 has a search box, and is recomputed against the *filtered* row count on every
 render, so a table searched down to a handful of rows drops its cap rather
 than keeping the one computed before the search started.
+
+**A control that filters the same rows from outside goes in the table's own
+bar**, through `<DataTable>`'s `bar` prop, rather than in a band of its own
+above it: one row of controls reads as one control, and `.dt-count` keeps
+its `margin-left:auto` so the row count still sits hard right. The Cards
+screen's day filter is the first user. It renders with or without a search
+box, and it **survives an empty result** — it is usually what emptied the
+list, so hiding it would leave a screen with no way back.
 
 The Clients list carries its own hand-built search bar instead of
 `<DataTable>`'s `search` prop: it already searches server-side through
@@ -1881,6 +1938,16 @@ would eventually disagree with it. It waits for two characters, debounces
 eight rows: a two-letter search matches half the academy, and a list nobody
 reads to the end of is not a shortlist. Enter takes the first row.
 
+**A row carries all three things a client can be named by** — the member
+number, the name, and the mobile under it. A name on its own does not pick
+anybody out: this academy has two of several names, and since a shared
+mobile is legitimate (see the identity rule below) a parent's two children
+sit next to each other in that list. The number is what the parent gives
+over the phone and what reception reads back, so it is what settles which
+of the two is standing at the desk. It goes under the name rather than
+beside it because a sidebar row cannot fit two variable-width strings on one
+line without truncating one of them, and the name is the one being read.
+
 The browser cannot enumerate HID keyboards, so "scanner connected" is *inferred*
 rather than detected: the indicator turns green the first time a burst of
 scanner-speed keystrokes arrives. Until then it reads "listening for scanner"
@@ -2723,6 +2790,14 @@ directly:
 
 A reception scan is 1.2s when it follows a write (the check-in before it
 invalidated the sweep) and 0.58s when it does not, from the 1.1s it was.
+
+**The dashboard has since gained two round trips and the figure above is
+that much stale** — one `plan_slot_times()` for the day-scoped attention
+list and one `takings()` for the day's income, both single calls for the
+whole page rather than anything per client, which is the property this
+section is about. `tests/test_query_budget.py`'s ceiling moved 19 -> 21 with
+them. The timings have not been re-measured against Atlas since; the trip
+counts have.
 
 **Pagination was considered and is the wrong tool.** The academy holds 254
 clients, 402 sessions and 1,144 bookings; a page that fetches 402 rows in one

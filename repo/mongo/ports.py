@@ -691,9 +691,10 @@ class MongoClients(ClientsPort, _Helpers):
         """
         # Not an assert: this is interpolated into the pipeline below, and
         # asserts are stripped under `python -O`.
-        if date_field not in ("joined_on", "starts_on"):
+        if date_field not in ("joined_on", "starts_on", "paid_on"):
             raise ValueError(f"unknown date_field {date_field!r}")
-        when = "$starts_on" if date_field == "starts_on" else "$cl.joined_on"
+        when = ("$cl.joined_on" if date_field == "joined_on"
+                else "$" + date_field)
         rows = self._agg("subscriptions", [
             {"$lookup": {"from": "clients", "localField": "client_id",
                          "foreignField": "_id", "as": "cl"}},
@@ -826,6 +827,25 @@ class MongoPlans(PlansPort, _Helpers):
             {"$group": {"_id": "$subscription_id",
                         "t": {"$max": "$s.starts_at"}}},
         ]) if r["t"] is not None}
+
+    def plan_slot_times(self, sub_ids):
+        ids = [s for s in dict.fromkeys(sub_ids) if s is not None]
+        if not ids:
+            return {}
+        # $sort before $group, because $push keeps the order it is given and
+        # the SQLite side is ordered by the same key. Two backends handing
+        # back equal lists in different orders is what tests/test_parity.py
+        # exists to catch.
+        return {r["_id"]: r["t"] for r in self._agg("bookings", [
+            {"$match": {"subscription_id": {"$in": ids}}},
+            {"$lookup": {"from": "sessions", "localField": "session_id",
+                         "foreignField": "_id", "as": "s"}},
+            {"$unwind": "$s"},
+            {"$match": {"s.status": {"$ne": "cancelled"}}},
+            {"$sort": {"s.starts_at": 1}},
+            {"$group": {"_id": "$subscription_id",
+                        "t": {"$push": "$s.starts_at"}}},
+        ])}
 
     def max_starts_at(self, session_ids):
         ids = [s for s in session_ids if s is not None]

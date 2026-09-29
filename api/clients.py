@@ -63,14 +63,26 @@ class CardIn(BaseModel):
 
 # ---------------------------------------------------------------- routes
 @router.get("/api/clients")
-def list_clients(q: str = "", status: str = "all"):
+def list_clients(q: str = "", status: str = "all", on: str = None):
     """
     `status` does two unrelated jobs. "archived" picks which half of the list
     to read — the same convention /api/instructors and /api/classes use.
     "attention" is a filter *within* the active half, applied further down
     once each row has been enriched with the plan state it needs; it is not a
     third value of the same switch.
+
+    `on` is an ISO day and narrows "attention" to that day alone: the plans
+    ending on it, the ones whose last slot falls on it, and the ones with a
+    single session left after it. That is the same `access.day_attention()`
+    the dashboard asks about today — one rule, so the Cards screen set to
+    today and the dashboard cannot disagree. It is ignored for any other
+    `status`, since there is nothing about a day in "every client".
     """
+    if on is not None:
+        try:
+            date.fromisoformat(on)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Pick a day, or clear the date filter.")
     repo = data.connect()
     try:
         access.settle_past_sessions(repo)
@@ -101,7 +113,23 @@ def list_clients(q: str = "", status: str = "all"):
             d["low"] = d["remaining"] is not None and 0 < d["remaining"] <= 2
             d["empty"] = d["remaining"] is not None and d["remaining"] <= 0
             d["cards"] = cards[d["id"]]
-        if status == "attention":
+        if status == "attention" and on:
+            # The day-scoped list. Deliberately narrower than the standing
+            # one below: a day filter that still showed everybody missing a
+            # card would answer a question nobody asked of a date.
+            flags = access.day_attention(repo, on, states)
+            keep = []
+            for d in out:
+                sub = plans.get(d["id"])
+                why = flags.get(sub["id"]) if sub else None
+                if not why:
+                    continue
+                d.update({"renew": why["renew"], "ran_out": why["ran_out"],
+                          "one_left": why["one_left"],
+                          "remaining": why["remaining_on"]})
+                keep.append(d)
+            out = keep
+        elif status == "attention":
             out = [d for d in out if not d["frozen"] and (
                     d["expired"] or d["low"] or d["empty"] or not d["cards"]
                     or (d["unassigned"] or 0) > 0)]

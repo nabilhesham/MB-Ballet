@@ -274,7 +274,12 @@ class SqliteClients(ClientsPort):
             (*params, client_id))
 
     def takings(self, date_field, month_from, month_to):
-        assert date_field in ("joined_on", "starts_on"), date_field
+        # Interpolated into the SQL below, so the whitelist is the thing that
+        # keeps it safe -- never a caller's string. "joined_on" is the
+        # client's column; the other two are the plan's. A NULL paid_on fails
+        # both comparisons and drops out, which is what an unpaid plan should
+        # do to a figure about money that arrived.
+        assert date_field in ("joined_on", "starts_on", "paid_on"), date_field
         col = f"c.{date_field}" if date_field == "joined_on" else f"s.{date_field}"
         r = self.conn.execute(
             "SELECT COALESCE(SUM(s.price),0) paid,"
@@ -285,6 +290,19 @@ class SqliteClients(ClientsPort):
             (month_from, month_to)).fetchone()
         return {"paid": r["paid"] or 0, "unpriced": r["unpriced"] or 0,
                 "plans": r["plans"] or 0}
+
+    def plan_slot_times(self, sub_ids):
+        out = {}
+        if not sub_ids:
+            return out
+        for r in self.conn.execute(
+                "SELECT b.subscription_id sid, s.starts_at t FROM bookings b"
+                "  JOIN sessions s ON s.id=b.session_id"
+                f" WHERE b.subscription_id IN ({_marks(sub_ids)})"
+                "   AND s.status != 'cancelled'"
+                " ORDER BY b.subscription_id, s.starts_at", tuple(sub_ids)):
+            out.setdefault(r["sid"], []).append(r["t"])
+        return out
 
     def joined_counts(self, windows):
         if not windows:

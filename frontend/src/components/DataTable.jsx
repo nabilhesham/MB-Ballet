@@ -8,6 +8,12 @@
  * (.dt/.dt-bar/.dt-scroll/.dt-count/.dt-find/.dt-caret/.dt-none), state lives
  * in React instead of being read back off the DOM.
  *
+ * `bar` is an optional node rendered in .dt-bar beside the search box, for
+ * a control acting on the same rows from outside — the Cards screen's day
+ * filter is the first. It renders with or without `search`, and it survives
+ * an empty result, which it has to: it is usually what emptied the list,
+ * and hiding it would leave a screen with no way back.
+ *
  * columns: [{ label, cell: row => node, sortValue?: row => value,
  *              sortable?: false, className?, hideSm?, style?, onCellClick? }]
  * onCellClick puts the click/hover behaviour on one cell instead of the
@@ -35,7 +41,8 @@ function rowSearchText(row) {
 }
 
 export default function DataTable({
-  rows, rowKey, onRowClick, search, empty, columns, scrollRows = DT_SCROLL_ROWS,
+  rows, rowKey, onRowClick, search, bar, empty, columns,
+  scrollRows = DT_SCROLL_ROWS,
 }) {
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState(null); // { index, dir: 'asc' | 'desc' }
@@ -58,22 +65,37 @@ export default function DataTable({
   }, [filtered, sort, columns]);
 
   if (!rows.length) {
-    return <div className="empty">{empty}</div>;
+    // The bar stays when there are no rows, and has to: it is what filtered
+    // them away, so hiding it would leave an empty screen with no way back.
+    return (
+      <div className="dt">
+        {bar ? <div className="dt-bar">{bar}</div> : null}
+        <div className="empty">{empty}</div>
+      </div>
+    );
   }
 
   const capped = sorted.length > scrollRows;
 
   return (
     <div className="dt">
-      {search && (
+      {(search || bar) && (
         <div className="dt-bar">
-          <input
-            className="search dt-find"
-            type="search"
-            placeholder={search}
-            value={query}
-            onChange={e => setQuery(e.target.value)}
-          />
+          {search && (
+            <input
+              className="search dt-find"
+              type="search"
+              placeholder={search}
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+            />
+          )}
+          {/* Anything the caller wants acting on the same rows, beside the
+              search rather than in a band of its own above it: one row of
+              controls reads as one control. `.dt-count` keeps its
+              margin-left:auto, so it still sits hard right whatever goes
+              in here. */}
+          {bar}
           <span className="dt-count">
             {query.trim()
               ? `${sorted.length} of ${rows.length}`

@@ -148,10 +148,20 @@ td.right{text-align:right}
    hand rather than with a library is that sorting and searching arrive without
    a second stylesheet fighting this one. */
 .dt-bar{display:flex;align-items:center;gap:12px;padding:10px 14px;
-        background:var(--surface-2);border-bottom:1px solid var(--line)}
+        flex-wrap:wrap;background:var(--surface-2);
+        border-bottom:1px solid var(--line)}
 .dt-bar .dt-find{flex:1;max-width:320px;height:32px;font-size:13px}
 .dt-count{font-family:var(--mono);font-size:9px;letter-spacing:1.2px;
           color:var(--dim);white-space:nowrap;margin-left:auto}
+
+/* A caller's own control inside that bar (DataTable's `bar` prop), levelled
+   with the search box rather than towering over it — the same reason
+   .filterbar pins a date field and the button acting on it to one height.
+   The Cards screen's day filter is the first user. */
+.dt-day{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.dt-day label{display:inline;margin:0;font-size:9px;letter-spacing:1.2px;
+              color:var(--dim)}
+.dt-day input[type=date]{width:auto;height:32px;font-size:13px;padding:0 9px}
 
 /* Only tables long enough to need it scroll, so a four-row panel never grows
    a scrollbar it has no use for. */
