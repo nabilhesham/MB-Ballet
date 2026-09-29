@@ -227,13 +227,44 @@ class ClientsPort(ABC):
     def takings(self, date_field: str, month_from: str, month_to: str) -> dict:
         """
         `{"paid", "unpriced", "plans"}` over active clients' plans, filtered
-        by a month range on one of two dates.
+        by a half-open date range on one of three dates.
 
-        `date_field` is "joined_on" (the client's) or "starts_on" (the
-        plan's), and the choice is the whole difference between the
-        dashboard's two intake figures: "earned from them" follows the
-        people out of the window, while "revenue" stays inside it. Unpriced
-        plans are counted separately and never as zero.
+        `date_field` is "joined_on" (the client's), "starts_on" (the plan's)
+        or "paid_on" (the day the money actually arrived). The first two are
+        the whole difference between the dashboard's two intake figures:
+        "earned from them" follows the people out of the window, while
+        "revenue" stays inside it. Unpriced plans are counted separately and
+        never as zero.
+
+        `paid_on` is the one that answers "what came in today", and it is a
+        different question from either: a plan written down on Tuesday for a
+        payment due Thursday belongs to Thursday. It is also the one that is
+        **nullable** -- an unpaid plan has no date and must fall out of every
+        window rather than landing in one, which is the null guard both
+        implementations already carry for a range comparison.
+
+        The bounds are ISO dates and the range is half-open, so a single day
+        is `(day, the day after)`. A bare "YYYY-MM" works as a month bound
+        because an ISO date sorts lexicographically against it.
+        """
+
+    @abstractmethod
+    def plan_slot_times(self, sub_ids: list) -> dict:
+        """
+        `{sub_id: [starts_at, ...]}` ascending -- when each slot a plan holds
+        actually falls, cancelled sessions left out.
+
+        This is what makes "how many sessions did they have left *on the
+        12th*" answerable at all. `plan_rows()` counts a plan's bookings as
+        they stand now, which answers only "today"; a day filter needs to
+        know *when* each slot sits, and a plan that ran out last Tuesday is a
+        different row from one that ran out this morning.
+
+        One round trip for every plan asked about, because the dashboard asks
+        it of every live plan in the academy. Cancelled sessions are dropped
+        here rather than by the caller: a cancelled date is not a session
+        anybody attended, so counting it as spent would retire a plan that
+        still has the slot.
         """
 
     @abstractmethod

@@ -2220,6 +2220,114 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
 
 
 # ======================================================================
+# What needs doing on one particular day
+#
+# "Needs attention" used to be a standing condition -- two sessions or
+# fewer left, expiring inside a week, slots with no dates written down.
+# That is a fair description of a client and a poor description of a day's
+# work: the same twenty names sat on it for a fortnight, so it stopped
+# being read, and the day a plan actually ran out looked exactly like the
+# four days either side of it.
+#
+# These three questions are about a day instead, and each has something
+# that can be done about it while the client is still in the building:
+#
+#   renew     -- the plan ends on this day
+#   ran_out   -- the last slot they hold falls on this day, so they finish
+#                today with nothing for next week
+#   one_left  -- one session stands between them and that
+#
+# The day is passed in rather than read off the clock, which is what lets
+# the dashboard ask about today and the Cards screen ask about any date --
+# one rule with two callers instead of a second copy to drift. Same shape
+# as `sessions_in_range(start, end)` and `settle_absences(now, ...)`.
+# ======================================================================
+
+def next_day(iso: str) -> str:
+    """The day after an ISO day. The upper bound of a one-day range."""
+    return (date.fromisoformat(iso) + timedelta(days=1)).isoformat()
+
+
+def day_attention(repo, day: str, states: dict) -> dict:
+    """
+    Which of these plans want something doing about them on `day`.
+
+    `states` is what `plan_states()` already gave the caller -- both callers
+    are holding it before they get here, and asking for it again would be a
+    round trip spent on rows in hand.
+
+    Returns `{sub_id: {"renew", "ran_out", "one_left", "remaining_on"}}` for
+    the plans that match at least one of the three, and nothing at all for
+    the rest, so a caller filters on membership.
+
+    **A frozen plan is never in it.** It is deliberately paused; a paused
+    plan "running out" is not something anybody acts on, and it is the same
+    exclusion the standing rule made.
+
+    Remaining is counted **as of that day**, from where each slot actually
+    falls: everything on or before `day` is spent, everything after is still
+    theirs. For today that is the figure as the day ends, which is the one
+    worth acting on while they are at the desk -- a client whose last
+    session is this evening needs the conversation now, not tomorrow.
+    Unassigned slots stay theirs, so a plan with dates still to write down
+    can never read as run out.
+    """
+    if not states:
+        return {}
+    slots = repo.plan_slot_times(list(states))
+    out = {}
+    for sid, st in states.items():
+        if st["frozen"]:
+            continue
+        days = [_iso_day(t) for t in slots.get(sid, ())]
+        total = st["sessions_total"] or 0
+        remaining_on = max(0, total - sum(1 for d in days if d <= day))
+        remaining_before = max(0, total - sum(1 for d in days if d < day))
+        # "Ran out on this day", not "is at zero": the difference is whether
+        # a client who finished last month reappears on every list for ever.
+        # The slot that took them to nothing has to be this day's own.
+        ran_out = remaining_on == 0 and remaining_before > 0
+        # One left, and a session still to come that they will be in for.
+        #
+        # The second half is what stops this being the standing rule again.
+        # A plan whose slots are all behind it and still holds one nobody has
+        # booked a date for sits at "1 left" for ever, so without it the same
+        # name appeared on every future day the screen could be set to --
+        # which is exactly what a day filter is supposed to end. Whether they
+        # are down to their last is a fact about a day; whether anything is
+        # still coming is what makes it that day's business. A slot with no
+        # date is still theirs and still wants booking, and the standing list
+        # is where that is said -- see /api/clients?status=attention.
+        still_running = any(d >= day for d in days)
+        one_left = remaining_on == 1 and still_running
+        renew = st["expires_on"] == day
+        if renew or ran_out or one_left:
+            out[sid] = {"renew": renew, "ran_out": ran_out,
+                        "one_left": one_left, "remaining_on": remaining_on}
+    return out
+
+
+def day_income(repo, day: str) -> dict:
+    """
+    What was actually taken on one day: `{"paid", "plans", "unpriced"}`.
+
+    Keyed on `paid_on`, never on when the plan was typed in. Reception
+    writes a plan down when the client asks for it and dates the payment for
+    the day it is due, so a plan entered on Tuesday for Thursday's money
+    belongs to Thursday -- open the dashboard on Thursday and there it is.
+    Dating it by entry would put Thursday's cash in Tuesday's till and take
+    it out again the next morning.
+
+    An unpaid plan has no date at all and falls out of every day rather than
+    counting as zero in one, which is the rule the month's figures already
+    follow.
+    """
+    r = repo.takings("paid_on", day, next_day(day))
+    return {"paid": round(r["paid"], 2), "plans": r["plans"],
+            "unpriced": r["unpriced"]}
+
+
+# ======================================================================
 # Freezing a plan
 #
 # A client goes away for a month and asks to pause. Three things have to

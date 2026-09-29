@@ -4,7 +4,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useApi } from '../api';
 import { fmtTime, monthLabel, thisMonth } from '../lib/format';
 import DataTable from '../components/DataTable';
-import { Pill, BalancePill } from '../components/Pill';
+import { Pill } from '../components/Pill';
 import Empty from '../components/Empty';
 
 export default function Dashboard() {
@@ -73,12 +73,30 @@ export default function Dashboard() {
           <div className="v">{d.today_sessions.length}</div>
           <div className="n">{s.sessions_week} this week</div>
         </div>
+        {/* Today's till, by the day the payment is dated rather than the day
+            the plan was typed in — a plan written down on Tuesday for
+            Thursday's money appears here on Thursday. That is why it sits in
+            this row, with the rest of today, and not beside the two
+            period figures further down. */}
+        <div className="box kpi">
+          <div className="k">TAKEN TODAY</div>
+          <div className="v" style={{ fontSize: 22, paddingTop: 6, color: 'var(--brand-deep)' }}>
+            {s.day_income.toLocaleString()}{' '}
+            <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
+          </div>
+          <div className="n">
+            {s.day_plans
+              ? `${s.day_plans} plan${s.day_plans === 1 ? '' : 's'} paid today`
+              : 'nothing paid yet today'}
+            {s.day_unpriced ? ` · ${s.day_unpriced} with no amount` : ''}
+          </div>
+        </div>
         <div className="box kpi">
           <div className="k">NEED ATTENTION</div>
           <div className="v" style={{ color: d.attention.length ? 'var(--warn)' : 'var(--ok)' }}>
             {d.attention.length}
           </div>
-          <div className="n">low, expiring or unassigned</div>
+          <div className="n">ending, out or down to one — today</div>
         </div>
       </div>
 
@@ -198,10 +216,18 @@ export default function Dashboard() {
                   cell: r => r.phone || '—',
                 },
                 {
-                  label: 'STATUS', sortValue: r => (r.unassigned > 0 ? -1 : (r.remaining ?? 999)),
-                  cell: r => (r.unassigned > 0
-                    ? <Pill kind="warn">{r.unassigned} unassigned</Pill>
-                    : <BalancePill row={r} />),
+                  /* Which of the three it is, not just how many are left —
+                     "ran out today" and "ends today" are different
+                     conversations, and a bare balance tells reception
+                     neither. A plan can be two of them at once. */
+                  label: 'TODAY', sortValue: r => (r.remaining ?? 999),
+                  cell: r => (
+                    <>
+                      {r.ran_out ? <Pill kind="bad">ran out today</Pill> : null}
+                      {r.renew ? <Pill kind="bad">ends today</Pill> : null}
+                      {r.one_left ? <Pill kind="warn">1 left</Pill> : null}
+                    </>
+                  ),
                 },
               ]}
             />

@@ -186,6 +186,14 @@
   #nameHits{max-height:44vh;overflow-y:auto;margin-top:9px}
   #nameHits .swaprow{padding:9px 11px}
   #nameHits .n{font-size:13px}
+  /* The mobile, under the name rather than beside it: a row that has to fit
+     a sidebar cannot put two variable-width strings on one line without one
+     of them truncating, and the name is the one being read. */
+  #nameHits .ph{display:block;font-family:var(--mono);font-size:11px;
+                color:var(--dim);letter-spacing:.4px;margin-top:2px}
+  /* .swaprow .w is nowrap-with-ellipsis for the one-line swap lists; here it
+     holds two lines on purpose, so the second is not clipped away. */
+  #nameHits .swaprow .w{white-space:normal}
   .srcstat{font-family:var(--mono);font-size:10.5px;color:var(--dim);
            display:flex;align-items:center;gap:7px;padding:9px 2px}
   .led{width:8px;height:8px;border-radius:50%;background:var(--dim);flex-shrink:0}
@@ -550,14 +558,22 @@ function renderNameHits(list){
     : `${list.length} found`);
   /* Same row shape as the swap lists: mono identifier, then the thing being
      chosen, then a tag. The balance is what reception needs to see before
-     picking, not after. */
+     picking, not after.
+
+     The mobile sits under the name because a name on its own does not pick
+     anybody out: this academy has two of several names, and the number is
+     what the parent gives over the phone and what reception reads back. The
+     member number was always here — it is what gets typed in when the
+     scanner is down — so the row now carries all three things a client can
+     be identified by, and picking the wrong sibling stops being possible. */
   $('nameHits').innerHTML = shown.map(c => {
     const tag = c.remaining == null ? '<span class="pill grey">no plan</span>'
       : c.remaining <= 0 ? '<span class="pill bad">0 left</span>'
       : `<span class="pill ${c.remaining <= 2 ? 'warn' : 'ok'}">${c.remaining} left</span>`;
+    const phone = c.phone ? `<span class="ph">${esc(c.phone)}</span>` : '';
     return `<button class="swaprow" data-client="${c.id}">
       <span class="t">${String(c.id).padStart(5, '0')}</span>
-      <span class="w">${esc(c.name_en)}</span>
+      <span class="w">${esc(c.name_en)}${phone}</span>
       ${tag}</button>`;
   }).join('');
   document.querySelectorAll('#nameHits .swaprow').forEach(btn => {

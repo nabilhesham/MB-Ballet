@@ -209,12 +209,20 @@ def test_the_dashboard_stays_under_its_ceiling(client):
     # Was 26: expected_today() used to settle a second time, and plan_states()
     # used to cost three calls rather than one.
     #
-    # The ceiling is the higher of the two backends, which is Mongo at 19.
+    # The ceiling is the higher of the two backends, which is Mongo at 21.
     # That is not slack: sessions_in_range() answers the booked/attended
     # counts with a second aggregate there, where SQLite folds them into a
     # correlated subquery inside the one statement. A genuine extra round
     # trip, counted honestly.
-    assert len(counted) <= 19, counted.report()
+    #
+    # Was 19, and the two added are the day-scoped figures: one
+    # plan_slot_times() for the attention list and one takings() for the
+    # day's income. Both are single calls for the whole page — which is the
+    # property this file is about — and the attention list they replaced a
+    # standing rule with could not have been answered from plan_rows() alone,
+    # since that counts a plan's bookings as they stand now and the question
+    # is where each slot falls.
+    assert len(counted) <= 21, counted.report()
 
 
 def test_the_clients_list_does_not_grow_a_query_per_client(client):

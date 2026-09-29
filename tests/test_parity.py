@@ -251,6 +251,17 @@ def test_the_port_methods_agree(built):
         ("card_counts_bulk", lambda r: r.card_counts_bulk([a.dual, a.planless])),
         ("taught_totals_bulk", lambda r: r.taught_totals_bulk([a.ana, a.bea])),
         ("last_session_ts", lambda r: r.last_session_ts(a.dual_ballet_plan)),
+        # Where every slot of a plan falls, which is what makes "how many did
+        # they have left on the 12th" answerable. Both backends sort by the
+        # session's start and one pushes inside an aggregate, so the order is
+        # the part worth holding still.
+        ("plan_slot_times", lambda r: r.plan_slot_times(
+            [a.dual_ballet_plan, a.dual_flex_plan])),
+        ("plan_slot_times none", lambda r: r.plan_slot_times([])),
+        # The day's takings, and the nullable column behind them: an unpaid
+        # plan has no paid_on, and a bare range comparison matches null on
+        # MongoDB and never on SQLite.
+        ("takings paid_on", lambda r: r.takings("paid_on", "2000-01-01", "2999-01-01")),
         ("max_starts_at", lambda r: r.max_starts_at(a.ballet_sessions[:4])),
         ("slot_conflict", lambda r: r.slot_conflict(
             later_today(3), later_today(3) + 3600)),
