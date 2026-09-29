@@ -54,7 +54,9 @@ def test_the_dashboard_answers(client):
     r = client.get("/api/dashboard")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) >= {"stats", "today_sessions", "recent", "attention", "today"}
+    # No "attention": that list moved to Cards & renewals, where a renewal
+    # is actually started from. See tests/test_day_attention.py.
+    assert set(body) >= {"stats", "today_sessions", "recent", "today"}
 
 
 def test_the_dashboard_lists_todays_session(client):

@@ -2,24 +2,34 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useApi } from '../api';
+import { todayISO } from '../lib/format';
 import DataTable from '../components/DataTable';
 import Avatar from '../components/Avatar';
 import { Pill, BalancePill } from '../components/Pill';
 import Empty from '../components/Empty';
 
 export default function Cards() {
-  // The day filter, and the same draft/applied split the dashboard's period
+  // Today, because that is the question this screen is open to answer: who
+  // needs renewing now. It used to open on the standing list — everyone
+  // missing a card or holding slots with no dates — which is a real view and
+  // is still one press away under "Show all", but it is not what reception
+  // comes here for.
+  //
+  // Draft and applied are kept apart, the same split the dashboard's period
   // and the instructor page's range use: a date input fires on every edit,
   // so binding the request straight to it would reload the list for a
-  // half-typed year. Empty is the standing list — everyone who needs a card,
-  // a renewal, or has slots nobody has written dates against.
-  const [draft, setDraft] = useState('');
-  const [day, setDay] = useState('');
+  // half-typed year.
+  const [today] = useState(todayISO);
+  const [draft, setDraft] = useState(today);
+  const [day, setDay] = useState(today);
   const { data: list, loading, error } =
     useApi('/clients?status=attention' + (day ? `&on=${day}` : ''));
   const nav = useNavigate();
 
   const apply = () => setDay(draft);
+  // "Show all" drops the day and gives back the standing list: everyone
+  // without a card, everyone whose slots have no dates. Those are not
+  // questions about a date at all, so they have nowhere else to live.
   const clear = () => { setDraft(''); setDay(''); };
 
   const issue = c => {
@@ -31,7 +41,6 @@ export default function Cards() {
         <>
           {c.ran_out ? <Pill kind="bad">ran out</Pill> : null}
           {c.renew ? <Pill kind="bad">plan ends</Pill> : null}
-          {c.one_left ? <Pill kind="warn">1 left</Pill> : null}
         </>
       );
     }
@@ -65,7 +74,7 @@ export default function Cards() {
           <h1>Cards &amp; renewals</h1>
           <div className="sub">
             {day
-              ? 'Plans ending that day, plans whose last session falls on it, and plans down to one'
+              ? 'Plans ending that day, and plans whose last session falls on it'
               : 'Clients who need a card, a renewal, or have sessions still unassigned'}
           </div>
         </div>
@@ -74,7 +83,7 @@ export default function Cards() {
       <div className="box pad0 dt-host">
         <DataTable
           rows={list} rowKey={r => r.id} search="Search clients…" bar={bar}
-          empty={day ? 'Nobody on that day.' : 'Nothing needs attention.'}
+          empty={day ? 'Nobody to renew on that day.' : 'Nothing needs attention.'}
           columns={[
             { label: '', sortable: false, style: { width: 54 }, cell: r => <Avatar client={r} /> },
             {

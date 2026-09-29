@@ -91,13 +91,6 @@ export default function Dashboard() {
             {s.day_unpriced ? ` · ${s.day_unpriced} with no amount` : ''}
           </div>
         </div>
-        <div className="box kpi">
-          <div className="k">NEED ATTENTION</div>
-          <div className="v" style={{ color: d.attention.length ? 'var(--warn)' : 'var(--ok)' }}>
-            {d.attention.length}
-          </div>
-          <div className="n">ending, out or down to one — today</div>
-        </div>
       </div>
 
       {/* The period sits above the two cards it governs and nowhere else, so
@@ -200,39 +193,11 @@ export default function Dashboard() {
         />
       </div>
 
-      <div className="grid g2" style={{ marginTop: 24 }}>
-        <div>
-          <h2>Needs attention</h2>
-          <div className="box pad0 dt-host">
-            <DataTable
-              rows={d.attention}
-              rowKey={r => r.id}
-              onRowClick={r => nav(`/client/${r.id}`)}
-              empty="Everyone is in good standing."
-              columns={[
-                { label: 'CLIENT', sortValue: r => r.name_en, cell: r => r.name_en },
-                {
-                  label: 'MOBILE', className: 'mute num', sortValue: r => r.phone || '',
-                  cell: r => r.phone || '—',
-                },
-                {
-                  /* Which of the three it is, not just how many are left —
-                     "ran out today" and "ends today" are different
-                     conversations, and a bare balance tells reception
-                     neither. A plan can be two of them at once. */
-                  label: 'TODAY', sortValue: r => (r.remaining ?? 999),
-                  cell: r => (
-                    <>
-                      {r.ran_out ? <Pill kind="bad">ran out today</Pill> : null}
-                      {r.renew ? <Pill kind="bad">ends today</Pill> : null}
-                      {r.one_left ? <Pill kind="warn">1 left</Pill> : null}
-                    </>
-                  ),
-                },
-              ]}
-            />
-          </div>
-        </div>
+      {/* Recent activity on its own now. "Needs attention" lived beside it
+          and has moved to Cards & renewals — the screen a renewal is
+          actually started from, where it carries a day filter. A list of
+          names on the landing page was a list you navigated away from. */}
+      <div style={{ marginTop: 24 }}>
         <div>
           <h2>Recent activity</h2>
           <div className="box pad0 dt-host">

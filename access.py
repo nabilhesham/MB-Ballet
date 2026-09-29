@@ -2229,18 +2229,20 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
 # being read, and the day a plan actually ran out looked exactly like the
 # four days either side of it.
 #
-# These three questions are about a day instead, and each has something
-# that can be done about it while the client is still in the building:
+# These two questions are about a day instead, and both are a renewal
+# conversation that can be had while the client is still in the building:
 #
-#   renew     -- the plan ends on this day
-#   ran_out   -- the last slot they hold falls on this day, so they finish
-#                today with nothing for next week
-#   one_left  -- one session stands between them and that
+#   renew    -- the plan ends on this day
+#   ran_out  -- the last slot they hold falls on this day, so they finish
+#               today with nothing for next week
 #
-# The day is passed in rather than read off the clock, which is what lets
-# the dashboard ask about today and the Cards screen ask about any date --
-# one rule with two callers instead of a second copy to drift. Same shape
-# as `sessions_in_range(start, end)` and `settle_absences(now, ...)`.
+# There was a third, "one session left". It is gone: a warning about a day
+# still to come rather than a thing to do on this one, and on a screen whose
+# job is renewals it padded every day with people still coming next week.
+#
+# The day is passed in rather than read off the clock, so the Cards screen
+# can ask about any date and opens on today. Same shape as
+# `sessions_in_range(start, end)` and `settle_absences(now, ...)`.
 # ======================================================================
 
 def next_day(iso: str) -> str:
@@ -2256,9 +2258,17 @@ def day_attention(repo, day: str, states: dict) -> dict:
     are holding it before they get here, and asking for it again would be a
     round trip spent on rows in hand.
 
-    Returns `{sub_id: {"renew", "ran_out", "one_left", "remaining_on"}}` for
-    the plans that match at least one of the three, and nothing at all for
-    the rest, so a caller filters on membership.
+    Returns `{sub_id: {"renew", "ran_out", "remaining_on"}}` for the plans
+    that match either, and nothing at all for the rest, so a caller filters
+    on membership.
+
+    **Two questions, not three.** "One session left" was a third and is
+    gone: it is a warning about a day still to come rather than a thing to
+    do on this one, and on a screen whose job is renewals it padded every
+    day's list with people who are still coming next week. What is left is
+    the two that are finished business by the end of the day -- the plan
+    ends, or the last slot they hold falls on it -- and those are what a
+    renewal conversation is actually about.
 
     **A frozen plan is never in it.** It is deliberately paused; a paused
     plan "running out" is not something anybody acts on, and it is the same
@@ -2287,23 +2297,14 @@ def day_attention(repo, day: str, states: dict) -> dict:
         # a client who finished last month reappears on every list for ever.
         # The slot that took them to nothing has to be this day's own.
         ran_out = remaining_on == 0 and remaining_before > 0
-        # One left, and a session still to come that they will be in for.
-        #
-        # The second half is what stops this being the standing rule again.
-        # A plan whose slots are all behind it and still holds one nobody has
-        # booked a date for sits at "1 left" for ever, so without it the same
-        # name appeared on every future day the screen could be set to --
-        # which is exactly what a day filter is supposed to end. Whether they
-        # are down to their last is a fact about a day; whether anything is
-        # still coming is what makes it that day's business. A slot with no
-        # date is still theirs and still wants booking, and the standing list
-        # is where that is said -- see /api/clients?status=attention.
-        still_running = any(d >= day for d in days)
-        one_left = remaining_on == 1 and still_running
+        # The plan's own end date, not "has expired by now". Every other
+        # question on this screen is about one day, and "expired at some
+        # point before this" is the standing condition the day filter
+        # replaced -- it would put every lapsed client on every later day.
         renew = st["expires_on"] == day
-        if renew or ran_out or one_left:
+        if renew or ran_out:
             out[sid] = {"renew": renew, "ran_out": ran_out,
-                        "one_left": one_left, "remaining_on": remaining_on}
+                        "remaining_on": remaining_on}
     return out
 
 
