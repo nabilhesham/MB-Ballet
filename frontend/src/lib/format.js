@@ -18,14 +18,22 @@ export const fmtFull = ts =>
 export const fmtDay = ts =>
   new Date(ts * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
 
-export const todayISO = () => new Date().toISOString().slice(0, 10);
-
 /* A timestamp as its local calendar day, "YYYY-MM-DD". Not toISOString():
    that is UTC, and an evening class in Alexandria can land on the next day. */
 export const isoDay = ts => {
   const d = new Date(ts * 1000);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
+
+/* Today, as the local calendar day. Through isoDay() for the reason written
+   above it: this was `new Date().toISOString().slice(0, 10)`, which is UTC,
+   and Cairo is two or three hours ahead of it — so between local midnight
+   and 2am every default date in the app was yesterday's. A quiet hour for an
+   academy, but the values are real: the day a client was written down as
+   joining, the day an appointment is booked for, the day a plan starts, and
+   the day the Cards screen opens on. The same trap the line above exists to
+   avoid, in the one helper that had not been fixed. */
+export const todayISO = () => isoDay(Date.now() / 1000);
 
 /* An ISO day "YYYY-MM-DD" as what a receptionist reads, the other direction
    from isoDay() above. Split rather than handed to `new Date(iso)`, which

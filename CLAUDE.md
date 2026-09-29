@@ -131,8 +131,13 @@ second filter back to make it add up — `revenue` is the number that is
 period-bound, and the card says "new or returning" under it for exactly that
 contrast.
 
-**The rest of the dashboard is about today, and two of its figures are
-about *this* day rather than about a standing condition.**
+**The rest of the dashboard is about what is happening today** — who
+arrived, what is running, and what came in. It carries no list of names:
+"Needs attention" moved to **Cards & renewals**, which is the screen a
+renewal is actually started from, so a list on the landing page was a list
+you navigated away from. That also took three round trips off the page
+reception opens most (the live plans, their states, and every slot date
+behind them).
 
 **TAKEN TODAY is keyed on `paid_on`, never on when the plan was typed in**
 (`access.day_income()`). Reception writes a plan down when the client asks
@@ -144,16 +149,14 @@ date at all and falls out of every day rather than counting as zero in one,
 which is the rule the month's figures already follow; a plan paid with no
 amount written down is still counted separately, never as zero.
 
-**Needs attention asks three questions about one day**
-(`access.day_attention()`), and the day is passed in — which is what lets
-the dashboard ask about today and the Cards screen ask about any date, one
-rule with two callers rather than a second copy to drift:
+**Cards & renewals asks two questions about one day**
+(`access.day_attention()`), and the day is passed in rather than read off
+the clock — the screen opens on today and reception can set it to any date:
 
 | | what it means |
 |---|---|
 | `renew` | the plan ends on that day |
 | `ran_out` | the last slot they hold falls on that day, so they finish with nothing for next week |
-| `one_left` | one session stands between them and that, **and a dated session is still to come** |
 
 It replaced "two or fewer left, expiring inside a week, or slots with no
 dates" — a fair description of a client and a poor description of a day's
@@ -161,17 +164,18 @@ work. The same twenty names sat on it for a fortnight, so it stopped being
 read, and the day a plan actually ran out looked exactly like the four days
 either side of it.
 
-**Two things in that table are decisions, not details.** `ran_out` is the
-day it *happened*, not "is at zero" — otherwise every client who never
-renewed stays on every list for ever, which is the failure being fixed. And
-`one_left` needs something still dated ahead of it, because a plan holding
-one slot nobody has booked a date against sits at "1 left" indefinitely and
-would reappear on every future day the screen could be set to. Whether they
-are down to their last is a fact about a day; whether anything is still
-coming is what makes it *that* day's business. A slot with no date is still
-theirs and still wants booking — the standing list
-(`/api/clients?status=attention` with no `on=`) is where that is said, and
-it keeps the old rules unchanged.
+**There was a third question and dropping it was the point.** "One session
+left" is a warning about a day still to come rather than something to do on
+this one, and on a screen whose whole job is renewals it padded every day's
+list with people still coming next week. What is left is the two that are
+finished business by the end of the day, which is exactly what a renewal
+conversation is about.
+
+**`ran_out` is the day it *happened*, not "is at zero".** Otherwise every
+client who never renewed stays on every later day's list for ever, which is
+the failure the day filter exists to end. `renew` is the plan's own end date
+for the same reason — "expired at some point before this" is the standing
+condition, not a fact about a day.
 
 Remaining is counted **as of that day**, from where each slot actually falls
 (`repo.plan_slot_times()`): everything on or before it is spent, everything
@@ -179,6 +183,11 @@ after is still theirs, and a cancelled session spends nothing because nobody
 attended a class that did not run. `plan_rows()` cannot answer this — it
 counts a plan's bookings as they stand now, which only ever means today.
 A frozen plan is never on the list at all; it is deliberately paused.
+
+**The standing list is still there, under "Show all"** — everyone without a
+card, everyone holding slots with no dates. Those are not questions about a
+date at all, so they have nowhere else to live, and
+`/api/clients?status=attention` with no `on=` is unchanged.
 
 **Tables sort and search via `<DataTable>`** (`frontend/src/components/DataTable.jsx`),
 a controlled component that replaced app.js's old `enhanceTables()`. Click a
@@ -2817,13 +2826,14 @@ directly:
 A reception scan is 1.2s when it follows a write (the check-in before it
 invalidated the sweep) and 0.58s when it does not, from the 1.1s it was.
 
-**The dashboard has since gained two round trips and the figure above is
-that much stale** — one `plan_slot_times()` for the day-scoped attention
-list and one `takings()` for the day's income, both single calls for the
-whole page rather than anything per client, which is the property this
-section is about. `tests/test_query_budget.py`'s ceiling moved 19 -> 21 with
-them. The timings have not been re-measured against Atlas since; the trip
-counts have.
+**The dashboard's figure above is stale in the cheap direction now.** It
+gained two round trips with the day-scoped figures (one `plan_slot_times()`,
+one `takings()`) and then lost three when the attention list moved to Cards
+& renewals: `active_plans_with_clients()`, `plan_rows()` behind
+`plan_states()`, and `plan_slot_times()` with it.
+`tests/test_query_budget.py`'s ceiling went 19 -> 21 -> 18, and its comment
+says which of those is measured and which is arithmetic. The timings have
+not been re-measured against Atlas since; the trip counts have, on SQLite.
 
 **Pagination was considered and is the wrong tool.** The academy holds 254
 clients, 402 sessions and 1,144 bookings; a page that fetches 402 rows in one

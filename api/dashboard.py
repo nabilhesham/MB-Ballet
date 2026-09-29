@@ -54,39 +54,18 @@ def dashboard(month_from: str = None, month_to: str = None):
                 "status": "scheduled"}),
         }
 
-        # The attention list is about **today**, not about a standing
-        # condition. access.day_attention() is the whole rule and the Cards
-        # screen asks it the same question about whatever date reception
-        # picks; see the note above it for why a week-wide "expiring soon"
-        # stopped being read.
+        # No attention list here. It moved to Cards & renewals, which is the
+        # screen that acts on it -- a renewal is done from a client's
+        # profile, so a list of names on the landing page was a list you
+        # navigated away from. access.day_attention() has one caller now,
+        # /api/clients?status=attention&on=, and the dashboard is back to
+        # being about what is happening today: who arrived, what is running,
+        # and what came in.
         #
-        # One query for the plans and one for all their counts, rather than
-        # plan_state() per client. On a local file the difference is
-        # invisible; against a networked backend it is three round trips per
-        # client, which is the whole page.
-        live = repo.active_plans_with_clients()
-        states = access.plan_states(repo, [r["sub_id"] for r in live])
-        flags = access.day_attention(repo, today, states)
-        attention = []
-        for r in live:
-            why = flags.get(r["sub_id"])
-            if not why:
-                continue
-            st = states[r["sub_id"]]
-            attention.append({
-                "id": r["id"], "name_en": r["name_en"], "phone": r["phone"],
-                "plan": r["plan"], "expires_on": st["expires_on"],
-                "remaining": why["remaining_on"],
-                "unassigned": st["unassigned"],
-                "expired": st["expires_on"] < today,
-                "renew": why["renew"], "ran_out": why["ran_out"],
-                "one_left": why["one_left"],
-            })
-        # Emptiest first, then the earliest end date: the person who cannot
-        # come back tomorrow is the one to speak to first.
-        attention.sort(key=lambda x: (x["remaining"], x["expires_on"], x["id"]))
-
+        # This also takes three round trips off the page -- the plans, their
+        # states and their slot dates -- which is the whole of what the
+        # day-scoped list cost here. See tests/test_query_budget.py.
         return {"stats": stats, "today_sessions": today_sessions,
-                "recent": recent, "attention": attention[:20], "today": today}
+                "recent": recent, "today": today}
     finally:
         repo.close()

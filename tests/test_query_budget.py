@@ -209,20 +209,26 @@ def test_the_dashboard_stays_under_its_ceiling(client):
     # Was 26: expected_today() used to settle a second time, and plan_states()
     # used to cost three calls rather than one.
     #
-    # The ceiling is the higher of the two backends, which is Mongo at 21.
-    # That is not slack: sessions_in_range() answers the booked/attended
-    # counts with a second aggregate there, where SQLite folds them into a
-    # correlated subquery inside the one statement. A genuine extra round
-    # trip, counted honestly.
+    # The ceiling is the higher of the two backends, which is Mongo. That is
+    # not slack: sessions_in_range() answers the booked/attended counts with
+    # a second aggregate there, where SQLite folds them into a correlated
+    # subquery inside the one statement. A genuine extra round trip, counted
+    # honestly.
     #
-    # Was 19, and the two added are the day-scoped figures: one
-    # plan_slot_times() for the attention list and one takings() for the
-    # day's income. Both are single calls for the whole page — which is the
-    # property this file is about — and the attention list they replaced a
-    # standing rule with could not have been answered from plan_rows() alone,
-    # since that counts a plan's bookings as they stand now and the question
-    # is where each slot falls.
-    assert len(counted) <= 21, counted.report()
+    # 19 -> 21 when the day-scoped attention list arrived, then 21 -> 18 when
+    # it moved to Cards & renewals and took three calls with it:
+    # active_plans_with_clients(), plan_rows() behind plan_states(), and
+    # plan_slot_times(). What stayed is the day's takings, one takings().
+    #
+    # **Which figure is measured and which is reasoned**: SQLite is measured
+    # here on every run and is 15. The 18 is the Mongo number carried forward
+    # by subtracting three single calls from the 21 that was measured against
+    # Atlas — each of those three is one aggregate there, so the arithmetic
+    # holds, but it has not been re-measured. Re-measure it the next time
+    # anyone has the cluster in front of them; the property this file
+    # defends, that none of these grows per client, is measured either way by
+    # the test above.
+    assert len(counted) <= 18, counted.report()
 
 
 def test_the_clients_list_does_not_grow_a_query_per_client(client):

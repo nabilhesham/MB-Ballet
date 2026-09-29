@@ -138,24 +138,27 @@ def test_running_out_belongs_to_the_day_it_happened_and_no_other(repo, desk):
     _, sub = desk.client("Finishes Today", total=2, slots=[-4, 0],
                          expires=_day(0))
 
-    yesterday = _flags(repo, _day(-1), [sub])
     today = _flags(repo, _day(0), [sub])
-    tomorrow = _flags(repo, _day(1), [sub])
 
     assert today[sub]["ran_out"] is True
     assert today[sub]["remaining_on"] == 0
-    # The day before they still had one, which is its own warning.
-    assert yesterday[sub]["ran_out"] is False and yesterday[sub]["one_left"]
-    # And the day after they are simply gone from it.
-    assert sub not in tomorrow
+    # Not the day before, when they still had one to come, and not the day
+    # after, when it is finished business. One day, the day it happened.
+    assert sub not in _flags(repo, _day(-1), [sub])
+    assert sub not in _flags(repo, _day(1), [sub])
 
 
-def test_one_left_is_counted_as_of_that_day(repo, desk):
-    """Two slots ahead today is one slot ahead once the first is spent."""
+def test_a_client_with_sessions_still_to_come_is_on_no_day_but_the_last(repo, desk):
+    """
+    The third question this rule used to ask -- "one session left" -- is
+    gone, and this is what that means on the screen: somebody mid-plan is
+    nobody's renewal today, whatever their balance, until the day their last
+    slot actually falls.
+    """
     _, sub = desk.client("Two Ahead", total=3, slots=[-1, 2, 5],
                          expires=_day(20))
-    assert sub not in _flags(repo, _day(0), [sub])        # two still to come
-    assert _flags(repo, _day(2), [sub])[sub]["one_left"] is True
+    assert sub not in _flags(repo, _day(0), [sub])
+    assert sub not in _flags(repo, _day(2), [sub])        # one left, not yet due
     assert _flags(repo, _day(5), [sub])[sub]["ran_out"] is True
 
 
@@ -228,6 +231,21 @@ def test_the_dashboard_carries_the_days_takings(api, desk):
     assert s["day_income"] == 750.0 and s["day_plans"] == 1
 
 
+def test_the_dashboard_no_longer_carries_an_attention_list(api, desk):
+    """
+    It moved to Cards & renewals, which is where a renewal is actually
+    started from — a list of names on the landing page was a list you
+    navigated away from. Asserted rather than assumed, because the cost of
+    leaving it behind is three round trips on the page reception opens
+    most: the live plans, their states, and every slot date behind them.
+    """
+    desk.client("Finishes Today", total=2, slots=[-4, 0], expires=_day(60))
+    d = api.get("/api/dashboard").json()
+    assert "attention" not in d
+    # And the day is still there, because the takings figure is about it.
+    assert d["today"] == _day(0)
+
+
 def test_the_cards_list_narrows_to_the_day_asked_for(api, desk):
     """
     The Cards screen's filter and the dashboard's list are the same rule
@@ -243,11 +261,10 @@ def test_the_cards_list_narrows_to_the_day_asked_for(api, desk):
 
     today = {c["name_en"]: c
              for c in api.get(f"/api/clients?status=attention&on={_day(0)}").json()}
-    assert set(today) == {"Finishes Today", "Finishes Next Week"}
-    # The same day, two different conversations — which is why the row says
-    # which of the three it is rather than only how many are left.
+    # Only the one finishing today. The other still has a session to come,
+    # and a screen for renewals should not be listing her yet.
+    assert set(today) == {"Finishes Today"}
     assert today["Finishes Today"]["ran_out"] is True
-    assert today["Finishes Next Week"]["one_left"] is True
 
     later = {c["name_en"]: c
              for c in api.get(f"/api/clients?status=attention&on={_day(7)}").json()}
@@ -263,26 +280,3 @@ def test_a_day_that_is_not_a_day_is_refused_in_words(api):
     assert r.status_code == 400
     assert "day" in r.json()["detail"].lower()
 
-
-def test_one_left_needs_a_session_still_to_come(repo, desk):
-    """
-    A plan holding one slot nobody has put a date against sits at "1 left"
-    for ever, so without this it reappeared on every future day the Cards
-    screen could be set to — the standing list creeping back in through the
-    day filter. Whether they are down to their last is a fact about a day;
-    whether anything is still coming is what makes it *that* day's business.
-    """
-    _, sub = desk.client("Last One Unbooked", total=4, slots=[-9, -6, -3],
-                         expires=_day(90))
-    assert sub not in _flags(repo, _day(0), [sub])
-    assert sub not in _flags(repo, _day(30), [sub])
-
-
-def test_one_left_still_warns_before_the_session_itself(repo, desk):
-    """The other side of it: a dated session still ahead is exactly the
-    client to catch now, not on the day they walk in."""
-    _, sub = desk.client("One To Come", total=4, slots=[-9, -6, -3, 4],
-                         expires=_day(20))
-    assert _flags(repo, _day(0), [sub])[sub]["one_left"] is True
-    assert _flags(repo, _day(4), [sub])[sub]["ran_out"] is True
-    assert sub not in _flags(repo, _day(5), [sub])
