@@ -240,7 +240,9 @@ repo/             The data-access interface and its two implementations.
                   Repository section below.
   base.py          The twelve primitives, the transaction boundary, and the
                    admin methods. An ABC: a backend missing one fails at
-                   construction rather than at reception.
+                   construction rather than at reception -- and
+                   tests/test_backends_complete.py is what makes that
+                   true before a build rather than during one.
   ports.py         Tier two -- the named business questions that join,
                    aggregate, or compare-and-swap.
   filters.py       The filter dialect both backends speak.
@@ -2631,6 +2633,30 @@ discipline:
 The signatures make a join *impossible to express*, so "anything harder
 belongs in a named method" does not depend on anyone remembering it. About
 half the app's queries are this shape and need no method of their own.
+
+**A port method is declared on the ABC its implementations inherit**, and
+that is now checked rather than assumed. `repo/ports.py` is not one ABC but
+eight -- `SessionsPort`, `ClassesPort`, `BookingsPort`, `ClientsPort`,
+`AccessPort`, `PlansPort`, `InstructorsPort`, `EventsPort` -- and
+`repo/mongo/ports.py` mirrors them one class each, while `repo/sqlite/`
+answers the lot from one flat class. So an `@abstractmethod` added to the
+wrong one of the eight is satisfied by SQLite and leaves **MongoRepo
+abstract**, which Python reports only when something constructs it:
+
+```
+TypeError: Can't instantiate abstract class MongoRepo without an
+implementation for abstract method 'plan_slot_times'
+```
+
+Nothing in the ordinary suite constructs it -- the Mongo half is opt-in
+behind `MB_TEST_MONGO_URI` and normally skipped -- so the first thing to
+notice was a packaged `mongo` binary dying at startup in CI, a whole
+PyInstaller build later on a runner billed at 10x.
+`tests/test_backends_complete.py` asserts `__abstractmethods__` is empty for
+both backends, which needs no database, no URI and no network, and
+`build-macos.yml` asks the same question in one line before it packages.
+When it fires, the method is usually implemented -- on a class that does not
+inherit from the ABC the declaration went on.
 
 **Tier two, named business questions** (`repo/ports.py`): everything that
 joins, aggregates, has a computed predicate, or is a compare-and-swap, named

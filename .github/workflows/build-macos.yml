@@ -292,6 +292,43 @@ jobs:
             exit 1
           }
 
+      - name: Check both backends can actually be constructed
+        # Cheap, and it is the check this build once needed and did not have.
+        # A port method whose @abstractmethod sits on one ABC while its
+        # implementation lands on a class that does not inherit from that ABC
+        # leaves the backend abstract -- and Python only says so when
+        # something tries to construct it. The SQLite suite never constructs
+        # the Mongo one, the Mongo half of the suite is opt-in and normally
+        # skipped, so the first thing to notice was the smoke test below:
+        #
+        #   TypeError: Can't instantiate abstract class MongoRepo without an
+        #   implementation for abstract method 'plan_slot_times'
+        #
+        # ... a whole PyInstaller build later, on a runner billed at 10x.
+        # It needs no database, no URI and no network.
+        #
+        # Plain python rather than pytest: the dev requirements are
+        # deliberately not installed on a build machine, and should stay that
+        # way. tests/test_backends_complete.py is the same assertion for the
+        # ordinary suite.
+        #
+        # `>-` rather than `|`, and that is the YAML half of the batch trap
+        # in CLAUDE.md: a folded scalar joins these lines into ONE before
+        # bash sees them, so the Python arrives as a single line whatever it
+        # looks like here. Written under `|` it would either sit indented
+        # (IndentationError) or at column 0 (which ends the block and stops
+        # the file parsing at all). A plain `run:` cannot hold it either --
+        # the dict comprehension contains ": ", which a plain scalar may not.
+        run: >-
+          python3 -c 'import sys;
+          from repo.sqlite import SqliteRepo;
+          from repo.mongo import MongoRepo;
+          bad = {c.__name__: sorted(c.__abstractmethods__)
+          for c in (SqliteRepo, MongoRepo) if c.__abstractmethods__};
+          print("Both backends implement every port method.") if not bad
+          else sys.exit("No implementation for %s -- fix that before
+          spending a build on it." % bad)'
+
       - name: Package
         # The hidden imports live in academy.spec, not here.
         run: python3 -m PyInstaller academy.spec --clean --noconfirm
