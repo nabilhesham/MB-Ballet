@@ -99,8 +99,16 @@ export default function Sessions() {
   const shown = list.filter(inRange);
   const filtered = range.from || range.to;
 
-  const upcoming = shown.filter(s => s.starts_at >= now - 3600);
-  const past = shown.filter(s => s.starts_at < now - 3600).slice().reverse();
+  // A session is still ahead of you until it *ends*, which is its own
+  // duration and not a flat hour from the start: the hour put a 1.5-hour
+  // class under "past" half an hour before the instructor finished teaching
+  // it, which is the same mistake the absent sweep used to make from the
+  // other side. `ends_at` is the stored column for exactly this, so nothing
+  // here has to re-derive it -- the fallback is only for a row from a
+  // database opened before db.migrate() filled that column in.
+  const ended = s => (s.ends_at ?? s.starts_at + s.duration_hours * 3600) < now;
+  const upcoming = shown.filter(s => !ended(s));
+  const past = shown.filter(ended).slice().reverse();
 
   const openRepeat = async () => {
     const [classes, instructors] = await Promise.all([api('/classes'), api('/instructors')]);

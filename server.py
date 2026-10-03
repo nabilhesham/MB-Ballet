@@ -210,23 +210,39 @@ def _connect_or_explain():
 
 async def _settle_loop():
     """
-    Mark past no-shows absent, hourly. The same call runs on every read that
-    depends on attendance, so this is only a safety net for a screen left open
-    overnight.
+    Mark past no-shows absent, as each session ends.
+
+    The same call runs before every read that depends on attendance, so a
+    screen being used is never stale whatever this loop does. What it covers
+    is the laptop left on the kiosk, where nothing reads attendance for hours
+    at a time -- and that is where the wait between passes stopped being a
+    detail. It was a flat hour, so a client who did not turn up became absent
+    at some point in the hour after their class rather than when the class
+    finished, and the session page said "booked" in between.
+
+    `access.seconds_to_next_sweep()` is that wait now: the next session end,
+    or midnight for a dated freeze, bounded at both ends -- see the note
+    beside it. A failed pass waits a minute and tries again rather than
+    inheriting a deadline the exception may have left half-computed -- long
+    enough that a database that is down (an Atlas backend with no internet) is
+    retried rather than hammered, short enough that a blip costs one session's
+    worth of lateness at most.
     """
     await asyncio.sleep(15)
     while True:
+        wait = 60
         try:
             repo = data.connect()
             try:
                 n = access.settle_past_sessions(repo)
                 if n:
                     print(f"[settle] {n} booking(s) marked absent")
+                wait = access.seconds_to_next_sweep()
             finally:
                 repo.close()
         except Exception as e:
             print(f"[settle] skipped: {e}")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(wait)
 
 
 # ================================================================ caching

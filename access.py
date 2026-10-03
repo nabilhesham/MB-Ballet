@@ -574,6 +574,30 @@ def sweep_invalidate():
     _sweep_deadline = 0
 
 
+# How long the background sweep waits between passes. It used to be a flat
+# hour, which is the only reason a no-show ever became absent an hour after
+# their class rather than when it ended: the *rule* has always been
+# `ends_at < now` (settle_absences), but on a laptop sitting on the kiosk
+# screen nothing reads attendance, so the loop was the only thing applying it
+# and it woke on its own cadence instead of the timetable's.
+#
+# The deadline above already knows the exact moment there can be work -- the
+# next session end, or midnight for a freeze -- so the loop waits for that
+# instead. The floor keeps a session ending this very second from spinning
+# the loop (`next_sweep_deadline` answers `ends_at >= now`, and
+# settle_absences wants `<`, so the first pass after it has nothing to do);
+# the ceiling keeps the old hourly pass as a heartbeat for the things a
+# deadline cannot see -- a suspended laptop, a clock jump, a write made while
+# the loop was already asleep.
+SWEEP_WAIT_MIN = 5
+SWEEP_WAIT_MAX = 3600
+
+
+def seconds_to_next_sweep() -> float:
+    """How long until the sweep could next have something to do."""
+    return max(SWEEP_WAIT_MIN, min(_sweep_deadline - db.now(), SWEEP_WAIT_MAX))
+
+
 def _next_midnight(now: int) -> int:
     """
     The start of tomorrow, local time. The deadline is capped at this because
