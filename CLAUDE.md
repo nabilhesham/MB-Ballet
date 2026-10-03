@@ -1489,8 +1489,34 @@ reception wait for the exact start time helps nobody.
 
 **Past sessions settle themselves.** `access.settle_past_sessions()` marks any
 still-`booked` slot absent once its session has ended, and runs on startup,
-hourly, and before every read that touches attendance. Nothing on screen is
-stale.
+before every read that touches attendance, and on its own in the background.
+Nothing on screen is stale.
+
+**The background pass waits for the next session to end, not for an hour.**
+The rule has always been the session's own end — `settle_absences()` is
+`ends_at < now`, and `ends_at` is `starts_at + duration_hours*3600` — but
+`server.py`'s `_settle_loop` slept a flat hour between passes, and on the
+machine that matters that loop is the only thing applying the rule: a laptop
+sitting on the kiosk reads no attendance for hours at a time. So a client
+who did not turn up became absent at some point in the hour *after* their
+class rather than when the class finished, and the session page said
+"booked" in between.
+
+`access.seconds_to_next_sweep()` is the wait now — the deadline below, which
+already knows the exact moment there can be work. `SWEEP_WAIT_MIN` (5s) is
+what stops a session ending this very second spinning the loop, since
+`next_sweep_deadline()` answers `ends_at >= now` while `settle_absences()`
+wants `<`, so the pass that lands exactly on an end has nothing to do.
+`SWEEP_WAIT_MAX` (one hour) keeps the old cadence underneath as a heartbeat
+for what a deadline cannot see: a suspended laptop, a clock jump, a write
+made while the loop was already asleep. A failed pass waits a minute — long
+enough not to hammer a backend that is down, short enough that a blip costs
+one session's worth of lateness.
+
+The one screen that made the same mistake from the other side was the
+Sessions list, which split upcoming from past at a flat hour after the
+*start*: a 1.5-hour class moved to "past" half an hour before the instructor
+finished teaching it. It reads `ends_at` now, like everything else.
 
 **It skips itself when it provably has nothing to do, which is not the same
 as throttling it.** What the sweep acts on is wall-clock time crossing a
@@ -2198,6 +2224,37 @@ is the whole sentence reception reads and ends in what to do ("The lock did
 not open — open the door by hand"), and `technical` carries the code or the
 exception. The kiosk shows the first and never the second; the route prints
 the second, which is the only thing that explains a fault weeks later.
+
+**The answer is said twice, and both are deliberate.** `doorSay()` writes
+the amber line under the verdict, which is where it *stays* while the client
+is on screen; `doorPop()` is the panel along the bottom, which is what gets
+noticed. The line alone was 13px of mono under a photograph the size of the
+screen, and a lock that silently did not open is the one failure where
+somebody has to get up and walk to the door — reception was finding out from
+the client still standing there. Success gets a panel too, for the same
+reason the failure does: "did that work?" is otherwise answered by looking
+for a line nobody looks at.
+
+**It is along the bottom rather than over the middle**, which is not a
+styling preference. The client's photo is the largest element on this screen
+because it is the only real control against a card being passed between
+friends, and a box over the face at the exact moment reception is comparing
+it would trade one failure for a worse one. Same inline idiom as the swap
+and renewal panels — the kiosk has no modal machinery and wants none.
+
+**One Esc still clears one client.** With a verdict behind it, Esc clears
+the lot: the panel belongs to that client's check-in, and making it a second
+press would add a gesture to every single visit. With nothing behind it —
+the sidebar's **Open door** button — it is the only thing to clear, so Esc
+closes just it. The OK button closes the panel alone either way, for reading
+the verdict underneath. A new verdict closes it too (`show()`), because the
+last client's door is not this one's.
+
+It is on every path that opens the door, because all of them go through the
+one `openDoor()`: the automatic check-in after a scan or a lookup, the
+MANUAL CHECK-IN swap, and the sidebar button. And it is still never a gate —
+`locked()` does not know about it, the panel appears after the check-in is
+recorded, and a check-in is never waiting on it.
 
 **`configured()` is one question with one answer: is `EZVIZ_LOCK_SERIAL`
 set?** There is deliberately no `DOOR_BACKEND` switch — "is a lock set up"

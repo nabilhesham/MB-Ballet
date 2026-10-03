@@ -140,6 +140,40 @@
   .doorline.ok{color:var(--ok)}
   .doorline.bad{color:var(--warn)}
 
+  /* The door's answer, said where it cannot be missed. The line above is
+     13px of mono under a photograph the size of the screen, which is a fine
+     place to *record* what happened and a poor one to be told it: a lock
+     that silently did not open is the one failure where somebody has to get
+     up and walk to the door, and reception was finding out by the client
+     still standing there.
+
+     It sits along the bottom rather than over the middle on purpose. The
+     client's photo is the largest thing on this screen because it is the
+     only real control against a card being passed between friends, and a
+     box over the face at the exact moment reception is comparing it would
+     trade one failure for a worse one. Wide, loud and out of the way beats
+     centred and in front.
+
+     Same inline idiom as the swap and renewal panels: no modal machinery
+     here, and none wanted. */
+  #doorPop{position:fixed;left:0;right:0;bottom:0;z-index:40;display:none;
+           padding:0 22px 22px;justify-content:center;pointer-events:none}
+  #doorPop.on{display:flex}
+  .doorbox{pointer-events:auto;width:min(760px,100%);display:flex;align-items:center;
+           gap:18px;background:var(--surface);border:1px solid var(--line);
+           border-left:5px solid var(--line);border-radius:12px;padding:18px 20px;
+           box-shadow:0 18px 44px rgba(0,0,0,.55)}
+  #doorPop.ok .doorbox{border-color:var(--ok);background:var(--ok-soft)}
+  #doorPop.bad .doorbox{border-color:var(--warn);background:var(--warn-soft)}
+  .doorbox .w{flex:1;min-width:0}
+  .doorhead{font-size:21px;font-weight:700;letter-spacing:.5px;margin-bottom:3px}
+  #doorPop.ok .doorhead{color:var(--ok)}
+  #doorPop.bad .doorhead{color:var(--warn)}
+  .doorsub{font-size:14px;color:var(--mute);line-height:1.45}
+  #doorOk{background:transparent;border:1px solid var(--line);color:var(--ink);
+          border-radius:9px;padding:12px 22px;font-size:13px;letter-spacing:.4px}
+  #doorOk:hover{background:var(--surface-2)}
+
   /* Renewing at the desk. Same panel idiom as the swap above — an inline
      block, not a modal: the kiosk has no modal machinery and does not want
      any, and a form the receptionist reads at arm's length is better wide
@@ -399,6 +433,20 @@
       Open door</button>
 </aside>
 
+<!-- Whether the lock opened, in a sentence nobody has to go looking for.
+     Anchored to the bottom so it never covers the client's photo -- see the
+     note on #doorPop in the stylesheet. Esc clears it along with everything
+     else, so the gesture count per client does not change. -->
+<div id="doorPop" role="status" aria-live="polite">
+  <div class="doorbox">
+    <div class="w">
+      <div class="doorhead" id="doorHead"></div>
+      <div class="doorsub" id="doorSub"></div>
+    </div>
+    <button id="doorOk">OK</button>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[<>&"]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
@@ -643,7 +691,14 @@ window.addEventListener('keydown', e=>{
   /* Escape comes first, before every other guard: it is the only way a
      result leaves the screen now, so it has to work from the manual-entry
      box and from a focused button too, not just from the bare page. */
-  if(e.key==='Escape'){ reset(); return; }
+  if(e.key==='Escape'){
+    /* With a client on screen, one Esc clears the lot -- the door's popup
+       belongs to that client's check-in, and making it a second press would
+       add a gesture to every single visit. With nothing behind it (the
+       sidebar's Open door button) it is the only thing to clear. */
+    if(doorPopOpen() && !current){ doorPopClose(); return; }
+    reset(); return;
+  }
   if(e.target.matches('input,textarea,select,button')) return;
   if(mode === 'manual' || mode === 'name') return;   // typing is not a scan
   const now=performance.now(), gap=now-lastKey; lastKey=now;
@@ -789,7 +844,7 @@ function show(r, opts){
   $('renew').classList.remove('on'); $('renewGo').style.display='none';
   $('planUpd').classList.remove('on'); $('planGo').style.display='none';
   /* Last client's door result is not this one's. */
-  doorSay('');
+  doorSay(''); doorPopClose();
   $('stats').style.display=''; $('recent').style.display='';
 
   /* Three states, not two. A refusal the server marked "warn" is amber and
@@ -1298,10 +1353,27 @@ function doorSay(text, cls){
   el.className = 'doorline' + (cls ? ' ' + cls : '');
 }
 
+/* The popup is the same answer as the line above, said loudly. Both, not
+   one or the other: the line is where it stays while the client is on
+   screen, and this is what gets noticed. */
+function doorPop(ok, detail){
+  $('doorHead').textContent = ok ? 'DOOR OPENED' : 'THE DOOR DID NOT OPEN';
+  /* Shown verbatim, like the line: door.py writes the whole sentence and
+     ends it in what to do about it. On success there is nothing to do, so
+     the sentence is dropped rather than padded out. */
+  $('doorSub').textContent = ok ? '' : (detail || 'Open the door by hand');
+  $('doorPop').className = 'on ' + (ok ? 'ok' : 'bad');
+}
+
+function doorPopClose(){ $('doorPop').className = ''; }
+const doorPopOpen = () => $('doorPop').classList.contains('on');
+$('doorOk').onclick = doorPopClose;
+
 async function openDoor(){
   if(!doorHere) return;
   const btn = $('doorBtn');
   btn.disabled = true;
+  doorPopClose();
   doorSay('opening the door…');
   let r;
   try{
@@ -1314,6 +1386,7 @@ async function openDoor(){
      logs that, and a code on the kiosk is a code nobody can act on. */
   doorSay(r.detail || (r.ok ? 'Door opened' : 'The door did not open'),
           r.ok ? 'ok' : 'bad');
+  doorPop(!!r.ok, r.detail);
   r.ok ? beepOk() : beepWarn();
 }
 $('doorBtn').onclick = openDoor;
@@ -1393,7 +1466,7 @@ function reset(){
   $('renew').classList.remove('on');
   $('renewGo').style.display = 'none';
   $('renewBtn').style.display = 'none';
-  doorSay('');
+  doorSay(''); doorPopClose();
   // Nor does Esc out of a half-typed plan update record a payment.
   $('planUpd').classList.remove('on');
   $('planGo').style.display = 'none';
