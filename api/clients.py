@@ -63,7 +63,8 @@ class CardIn(BaseModel):
 
 # ---------------------------------------------------------------- routes
 @router.get("/api/clients")
-def list_clients(q: str = "", status: str = "all", on: str = None):
+def list_clients(q: str = "", status: str = "all", on: str = None,
+                 joined_from: str = None, joined_to: str = None):
     """
     `status` does two unrelated jobs. "archived" picks which half of the list
     to read — the same convention /api/instructors and /api/classes use.
@@ -77,10 +78,27 @@ def list_clients(q: str = "", status: str = "all", on: str = None):
     caller — the Cards screen opens on today and is the one place a renewal
     is started from. It is ignored for any other `status`, since there is
     nothing about a day in "every client".
+
+    `joined_from`/`joined_to` bound `joined_on` — when somebody first became
+    a client — and are **inclusive at both ends**, because that is what a
+    receptionist typing two dates into a form means by "between". Either may
+    be given alone. They are applied here rather than inside
+    `search_clients()`: the port would need the bounds on both backends for
+    a filter over a few hundred rows already in hand, and doing it before
+    the enrichment below means the plans and cards are only looked up for
+    the clients that survive it.
+
+    A client with no `joined_on` at all — the seed imports those, since the
+    roster sheets are the business record and a student with no date written
+    down must still be imported — falls out of any bounded range rather than
+    being swept to one end of it. There is no date to compare, and putting
+    them in would be inventing one.
     """
-    if on is not None:
+    for value in (on, joined_from, joined_to):
+        if value is None:
+            continue
         try:
-            date.fromisoformat(on)
+            date.fromisoformat(value)
         except (TypeError, ValueError):
             raise HTTPException(400, "Pick a day, or clear the date filter.")
     repo = data.connect()
@@ -88,6 +106,10 @@ def list_clients(q: str = "", status: str = "all", on: str = None):
         access.settle_past_sessions(repo)
         active = 0 if status == "archived" else 1
         out = repo.search_clients(active, q)
+        if joined_from or joined_to:
+            out = [d for d in out if d.get("joined_on")
+                   and (not joined_from or d["joined_on"] >= joined_from)
+                   and (not joined_to or d["joined_on"] <= joined_to)]
         today = date.today().isoformat()
         # Five queries for the whole list rather than four per client. The
         # difference is invisible on a local file and is the whole page

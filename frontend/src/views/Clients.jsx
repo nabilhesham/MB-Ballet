@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { useApi } from '../api';
+import { fmtISODay } from '../lib/format';
 import { useModal } from '../components/Modal';
 import DataTable from '../components/DataTable';
 import Avatar from '../components/Avatar';
@@ -28,6 +29,13 @@ import ClientForm from '../modals/ClientForm';
 export default function Clients() {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
+  // When they first joined. Draft and applied are kept apart and the range
+  // lands on a button, never on change: a date input fires on every edit, so
+  // "2" on the way to "2026" would reload the list for the year 2. The same
+  // split the Sessions range, the dashboard's period and the Cards day
+  // filter use.
+  const [draft, setDraft] = useState({ from: '', to: '' });
+  const [range, setRange] = useState({ from: '', to: '' });
   const { open } = useModal();
   const nav = useNavigate();
 
@@ -36,7 +44,15 @@ export default function Clients() {
     return () => clearTimeout(t);
   }, [query]);
 
-  const { data: list, loading, error, reload } = useApi(`/clients?q=${encodeURIComponent(debounced)}`);
+  const joined = (range.from ? `&joined_from=${range.from}` : '')
+    + (range.to ? `&joined_to=${range.to}` : '');
+  const { data: list, loading, error, reload } =
+    useApi(`/clients?q=${encodeURIComponent(debounced)}${joined}`);
+
+  const dirty = draft.from !== range.from || draft.to !== range.to;
+  const filtered = Boolean(range.from || range.to);
+  const applyRange = () => setRange({ ...draft });
+  const clearRange = () => { setDraft({ from: '', to: '' }); setRange({ from: '', to: '' }); };
 
   if (loading && list === null) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
@@ -63,6 +79,20 @@ export default function Clients() {
             placeholder="Search name, mobile or school…"
             value={query} onChange={e => setQuery(e.target.value)}
           />
+          {/* Beside the search rather than in a band of its own above it:
+              both act on the same list, so one row of controls reads as one
+              control. Same place the Cards screen's day filter sits. */}
+          <span className="dt-day">
+            <label htmlFor="joinedFrom">JOINED FROM</label>
+            <input id="joinedFrom" type="date" value={draft.from}
+                   onChange={e => setDraft(p => ({ ...p, from: e.target.value }))} />
+            <label htmlFor="joinedTo">TO</label>
+            <input id="joinedTo" type="date" value={draft.to}
+                   onChange={e => setDraft(p => ({ ...p, to: e.target.value }))} />
+            <button className="sm pri" onClick={applyRange} disabled={!dirty}>Apply</button>
+            <button className="sm" onClick={clearRange}
+                    disabled={!filtered && !dirty}>Show all</button>
+          </span>
           <span className="dt-count">{list.length} client{list.length === 1 ? '' : 's'}</span>
         </div>
         <DataTable
@@ -87,6 +117,15 @@ export default function Clients() {
             {
               label: 'SCHOOL', className: 'mute', hideSm: true, sortValue: r => r.school || '',
               cell: r => r.school || '—',
+            },
+            {
+              /* The column the range above filters on. A filter over
+                 something the table cannot show is a list that quietly
+                 disagrees with itself; it also sorts, which is the other
+                 thing anybody asks of a joining date. */
+              label: 'FIRST JOINED', className: 'mute num', hideSm: true,
+              sortValue: r => r.joined_on || '',
+              cell: r => (r.joined_on ? fmtISODay(r.joined_on) : '—'),
             },
             { label: 'PLAN', className: 'mute', sortValue: r => r.plan || '', cell: r => r.plan || '—' },
             {

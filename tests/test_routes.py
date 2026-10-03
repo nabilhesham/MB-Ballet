@@ -84,6 +84,103 @@ def test_an_archived_client_is_not_in_the_active_list(client):
     assert client.academy.archived in archived
 
 
+def test_the_class_roster_carries_each_students_balance(client):
+    """
+    The roster said what a student had attended and nothing about whether
+    they can still come, so the one whose plan ran out and the one down to a
+    single session both needed a profile opened to spot.
+    """
+    a = client.academy
+    rows = {r["id"]: r
+            for r in client.get(f"/api/classes/{a.ballet}").json()["students"]}
+    dana = rows[a.dual]
+    assert dana["remaining"] is not None and dana["expires_on"]
+
+
+def test_that_balance_is_this_classs_plan_and_not_another(client):
+    """
+    The one that matters. Dana holds twelve Ballet sessions and eight
+    Flexibility ones, and `repo.active_plans_for()` would answer with
+    whichever expires first across both — true about her, and not the
+    question the Ballet roster is asking. One plan per class per client is
+    what makes that answerable at all.
+    """
+    a = client.academy
+    ballet = {r["id"]: r
+              for r in client.get(f"/api/classes/{a.ballet}").json()["students"]}
+    flex = {r["id"]: r
+            for r in client.get(f"/api/classes/{a.flex}").json()["students"]}
+
+    assert ballet[a.dual]["plan"] == "12 sessions"
+    assert flex[a.dual]["plan"] == "8 sessions"
+    # Each row against its own plan's state, rather than against the other
+    # row: the two balances happen to be equal in this fixture, so "they
+    # differ" would have been a coincidence standing in for the rule.
+    assert ballet[a.dual]["remaining"] == \
+        access.plan_state(a.repo, a.dual_ballet_plan)["remaining"]
+    assert flex[a.dual]["remaining"] == \
+        access.plan_state(a.repo, a.dual_flex_plan)["remaining"]
+
+
+def test_a_student_with_no_live_plan_here_carries_no_balance(client):
+    """
+    Somebody on the roster from bookings they attended under a plan that has
+    since gone. `<BalancePill>` reads a missing `remaining` as "no plan",
+    which is the truthful answer — inventing a zero would read as a plan
+    they had spent.
+    """
+    a = client.academy
+    students = client.get(f"/api/classes/{a.ballet}").json()["students"]
+    client.academy.repo.update("subscriptions", a.solo_ballet_plan, {"active": 0})
+    after = {r["id"]: r for r in
+             client.get(f"/api/classes/{a.ballet}").json()["students"]}
+    assert a.solo_ballet in {r["id"] for r in students}      # precondition
+    assert after[a.solo_ballet].get("remaining") is None
+
+
+def test_the_clients_list_filters_on_when_they_joined(client):
+    """
+    Inclusive at both ends, because that is what two dates typed into a form
+    mean by "between". Either bound works alone.
+    """
+    a = client.academy
+    joined = {r["id"]: r["joined_on"] for r in client.get("/api/clients").json()}
+    old_day = joined[a.lapsed]          # 120 days back
+    recent = joined[a.dual]             # today
+
+    def ids(**params):
+        q = "&".join(f"{k}={v}" for k, v in params.items())
+        return {r["id"] for r in client.get(f"/api/clients?{q}").json()}
+
+    assert a.lapsed in ids(joined_from=old_day, joined_to=old_day)   # inclusive
+    assert a.dual not in ids(joined_from=old_day, joined_to=old_day)
+    assert a.dual in ids(joined_from=recent)                        # from alone
+    assert a.lapsed not in ids(joined_from=recent)
+    assert a.lapsed in ids(joined_to=old_day)                       # to alone
+
+
+def test_a_client_with_no_joining_date_falls_out_of_a_range(client):
+    """
+    The seed imports a student with no date written down, because the roster
+    sheets are the business record. There is nothing to compare, so they are
+    left out of a bounded range rather than swept to one end of it — putting
+    them in either would be inventing a date.
+    """
+    a = client.academy
+    a.repo.update("clients", a.planless, {"joined_on": None})
+    everyone = {r["id"] for r in client.get("/api/clients").json()}
+    bounded = {r["id"] for r in
+               client.get("/api/clients?joined_from=1900-01-01&joined_to=2999-12-31").json()}
+    assert a.planless in everyone
+    assert a.planless not in bounded
+
+
+def test_a_joining_date_that_is_not_a_date_is_refused_in_words(client):
+    r = client.get("/api/clients?joined_from=last-tuesday")
+    assert r.status_code == 400
+    assert "date" in r.json()["detail"].lower()
+
+
 def test_a_client_profile_answers(client):
     r = client.get(f"/api/clients/{client.academy.dual}")
     assert r.status_code == 200
