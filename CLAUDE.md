@@ -224,6 +224,22 @@ into search, and this is the one list that needs that distinction preserved.
 The bar is styled to match — same classes, same position above the table —
 so it reads as one system even though the wiring underneath is different.
 
+**Its FROM/TO range is on the joining date**, in that same bar beside the
+search box, applied on a button like every other range here. "Who joined in
+September" was answerable on the dashboard as a count and nowhere as a list
+of names, and the column it filters — FIRST JOINED — did not exist on the
+screen before it. Both bounds are **inclusive**, either works alone, and a
+client with no joining date falls out of any bounded range rather than
+sorting to one end of it: the filter is a question about when somebody
+joined, and a row that cannot answer it is not an answer.
+
+It filters in `api/clients.py`, after `search_clients()` and **before** the
+plan and card enrichment, so a narrowed list costs less rather than the same;
+it is deliberately not a port change, since `joined_on` is an ISO day on a
+row the route already holds. A bound that is not a date is refused in words
+("Pick a day, or clear the date filter."), the same shape the Cards screen's
+`on=` uses.
+
 DataTables and jQuery were tried from a CDN in the old vanilla frontend and
 removed — the library's own CSS fought the padding and type scale of
 everything else, and back when there was no build step at all, a CDN tag
@@ -1096,6 +1112,31 @@ The plan picker in the UI leads with the class and fetches sessions with
 
 Class membership is derived from bookings. There is no enrolment list, which is
 why the class page shows "students with a booking" rather than a roster.
+
+**The roster carries each student's balance for this class** — a LEFT column
+beside SLOTS and ATTENDED, reading `expired`, `0 left`, `n left`, `n
+unassigned` or `frozen to <date>` through the same `<BalancePill>` the
+Clients list uses, so one client reads the same on both screens. The other
+two columns are history: how many slots they have held here and how many of
+those they turned up for, neither of which says whether they can still come.
+Finding the one whose plan ran out last week and the one down to a single
+session meant opening every profile in turn.
+
+`api/classes.py`'s `_with_plan_state()` puts it there, and it reads **this
+class's live plan, never `repo.active_plans_for()`** — that one answers with
+a client's soonest-to-expire plan across every class, which on this page
+would print a Flexibility balance on a Ballet roster: true about the client,
+and not an answer to the question the screen is asking. One plan per class
+per client is what makes `active_plan()` answerable at all, so the class's
+own live plans are enough, and the soonest-to-expire wins if that invariant
+is ever broken.
+
+It costs the class page two round trips for the whole roster rather than two
+per student — one `find` over this class's live plans, one `plan_states()`
+behind it — and `tests/test_query_budget.py`'s ceiling for the page is
+unchanged. A student with no live plan here keeps no balance fields at all,
+which `<BalancePill>` reads as "no plan": correct for somebody on the roster
+from sessions they attended under a plan that has since gone.
 
 ### Rules the model enforces
 

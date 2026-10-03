@@ -93,9 +93,54 @@ def get_class(clid: int):
         # A month after their last plan here ran out, a client stops being
         # a student of this class. Nothing is deleted — see repo/ports.py.
         c["students"] = repo.class_students(clid, access.lapsed_cutoff())
+        _with_plan_state(repo, clid, c["students"])
         return c
     finally:
         repo.close()
+
+
+def _with_plan_state(repo, clid: int, students: list) -> None:
+    """
+    Put each student's balance for **this class** onto their row, in place.
+
+    The roster said how many slots they have held and how many they attended
+    — the history — and nothing about whether they can still come. A
+    receptionist looking at who is in Ballet Level 8 wants to see the one
+    whose plan ran out last week and the one down to a single session, and
+    was having to open each profile to find out.
+
+    **This class's plan, never "their plan".** `repo.active_plans_for()`
+    answers with a client's soonest-to-expire plan across every class, which
+    on this page would print a Flexibility balance on the Ballet roster —
+    true about the client and not an answer to the question the screen is
+    asking. One plan per class per client is the invariant that makes
+    `active_plan()` answerable at all, so the class's own live plans are
+    enough, and the soonest-to-expire wins if that invariant is ever broken.
+
+    Two round trips for the whole page, not two per student: one `find` over
+    this class's live plans and one `plan_states()` behind it. A student with
+    no live plan here keeps no balance fields at all, which `<BalancePill>`
+    reads as "no plan" — correct for somebody on the roster from bookings
+    they attended under a plan that has since gone.
+    """
+    if not students:
+        return
+    subs = repo.find("subscriptions", {"class_id": clid, "active": 1},
+                     sort=[("expires_on", 1)])
+    by_client = {}
+    for sub in subs:
+        by_client.setdefault(sub["client_id"], sub)
+    states = access.plan_states(repo, [s["id"] for s in by_client.values()])
+    for row in students:
+        sub = by_client.get(row["id"])
+        st = states.get(sub["id"]) if sub else None
+        if not st:
+            continue
+        row.update({
+            "plan": st["plan"], "remaining": st["remaining"],
+            "expires_on": st["expires_on"], "unassigned": st["unassigned"],
+            "frozen": st["frozen"], "frozen_until": st["frozen_until"],
+        })
 
 
 @router.delete("/api/classes/{clid}")

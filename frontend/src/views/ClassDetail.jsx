@@ -6,7 +6,7 @@ import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
 import DataTable from '../components/DataTable';
-import { Pill } from '../components/Pill';
+import { Pill, BalancePill } from '../components/Pill';
 import Avatar from '../components/Avatar';
 import Empty from '../components/Empty';
 import ClassForm from '../modals/ClassForm';
@@ -154,6 +154,22 @@ export default function ClassDetail() {
             },
             { label: 'SLOTS', className: 'num', sortValue: r => r.slots, cell: r => r.slots },
             { label: 'ATTENDED', className: 'num', sortValue: r => r.attended || 0, cell: r => r.attended || 0 },
+            {
+              /* Their balance in *this* class — the roster said what they
+                 had attended and nothing about whether they can still come,
+                 so the one whose plan ran out last week and the one down to
+                 a single session both needed a profile opened to spot.
+                 Sorted so those two sit at the top: frozen, then unassigned,
+                 then fewest left. Same pills and the same order as the
+                 Clients list, so one row means one thing in both places. */
+              label: 'LEFT',
+              sortValue: r => (r.frozen ? -2 : (r.unassigned > 0 ? -1 : (r.remaining ?? 999))),
+              cell: r => (r.frozen
+                ? <Pill kind="info">frozen{r.frozen_until ? ` to ${r.frozen_until}` : ''}</Pill>
+                : r.unassigned > 0
+                  ? <Pill kind="warn">{r.unassigned} unassigned</Pill>
+                  : <BalancePill row={r} />),
+            },
           ]}
         />
       </div>
