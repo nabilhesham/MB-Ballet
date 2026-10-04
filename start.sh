@@ -134,10 +134,55 @@ fi
 ok "Python $("$VPY" -c 'import sys; print(sys.version.split()[0])') ($VENVDIR)"
 
 # ---------------------------------------------------------------- deps
+#
+# Two questions, not one, because they need different answers when they fail.
+#
+#   1. Can the app import what it cannot run without? No -> install, or die.
+#   2. Has requirements.txt changed since the last successful install?
+#      Yes -> install, and carry on regardless.
+#
+# The second is the one that was missing, and it cost an evening. The probe
+# below is a fixed list of imports, so a package *added* to requirements.txt
+# later never reached a venv built before it: the list still imported, the
+# install was skipped, and `pip install <it>` typed by hand went into
+# whichever pip was first on PATH -- on the machine this happened on, the
+# base interpreter's site-packages, which the venv cannot see. `pip show`
+# then reports the package as installed while the app answers "No module
+# named ...". That was pyezvizapi, so the door button was on screen and
+# refused every press.
+#
+# The stamp is the hash of requirements.txt, written inside the venv after a
+# successful install. It reinstalls when that file changes and never
+# otherwise -- unlike adding every package to the probe, which would make a
+# reception laptop reinstall on a start where nothing had changed, and retry
+# forever when offline.
+#
+# Kept beside the interpreter itself (`sys.prefix`) rather than at
+# "$VENVDIR/...", so it lands in the right place for the one interpreter that
+# has no venv: START.bat's embeddable Python installs packages into itself.
+# A stamp that cannot be written would mean reinstalling on every single
+# start, which is the failure this is trying not to cause.
+REQ_STAMP="$("$VPY" -c 'import os,sys;print(os.path.join(sys.prefix, ".requirements-sha"))')"
+WANT="$("$VPY" -c 'import hashlib;print(hashlib.sha256(open("requirements.txt","rb").read()).hexdigest())')"
+HAVE="$(cat "$REQ_STAMP" 2>/dev/null || true)"
+
 if ! "$VPY" -c "import fastapi, uvicorn, qrcode, PIL, multipart" >/dev/null 2>&1; then
   step "Installing packages (first run takes a minute)…"
   "$VPY" -m pip install --upgrade pip --quiet
   "$VPY" -m pip install -r requirements.txt --quiet || die "Package install failed"
+  # `|| true` because `set -e` is on and a prefix nobody can write to must
+  # cost a redundant pip run next time, never the launch.
+  printf '%s\n' "$WANT" > "$REQ_STAMP" 2>/dev/null || true
+elif [ "$WANT" != "$HAVE" ]; then
+  # The app already runs, so a failure here must not stop it: this is a
+  # machine that is working and is one package behind, which is better than
+  # a machine that will not start because the wifi is down.
+  step "requirements.txt has changed — updating packages…"
+  if "$VPY" -m pip install -r requirements.txt --quiet; then
+    printf '%s\n' "$WANT" > "$REQ_STAMP" 2>/dev/null || true
+  else
+    warn "Could not update packages (no internet?). Starting with what is installed."
+  fi
 fi
 ok "Packages installed"
 
@@ -220,11 +265,36 @@ ok "Database ready"
 # only place that says so before somebody is standing at the counter
 # wondering why the button is missing. Never blocks the launch -- same rule
 # pymongo follows above.
-if grep -qE '^EZVIZ_LOCK_SERIAL=.+' .env 2>/dev/null; then
+#
+# **Asked through door.configured(), not by grepping .env.** That function is
+# documented as the one answer to "is a lock set up", and a grep beside it is
+# the second switch that rule exists to prevent -- they disagreed: a serial
+# exported in the shell, or written as `KEY = value`, is a lock to config and
+# nothing to grep, so this block printed nothing at all while the kiosk
+# showed the button. Same for the library: `import pyezvizapi` here and
+# `door.py`'s import inside its own functions are the same question, asked by
+# the interpreter that is about to run the app.
+if "$VPY" -c "import config; config.load_env(); import door; raise SystemExit(0 if door.configured() else 1)" >/dev/null 2>&1; then
+  if ! "$VPY" -c "import pyezvizapi" >/dev/null 2>&1; then
+    # One attempt, and only here: the stamp above covers a changed
+    # requirements.txt, and this covers a venv whose install of that line
+    # failed or was interrupted. Never blocks -- a door-less launch is a
+    # legitimate one, the same rule pymongo follows.
+    "$VPY" -m pip install -r requirements.txt --quiet >/dev/null 2>&1 || true
+  fi
   if "$VPY" -c "import pyezvizapi" >/dev/null 2>&1; then
     ok "Door ready"
   else
-    warn "No door: pyezvizapi is missing, and it needs Python 3.12 (this is $("$VPY" -c 'import sys; print(sys.version.split()[0])')). Check-ins still work; reception opens the door by hand."
+    PYVER="$("$VPY" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+    case "$PYVER" in
+      3.1[2-9]|3.[2-9][0-9]|[4-9].*)
+        # The version is fine, so saying "it needs 3.12" here would send
+        # somebody after an interpreter they already have. On this Python the
+        # cause is the install, which is what to say.
+        warn "No door: pyezvizapi is not installed in $VENVDIR (Python $PYVER is new enough). Try: $VPY -m pip install -r requirements.txt" ;;
+      *)
+        warn "No door: pyezvizapi needs Python 3.12 and this is $PYVER, so pip skips it. Check-ins still work; reception opens the door by hand." ;;
+    esac
   fi
 fi
 

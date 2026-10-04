@@ -143,20 +143,58 @@ if not exist "!VENVDIR!\Scripts\python.exe" (
 )
 
 :have_venv
+REM Two questions, not one, because a failure means different things.
+REM :check_packages asks whether the app can import what it cannot run
+REM without -- a no there is fatal. :req_changed asks whether
+REM requirements.txt has moved since the last successful install, which is
+REM the one that was missing: the import probe is a fixed list, so a
+REM package added to that file later never reached a venv built before it.
+REM The install was skipped, and `pip install <it>` typed by hand went to
+REM whichever pip was first on PATH -- so `pip show` reported it installed
+REM while the app answered "No module named ...". That was pyezvizapi, so
+REM the Open door button was on screen and refused every press.
+REM
+REM Written as gotos rather than nested if-blocks on purpose: every command
+REM here carries parentheses or a redirect, and cmd.exe parses a whole
+REM parenthesised block before running any of it. See the note at the top.
 call :check_packages
-if errorlevel 1 (
-    echo    [4/7]  Installing what the program needs
-    echo           ^(first time only, about a minute^)
-    call :install_packages
-    if errorlevel 1 (
-        echo.
-        echo           Could not download the packages.
-        echo           Check that this computer is online, then try again.
-        goto :fail
-    )
-) else (
-    echo    [4/7]  Packages ready
-)
+if errorlevel 1 goto :packages_missing
+call :req_changed
+if errorlevel 1 goto :packages_stale
+echo    [4/7]  Packages ready
+goto :packages_done
+
+:packages_missing
+echo    [4/7]  Installing what the program needs
+echo           ^(first time only, about a minute^)
+call :install_packages
+if errorlevel 1 goto :packages_failed
+call :write_req_stamp
+goto :packages_done
+
+:packages_stale
+echo    [4/7]  Updating what the program needs
+echo           ^(the list of packages changed^)
+call :install_packages
+if errorlevel 1 goto :packages_behind
+call :write_req_stamp
+goto :packages_done
+
+:packages_behind
+REM The app already runs, so this must not stop it: a machine that works
+REM and is one package behind beats one that will not start because the
+REM wifi is down.
+echo           Could not update them just now. Starting with what is
+echo           already installed.
+goto :packages_done
+
+:packages_failed
+echo.
+echo           Could not download the packages.
+echo           Check that this computer is online, then try again.
+goto :fail
+
+:packages_done
 
 if not exist ".env" (
     echo    [5/7]  Creating the security key
@@ -362,6 +400,21 @@ exit /b
 exit /b %errorlevel%
 
 
+:req_changed
+REM errorlevel 1 when requirements.txt differs from the stamp written after
+REM the last successful install. The stamp sits beside the interpreter
+REM (sys.prefix) rather than inside the venv folder, because the embeddable
+REM fallback Python has no venv and installs into itself -- a stamp that
+REM could not be written would mean reinstalling on every single start.
+"%VPY%" -c "import hashlib,os,sys;h=hashlib.sha256(open('requirements.txt','rb').read()).hexdigest();p=os.path.join(sys.prefix,'.requirements-sha');sys.exit(0 if os.path.exists(p) and open(p).read().strip()==h else 1)" 2>nul
+exit /b %errorlevel%
+
+
+:write_req_stamp
+"%VPY%" -c "import hashlib,os,sys;open(os.path.join(sys.prefix,'.requirements-sha'),'w').write(hashlib.sha256(open('requirements.txt','rb').read()).hexdigest())" 2>nul
+exit /b 0
+
+
 :check_mongo
 REM pymongo is checked separately and NEVER blocks the launch. Adding it to
 REM :check_packages would make every reception machine reinstall on the next
@@ -385,17 +438,69 @@ REM wondering where the Open door button went.
 REM
 REM Every command here with a pipe or a redirect is outside the if-blocks
 REM below, for the parenthesis reason at the top of this file.
+REM **Asked through door.configured(), not by matching .env.** That
+REM function is the one answer to "is a lock set up", and a findstr beside
+REM it is the second switch that rule exists to prevent -- the two
+REM disagreed: a serial exported in the environment, or written as
+REM `KEY = value`, is a lock to config.py and nothing to findstr, so this
+REM block said nothing at all while the kiosk showed the button.
 set "HAVEDOOR="
-findstr /r /c:"^EZVIZ_LOCK_SERIAL=..*" .env >nul 2>&1 && set "HAVEDOOR=1"
+call :door_configured && set "HAVEDOOR=1"
 if not defined HAVEDOOR exit /b 0
 set "DOORLIB="
 "%VPY%" -c "import pyezvizapi" >nul 2>&1 && set "DOORLIB=1"
-if defined DOORLIB (
-    echo           Door ready
-) else (
-    echo           No door: the lock software needs Python 3.12 and is not
-    echo           installed here. Check-ins still work; open the door by hand.
-)
+if not defined DOORLIB call :install_packages_quietly
+"%VPY%" -c "import pyezvizapi" >nul 2>&1 && set "DOORLIB=1"
+if defined DOORLIB goto :door_ok
+call :py_minor
+if "%PYMINOR%"=="" goto :door_no_version
+if %PYMINOR% GEQ 12 goto :door_not_installed
+echo           No door: the lock software needs Python 3.12 and this is
+echo           3.%PYMINOR%, so pip skips it. Check-ins still work; open the
+echo           door by hand.
+exit /b 0
+
+:door_not_installed
+REM The version is fine, so naming 3.12 here would send somebody after an
+REM interpreter they already have. On this Python the cause is the install.
+echo           No door: the lock software is not installed in this folder
+echo           ^(Python 3.%PYMINOR% is new enough^). Check-ins still work.
+exit /b 0
+
+:door_no_version
+echo           No door: the lock software is not installed here.
+echo           Check-ins still work; open the door by hand.
+exit /b 0
+
+:door_ok
+echo           Door ready
+exit /b 0
+
+
+:door_configured
+REM The same question door.py answers, asked by the interpreter that is
+REM about to run the app.
+"%VPY%" -c "import config;config.load_env();import door;raise SystemExit(0 if door.configured() else 1)" >nul 2>&1
+exit /b %errorlevel%
+
+
+:install_packages_quietly
+REM One attempt at the missing lock library, and it never blocks: the
+REM requirements stamp above covers a changed requirements.txt, and this
+REM covers a folder whose install of that one line failed or was
+REM interrupted. Same rule :check_mongo follows.
+"%VPY%" -m pip install -r requirements.txt --quiet --no-warn-script-location >nul 2>&1
+exit /b 0
+
+
+:py_minor
+set "PYMINOR="
+for /f "usebackq delims=" %%V in (`call :py_minor_raw`) do set "PYMINOR=%%V"
+exit /b 0
+
+
+:py_minor_raw
+"%VPY%" -c "import sys;print(sys.version_info[1])" 2>nul
 exit /b 0
 
 

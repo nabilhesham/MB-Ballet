@@ -73,6 +73,25 @@ def configured() -> bool:
     return bool(config.ezviz_serial())
 
 
+def library_installed() -> bool:
+    """
+    Can this interpreter import `pyezvizapi` at all?
+
+    Separate from `configured()`, which is only the serial, because the two
+    failures read identically from the kiosk and have nothing in common. And
+    asked here rather than inferred from a `pip show`: the answer that
+    matters is the one the interpreter running the app gives, and those two
+    came apart on the machine this was reported from -- a package installed
+    into the base interpreter's site-packages, reported as present by the
+    `pip` first on PATH, invisible to the venv the app runs in.
+    """
+    try:
+        import pyezvizapi  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 def _bind_file() -> str:
     """The one this app writes: beside the canonical session file."""
     return config.ezviz_token_file() + ".bind"
