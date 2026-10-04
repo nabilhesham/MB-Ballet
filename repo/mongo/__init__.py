@@ -206,6 +206,11 @@ class MongoRepo(MongoAccess, MongoSessions, MongoBookings, MongoClasses,
 
     # ---------------------------------------------------------- admin
 
+    def ping(self):
+        """One round trip, and the first thing in the app that needs the
+        network -- which is the point: see RepoBase.ping()."""
+        self.db.client.admin.command("ping")
+
     def init_schema(self):
         schema.ensure_indexes(self.db)
         ids.sync_counters(self.db, schema.FIELDS)

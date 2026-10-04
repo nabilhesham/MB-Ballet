@@ -143,6 +143,11 @@ class SqliteRepo(SqliteAccess, SqliteSessions, SqliteBookings,
               "freezes", "bookings", "credentials", "instructor_hours",
               "instructor_hour_adjustments", "access_events", "appointments")
 
+    def ping(self):
+        """A local file that `connect()` already opened. Kept so the one
+        startup path is the same on both backends."""
+        self.conn.execute("SELECT 1")
+
     def init_schema(self):
         self.conn.executescript(db.SCHEMA)
         db.migrate(self.conn)

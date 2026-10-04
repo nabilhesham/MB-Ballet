@@ -77,7 +77,10 @@ def both(tmp_path, monkeypatch):
 
     lite.close()
     from pymongo import MongoClient
-    client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    # 20s, the same as repo/mongo/client.py: a 5s window cannot complete a
+    # handshake this project has measured at 16 seconds from Alexandria, and a
+    # teardown that cannot connect leaves a throwaway database behind.
+    client = MongoClient(uri, serverSelectionTimeoutMS=20000)
     try:
         client.drop_database(name)
     finally:

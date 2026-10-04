@@ -63,11 +63,30 @@ def get_client(uri: str):
             if _client is not None:
                 _client.close()
             options = {
-                # Not the 30s default. A kiosk with a client standing at the
-                # desk needs to be told quickly that the database is
-                # unreachable, not to hang for half a minute first.
-                "serverSelectionTimeoutMS": 5000,
-                "connectTimeoutMS": 5000,
+                # **20s, not the 5s this used to be, and the 5s was measured
+                # wrong.** The reasoning for it was sound -- a kiosk with a
+                # client at the desk should be told quickly that the database
+                # is unreachable rather than hang for half a minute -- but it
+                # was applied to the one moment that is not that: the first
+                # connection. This repository's own notes record a **16-second
+                # connect** from Alexandria to the Frankfurt cluster, with a
+                # 20-second worst case. Five seconds cannot complete that
+                # handshake, so no replica-set member ever became known and
+                # the app refused to start against a database that was working
+                # perfectly:
+                #
+                #     ServerSelectionTimeoutError: No replica set members
+                #     found yet, Timeout: 5.0s ... server_type: Unknown
+                #
+                # Nobody is standing at the desk during startup -- the app is
+                # not up yet -- so a slow start beats no start. The cost is
+                # that a scan made while the line is genuinely down waits 20s
+                # instead of 5 before saying so, on a path that fails either
+                # way. If that ever needs to be short again, lower it *per
+                # read* with `pymongo.timeout()` rather than here, which is
+                # also the only direction CSOT allows.
+                "serverSelectionTimeoutMS": 20000,
+                "connectTimeoutMS": 20000,
                 "retryWrites": True,
             }
             ca = ca_file(uri)
