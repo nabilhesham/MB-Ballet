@@ -830,11 +830,10 @@ built one that was never given a serial. **The workflow therefore pins
 Python 3.12, and the canary asserts the same version** -- a canary on a
 different Python cannot catch the thing it exists for.
 
-**`EZVIZ_EMAIL` and `EZVIZ_PASSWORD` are deliberately never given to CI, and
-`academy.spec` refuses to bake them even from a local `.env`.** That is one
-of the two exceptions to "the spec bakes the whole file" and it earns it:
-they are
-the account that opens the academy's front door, the app does not need them
+**`EZVIZ_PASSWORD` is deliberately never given to CI, and `academy.spec`
+refuses to bake it even from a local `.env`.** That is one of the two
+exceptions to "the spec bakes the whole file" and it earns it: it is half of
+the account that opens the academy's front door, the app does not need it
 (the cached session beside the binary is the warm path, and an interactive
 first sign-in with its SMS code cannot happen in a server anyway), and
 anyone who can get hold of a binary can read what is compiled into it. The
@@ -842,6 +841,27 @@ build prints which keys it dropped. A serial is a device id and stays; a
 password that opens a door does not. The session file is not baked either --
 it is copied in beside the binary by hand, which is what the run summary and
 the local build scripts now say.
+
+**`EZVIZ_EMAIL` *is* baked, and that is a correction to the rule above.** It
+was dropped beside the password on the reasoning that the pair is the
+account — but `door.py`'s `_unlock()` sends the address as `userName` on
+every unlock, exactly as the standalone script it was ported from does. A
+packaged build was therefore sending an empty one: the single field in that
+payload where the binary reception runs differed from the script the
+protocol was worked out against, in a protocol nothing on this side can
+prove ignores it. An address is a login name, not a credential — it opens
+nothing alone, and `_client()` requires **both** halves before it will even
+attempt a sign-in, so baking one cannot turn a downloaded binary into
+something that can log in by itself. `tests/test_door.py` holds that last
+part, and `tests/test_bake_env.py` holds both sides of the split.
+
+CI reads it from `secrets.EZVIZ_EMAIL` only, unlike the serial, the region
+and the terminal, which take either tab: those are device settings, and this
+is account identity that belongs on the same tab as the password it is half
+of. A door build without it is not refused — the step says so in the log and
+bakes the rest, since an empty `userName` may well be ignored by the lock;
+it is the first thing to try if an unlock ever comes back refused with a
+code.
 
 **`MB_TEST_MONGO_URI` is the other one, and it is the same trade with
 nothing on the other side of it.** It legitimately sits in `.env` — the test
@@ -2292,9 +2312,10 @@ baked from `.env` at build time like every other setting, because a frozen
 build never reads a file; the session is copied in beside the binary by
 hand. That split is the security one -- a serial identifies a device and is
 useless alone, a session opens a door -- and it is why `academy.spec` drops
-`EZVIZ_EMAIL`/`EZVIZ_PASSWORD` from what it bakes, and why CI is given the
-serial as a secret but never the credentials. See the CI note in the Files
-section.
+`EZVIZ_PASSWORD` from what it bakes, and why CI is given the serial as a
+secret but never the password. The account's **email** is baked, because the
+unlock payload names it; see the CI note in the Files section for both
+halves of that.
 
 **The first sign-in is not the app's job.** It can want an SMS code, and
 nothing here is attached to a console to type one into — so
@@ -2676,9 +2697,10 @@ The consequences, both deliberate: the `.env` parser now exists twice (in
 anything of the app is importable — **keep the two in step**, which
 `tests/test_bake_env.py` now checks), and every setting in this folder's
 `.env` is embedded in any binary built from it, the Mongo URI included. The
-two exceptions are the door's `EZVIZ_EMAIL`/`EZVIZ_PASSWORD` and the test
-suite's `MB_TEST_MONGO_URI`, each dropped with a printed line saying so —
-see the CI note in the Files section for why those three and nothing else. A generated module rather than a `datas` entry because
+two exceptions are the door's `EZVIZ_PASSWORD` and the test suite's
+`MB_TEST_MONGO_URI`, each dropped with a printed line saying so — see the CI
+note in the Files section for why those two and nothing else, and for why
+`EZVIZ_EMAIL` is not among them. A generated module rather than a `datas` entry because
 `datas` unpacks to `sys._MEIPASS`, a real directory on disk while the app
 runs.
 

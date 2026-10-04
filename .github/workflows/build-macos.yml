@@ -180,14 +180,25 @@ jobs:
         # build when it was not given rather than shipping a door-less
         # binary.
         #
-        # **EZVIZ_EMAIL and EZVIZ_PASSWORD are deliberately NOT given to
-        # CI**, and academy.spec refuses to bake them even from a local
-        # `.env`. They are the account that opens the academy's front door,
-        # the app does not need them (the cached session beside the binary
-        # is the warm path, and an interactive first sign-in cannot happen
-        # in a server anyway), and anyone who can download an artifact can
-        # read what is inside it. A serial is a device id, useless on its
-        # own; a password is not.
+        # **EZVIZ_PASSWORD is deliberately NOT given to CI**, and
+        # academy.spec refuses to bake it even from a local `.env`. It is
+        # the half of the account that opens the academy's front door, the
+        # app does not need it (the cached session beside the binary is the
+        # warm path, and an interactive first sign-in cannot happen in a
+        # server anyway), and anyone who can download an artifact can read
+        # what is inside it. A serial is a device id, useless on its own; a
+        # password is not.
+        #
+        # **EZVIZ_EMAIL is, and that is a correction.** door.py sends it as
+        # `userName` on every unlock, exactly as the standalone script does,
+        # so a build without it was sending an empty one -- the one field
+        # where the binary reception runs differed from the script the
+        # protocol was worked out against. An address opens nothing on its
+        # own and door.py needs *both* halves before it will even attempt a
+        # sign-in, so this cannot hand a downloaded binary a way in. It is
+        # read from `secrets` only, unlike the three below: it is account
+        # identity rather than a device setting, and it belongs on the same
+        # tab as the password it is half of.
         env:
           ENTRY_SECRET: ${{ secrets.ENTRY_SECRET }}
           MB_MONGO_URI: ${{ secrets.MB_MONGO_URI }}
@@ -200,6 +211,7 @@ jobs:
           # value was entered on the other tab. || picks whichever is set.
           # (The genuinely secret one, ENTRY_SECRET, stays secrets-only; so
           # does the Mongo URI, which carries a password.)
+          EZVIZ_EMAIL: ${{ secrets.EZVIZ_EMAIL }}
           EZVIZ_LOCK_SERIAL: ${{ secrets.EZVIZ_LOCK_SERIAL || vars.EZVIZ_LOCK_SERIAL }}
           EZVIZ_REGION: ${{ secrets.EZVIZ_REGION || vars.EZVIZ_REGION }}
           EZVIZ_TERMINAL: ${{ secrets.EZVIZ_TERMINAL || vars.EZVIZ_TERMINAL }}
@@ -237,6 +249,13 @@ jobs:
             printf 'EZVIZ_LOCK_SERIAL=%s\n' "$EZVIZ_LOCK_SERIAL" >> .env
             [ -n "$EZVIZ_REGION" ]   && printf 'EZVIZ_REGION=%s\n' "$EZVIZ_REGION" >> .env
             [ -n "$EZVIZ_TERMINAL" ] && printf 'EZVIZ_TERMINAL=%s\n' "$EZVIZ_TERMINAL" >> .env
+            if [ -n "$EZVIZ_EMAIL" ]; then
+              printf 'EZVIZ_EMAIL=%s\n' "$EZVIZ_EMAIL" >> .env
+            else
+              echo "Note: no EZVIZ_EMAIL secret, so the unlock will name no"
+              echo "account. Harmless if the lock ignores that field; add the"
+              echo "secret if an unlock ever comes back refused with a code."
+            fi
             echo "Baking: the door. The binary still needs .ezviz_token.json"
             echo "beside it -- the session is never baked in."
           else
@@ -501,8 +520,9 @@ jobs:
               echo 'line and no **Open door** button. Check-ins are unaffected.'
               echo
               echo 'Add it under Settings -> Secrets and variables -> Actions — either'
-              echo 'tab works — and re-run. `EZVIZ_EMAIL` and `EZVIZ_PASSWORD` are'
-              echo 'deliberately never given to CI; the app does not need them.'
+              echo 'tab works — and re-run. `EZVIZ_PASSWORD` is deliberately never'
+              echo 'given to CI; the app does not need it. `EZVIZ_EMAIL` is baked when'
+              echo 'the secret is set — the unlock names it as the account it came from.'
             fi
             echo
             echo

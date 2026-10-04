@@ -3,11 +3,18 @@ What a packaged binary carries out of `.env`, and what it must not.
 
 `academy.spec` bakes this folder's `.env` into the binary because a frozen
 build cannot read one -- that part is covered by the app working at all. What
-is easy to undo silently is the *exceptions*: two EZVIZ credentials that open
+is easy to undo silently is the *exceptions*: the EZVIZ password that opens
 the academy's front door, and a test-only Atlas URI. Anyone who can fetch a
 built binary can read what is compiled into it, so each of those is a
 credential handed out with the download, and nothing about the build would
 look wrong if one came back.
+
+The account's **email** is on the other side of that line, and is asserted
+here for the opposite reason: it is a login name rather than a credential,
+and `door.py` sends it as `userName` on every unlock. Dropped, a packaged
+build sent an empty one where the standalone script sends the address --
+which is a difference between what was tested and what reception runs, in a
+field nothing here can prove the lock ignores.
 
 The other half of this file is the duplicated parser. `academy.spec` cannot
 import `config` -- it runs under PyInstaller's own interpreter before anything
@@ -68,21 +75,40 @@ def _bake(tmp_path, text=FULL):
     return keys, body
 
 
-def test_the_door_credentials_never_travel_in_the_binary(tmp_path):
+def test_the_door_password_never_travels_in_the_binary(tmp_path):
     """
-    These two are the EZVIZ account that unlocks the academy's front door.
+    This is the half of the EZVIZ account that unlocks the front door.
 
-    The app does not need them: the warm path is the cached session copied in
+    The app does not need it: the warm path is the cached session copied in
     beside the binary by hand, and an interactive first sign-in wants an SMS
     code that no server can type. So there is nothing on the other side of the
-    trade -- baking them only puts the front door inside a file that gets
+    trade -- baking it only puts the front door inside a file that gets
     emailed around.
     """
     keys, body = _bake(tmp_path)
-    assert "EZVIZ_EMAIL" not in keys
     assert "EZVIZ_PASSWORD" not in keys
-    assert "reception@example.com" not in body
     assert "opens-the-front-door" not in body
+
+
+def test_the_door_account_email_does_travel(tmp_path):
+    """
+    The correction to the rule above, and the reason it is a test.
+
+    `door.py`'s `_unlock()` puts EZVIZ_EMAIL in the unlock payload as
+    `userName`, exactly as the standalone script does. Dropped from the bake,
+    a packaged build sent `""` there -- the one field in that payload where
+    the binary reception runs differed from the script the protocol was
+    worked out with, and nothing here can prove the lock ignores it.
+
+    An address is a login name, not a credential: it opens nothing on its
+    own, and `_client()` needs **both** before it will attempt a sign-in, so
+    a baked email cannot turn a binary into something that can log in by
+    itself. tests/test_door.py holds that end of it, where the stubbed
+    library lives.
+    """
+    keys, body = _bake(tmp_path)
+    assert "EZVIZ_EMAIL" in keys
+    assert "reception@example.com" in body
 
 
 def test_the_test_suites_atlas_uri_never_travels_either(tmp_path):
