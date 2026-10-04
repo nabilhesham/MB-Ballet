@@ -372,6 +372,45 @@ def test_the_failure_is_still_an_answer_not_an_exception(ez):
     assert door.open_door()["ok"] is False
 
 
+def test_a_baked_email_alone_cannot_sign_in(ez, monkeypatch):
+    """
+    What makes baking the address into the binary safe.
+
+    `academy.spec` bakes EZVIZ_EMAIL and drops EZVIZ_PASSWORD, so a packaged
+    build carries exactly this pair -- and with it, door.py must still refuse
+    to attempt a login and must still report the session as missing. The
+    address is a login name; the password is the credential.
+    """
+    ez.token.unlink()
+    monkeypatch.setenv("EZVIZ_EMAIL", "reception@example.com")
+    monkeypatch.delenv("EZVIZ_PASSWORD", raising=False)
+
+    assert door.session_problem()                   # not silenced by the email
+    r = door.open_door()
+    assert r["ok"] is False
+    assert "copy .ezviz_token.json in" in r["detail"]
+    assert ez.made == []                            # no client was constructed
+
+
+def test_the_unlock_names_the_account_it_came_from(ez, monkeypatch):
+    """
+    `userName` in the unlock payload, which is the reason the email is baked
+    at all.
+
+    The standalone script this was ported from sends the account's address
+    there. Left out of the bake, a packaged build sent `""` instead -- the
+    one field where the binary reception runs differed from the script the
+    protocol was worked out against, and nothing on this side can prove the
+    lock ignores it.
+    """
+    monkeypatch.setenv("EZVIZ_EMAIL", "reception@example.com")
+    ez.bind.write_text("SIGNUID")
+    assert door.open_door()["ok"] is True
+
+    sent = ez.made[0].calls[1][2]["value"]["unLockInfo"]
+    assert sent["userName"] == "reception@example.com"
+
+
 # ------------------------------------------------- what the banner reports
 def test_the_banner_is_quiet_when_there_is_a_session(ez):
     assert door.session_problem() == ""

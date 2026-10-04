@@ -88,22 +88,34 @@ def _bake_env(spec_dir, work_dir):
     # The door's password never travels inside the binary.
     #
     # Everything else in `.env` is baked, deliberately -- that is the whole
-    # point of this function. These two are the exception because they are
-    # the EZVIZ account that opens the academy's front door, the app does
-    # not need them (the cached session beside the binary is the warm path,
-    # and an interactive first sign-in with its SMS code cannot happen in a
-    # server anyway), and anyone who can get hold of the binary can read
+    # point of this function. The password is the exception because it is
+    # half of the EZVIZ account that opens the academy's front door, the app
+    # does not need it (the cached session beside the binary is the warm
+    # path, and an interactive first sign-in with its SMS code cannot happen
+    # in a server anyway), and anyone who can get hold of the binary can read
     # what is compiled into it. A serial is a device id and stays; a
     # password that opens a door does not.
     #
     # Dropped here rather than asked of whoever runs the build, because a
-    # step like "remember to comment those two lines out first" gets skipped
+    # step like "remember to comment that line out first" gets skipped
     # exactly when it matters.
-    DOOR_SECRETS = ("EZVIZ_EMAIL", "EZVIZ_PASSWORD")
+    #
+    # **EZVIZ_EMAIL does travel, and that is a correction.** It was dropped
+    # beside the password on the reasoning that the pair is the account --
+    # but the address alone opens nothing, and the unlock payload carries it
+    # as `userName` (door.py's `_unlock`, from the standalone script this was
+    # ported from). A packaged build was therefore sending an empty one where
+    # the script sends the academy's address: a difference between what was
+    # tested and what reception runs, in the one field nothing here can prove
+    # the lock ignores. The password is what is worth protecting; the address
+    # it belongs to is a login name, and `_client()` still needs *both* to
+    # sign in, so baking one cannot turn a build into something that can log
+    # in by itself.
+    DOOR_SECRETS = ("EZVIZ_PASSWORD",)
     dropped = [k for k in DOOR_SECRETS if values.pop(k, None)]
     if dropped:
-        print("  Not baking {} -- they open the front door, and the app "
-              "does not need them.".format(", ".join(dropped)))
+        print("  Not baking {} -- it opens the front door, and the app "
+              "does not need it.".format(", ".join(dropped)))
 
     # Nor a setting only the test suite reads.
     #
