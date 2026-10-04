@@ -34,6 +34,20 @@ MONGO = "mongo"
 ENV_FILE = ".env"
 _env_loaded = False
 
+# The folder the process was started from, captured before load_env()'s
+# chdir() moves it. It is the one place a hand-placed file can be that
+# app_dir() does not name: the standalone unlock script defaults its session
+# to `./.ezviz_token.json`, so on a machine where somebody ran that script
+# the session sits in whatever folder they ran it from -- which for a
+# packaged build is not the folder holding the binary. door.token_paths()
+# reads it for exactly that, and nothing writes there.
+_LAUNCH_DIR = os.getcwd()
+
+
+def launch_dir() -> str:
+    """Where the process was started, before the chdir. See _LAUNCH_DIR."""
+    return _LAUNCH_DIR
+
 
 def app_dir() -> str:
     """

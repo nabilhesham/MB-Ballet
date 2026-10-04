@@ -74,7 +74,25 @@ def configured() -> bool:
 
 
 def _bind_file() -> str:
+    """The one this app writes: beside the canonical session file."""
     return config.ezviz_token_file() + ".bind"
+
+
+def bind_paths() -> list[str]:
+    """
+    Where to look for the cached terminal bind, canonical first.
+
+    `.bind` is named after the session it belongs to, and the standalone
+    script writes `<its own token file>.bind` -- so a machine where somebody
+    copied both files in beside the launcher has the pair sitting together
+    there, not beside the database. Looking only beside the canonical path
+    would make the app re-fetch a bind the script had already proven, and
+    pick a different terminal while doing it (see `_fetch_bind_code`).
+
+    Read-only but the first, exactly like `token_paths()`: a bind fetched
+    here is written to `_bind_file()`, so the two converge.
+    """
+    return [p + ".bind" for p in token_paths()]
 
 
 def _save(path: str, text: str) -> None:
@@ -110,32 +128,97 @@ def token_paths() -> list[str]:
     rather than drifting. The canonical path is always first, and the same
     fallback applies to a path named in `EZVIZ_TOKEN_FILE` -- Windows
     mangles that name exactly as readily, and one rule is better than two.
+
+    **And the folder the app was started from**, for the same practical
+    reason one step along: `unlock_dl05_fast.py` defaults its session to
+    `./.ezviz_token.json`, so on a machine where somebody has run that
+    script -- which is how the first session gets minted at all -- the file
+    is sitting wherever they ran it. In a source checkout that is this same
+    folder and the extra entry costs nothing; for a packaged build it is
+    the difference between "the script opens the door and the app does not"
+    and the app finding the session the script just saved.
+
+    Every entry is read-only but the first. `open_door()`'s `finally`
+    always writes `config.ezviz_token_file()`, so a session found anywhere
+    else is copied to the canonical place on the first unlock that uses it,
+    and the list stops mattering from then on.
     """
+    out = []
+    for folder, base in _candidates():
+        for name in (base, base.lstrip(".")):
+            path = os.path.join(folder, name)
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def _candidates():
+    """(folder, filename) pairs, canonical first. See token_paths()."""
     named = config.ezviz_token_file()
     folder, base = os.path.split(named)
-    plain = os.path.join(folder, base.lstrip("."))
-    return [named] if plain == named else [named, plain]
+    pairs = [(folder, base)]
+    launched = config.launch_dir()
+    if launched != folder:
+        pairs.append((launched, base))
+    return pairs
 
 
 def _load_token() -> dict | None:
+    return (_read_token() or (None, None))[0]
+
+
+def _read_token():
+    """The cached session and the path it came from, or None."""
     for path in token_paths():
         try:
             with open(path, encoding="utf-8") as fh:
-                return json.load(fh)
+                return json.load(fh), path
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             continue
     return None
+
+
+def session_file() -> str:
+    """
+    Which of `token_paths()` the session is actually being read from, or "".
+
+    The one question the kiosk's "no session is saved on this computer"
+    cannot answer and that settles every report of "the standalone script
+    opens the door and the app does not": they are either reading the same
+    file or they are not. `GET /api/access/door` returns it.
+    """
+    found = _read_token()
+    return found[1] if found else ""
+
+
+def bind_file_in_use() -> str:
+    """Which of `bind_paths()` holds a bind, "env" for EZVIZ_BIND_CODE, or
+    "". The path, never the code -- a bind grants door access."""
+    if (os.environ.get("EZVIZ_BIND_CODE") or "").strip():
+        return "env"
+    for path in bind_paths():
+        try:
+            with open(path, encoding="utf-8") as fh:
+                if fh.read().strip():
+                    return path
+        except (FileNotFoundError, OSError):
+            continue
+    return ""
 
 
 def _load_bind() -> str | None:
     named = (os.environ.get("EZVIZ_BIND_CODE") or "").strip()
     if named:
         return named
-    try:
-        with open(_bind_file(), encoding="utf-8") as fh:
-            return fh.read().strip() or None
-    except (FileNotFoundError, OSError):
-        return None
+    for path in bind_paths():
+        try:
+            with open(path, encoding="utf-8") as fh:
+                found = fh.read().strip()
+        except (FileNotFoundError, OSError):
+            continue
+        if found:
+            return found
+    return None
 
 
 # ------------------------------------------------- no session to unlock with
@@ -154,8 +237,8 @@ def _load_bind() -> str | None:
 # the existence check is what tells them apart.
 _MISSING = (
     "No EZVIZ session is saved on this computer — copy .ezviz_token.json in "
-    "beside the database, or run the unlock script once to sign in. Open the "
-    "door by hand for now",
+    "beside the database or beside what you launched, or run the unlock "
+    "script once to sign in. Open the door by hand for now",
     "no session file at {path}, and no EZVIZ_EMAIL/EZVIZ_PASSWORD to sign "
     "in with")
 _UNREADABLE = (
@@ -166,12 +249,15 @@ _UNREADABLE = (
 
 def _no_session() -> tuple[str, str]:
     """The sentence for the screen and the one for the log, as a pair."""
-    path = config.ezviz_token_file()
     there = [p for p in token_paths() if os.path.exists(p)]
     pair = _MISSING if not there else _UNREADABLE
     # Name what was actually found when something was: "unreadable" about a
     # file at a path that holds nothing is the sentence that wastes an hour.
-    return pair[0], pair[1].format(path=there[0] if there else path)
+    # And name *every* place that was looked in when nothing was, because the
+    # file is usually sitting in one of the others -- which is the hour this
+    # already cost once.
+    where = there[0] if there else " or ".join(token_paths())
+    return pair[0], pair[1].format(path=where)
 
 
 def session_problem() -> str:
@@ -264,8 +350,16 @@ def _fetch_bind_code(client) -> str:
                 f"EZVIZ_TERMINAL={wanted!r} matched no bound terminal")
         chosen = max(hits, key=lambda t: t["last"])
     else:
-        others = [t for t in valid if not t["is_me"]] or valid
-        chosen = max(others, key=lambda t: t["last"])
+        # Two terminals are excluded rather than one, and the second is the
+        # standalone script's own rule, restored here because the script is
+        # what has been proven to open this lock: `hassio` is a Home
+        # Assistant integration's terminal, not a phone, and the lock
+        # refuses a bind naming it exactly as it refuses one naming us. An
+        # account carrying one is how the app came to pick a different
+        # terminal from the script on the same account and be rejected.
+        others = [t for t in valid
+                  if not t["is_me"] and t["name"].casefold() != "hassio"]
+        chosen = max(others or valid, key=lambda t: t["last"])
     return chosen["sign"] + chosen["user_id"]
 
 

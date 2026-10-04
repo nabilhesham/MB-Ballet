@@ -123,9 +123,16 @@ async def _lifespan(app):
         problem = door.session_problem()
         if problem:
             print(f"  No door yet: {problem}.")
-            print("  Copy .ezviz_token.json in beside the database. Check-ins "
-                  "still work;")
-            print("  reception opens the door by hand.")
+            print("  Copy .ezviz_token.json in beside the database, or beside "
+                  "what you launched.")
+            print("  Check-ins still work; reception opens the door by hand.")
+        else:
+            # Which file, not just that there is one. "The session is right
+            # there and it says there is none" is the report this answers,
+            # and the launch folder is now one of the places it can be.
+            using = door.session_file()
+            if using:
+                print(f"  Door: using the EZVIZ session in {using}")
 
     # Held in a local: asyncio keeps only a weak reference to a running
     # task, so a bare create_task() may be collected mid-sweep.

@@ -281,6 +281,66 @@ def test_this_integrations_own_terminal_is_not_chosen(ez):
     assert ez.bind.read_text() == "SIGNUID"
 
 
+def test_a_home_assistant_terminal_is_not_chosen_either(ez):
+    """
+    The standalone script skips a terminal named `hassio` as well as its own,
+    and the script is what has been proven to open this lock. It is an
+    integration's terminal rather than a phone, and the lock refuses a bind
+    naming one -- so an account carrying it is how the app came to choose a
+    different terminal from the script and be rejected on the same account.
+    """
+    def one(*a, **kw):
+        c = FakeClient(*a, **kw)
+        c.terminals = [
+            {"sign": "HA", "userId": "U1", "name": "hassio",
+             "lastModifytime": "9"},
+            {"sign": "SIGN", "userId": "UID", "name": "iphone",
+             "lastModifytime": "2"},
+        ]
+        ez.made.append(c)
+        return c
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    door.open_door()
+    assert ez.bind.read_text() == "SIGNUID"
+
+
+def test_hassio_is_still_used_when_it_is_all_there_is(ez):
+    """Excluding every candidate would turn a door that might open into one
+    that cannot. The named phone wins when there is one; this is the
+    fallback, not the rule."""
+    def one(*a, **kw):
+        c = FakeClient(*a, **kw)
+        c.terminals = [{"sign": "HA", "userId": "U1", "name": "hassio",
+                        "lastModifytime": "9"}]
+        ez.made.append(c)
+        return c
+
+    sys.modules["pyezvizapi"].EzvizClient = one
+    assert door.open_door()["ok"] is True
+    assert ez.bind.read_text() == "HAU1"
+
+
+def test_a_bind_beside_the_launcher_is_read_rather_than_refetched(ez, monkeypatch,
+                                                                 tmp_path):
+    """
+    `.bind` is named after the session it belongs to, so the pair the script
+    wrote travels together -- and a machine where both were copied in beside
+    the launcher has them there, not beside the database. Looking only in the
+    canonical place meant re-fetching a bind the script had already proven,
+    and choosing a terminal again while doing it.
+    """
+    launched = tmp_path / "beside-the-exe"
+    launched.mkdir()
+    (launched / ".ezviz_token.json.bind").write_text("FROMSCRIPT")
+    monkeypatch.setattr(config, "launch_dir", lambda: str(launched))
+
+    assert door.open_door()["ok"] is True
+    assert not any(c[0] == "get_terminals" for c in ez.made[0].calls)
+    sent = ez.made[0].calls[1][2]["value"]["unLockInfo"]["bindCode"]
+    assert sent == "FROMSCRIPT"
+
+
 def test_no_bound_phone_says_what_to_do(ez):
     def one(*a, **kw):
         c = FakeClient(*a, **kw)
@@ -474,7 +534,8 @@ def test_the_door_endpoint_names_the_file_it_looks_for(client, monkeypatch):
     assert any(p.endswith("/ezviz_token.json") for p in r["also_accepted"])
     # The session's *contents* never leave: a path is not a credential, and
     # this one grants door access.
-    assert set(r) == {"configured", "token_file", "also_accepted", "session"}
+    assert set(r) == {"configured", "token_file", "also_accepted", "using",
+                      "bind_file", "session"}
 
 
 # ------------------------------------------- the name Windows leaves you with
@@ -505,10 +566,48 @@ def test_the_real_name_wins_when_both_are_there(ez):
     assert door._load_token()["session_id"] == "live"
 
 
+# ------------------------------------------ the folder the script is run from
+def test_the_folder_the_app_was_started_from_is_searched_too(ez, monkeypatch):
+    """
+    `unlock_dl05_fast.py` defaults to `./.ezviz_token.json`, so the session
+    that proves the lock works is sitting next to whatever was run -- and
+    reception copies the file beside the thing they double-click, not beside
+    the database. Looking only where `config.ezviz_token_file()` points said
+    "no session is saved on this computer" about a file in plain sight.
+    """
+    monkeypatch.setattr(config, "launch_dir", lambda: "/elsewhere")
+    paths = door.token_paths()
+    assert paths[0] == str(ez.token)
+    assert "/elsewhere/.ezviz_token.json" in paths
+    assert "/elsewhere/ezviz_token.json" in paths
+
+
+def test_a_session_beside_the_launcher_opens_the_door(ez, monkeypatch, tmp_path):
+    """The script's own default location, which is the one that has been
+    proven to work on the academy's machine."""
+    saved = json.loads(ez.token.read_text())
+    ez.token.unlink()
+    launched = tmp_path / "beside-the-exe"
+    launched.mkdir()
+    (launched / ".ezviz_token.json").write_text(json.dumps(saved))
+    monkeypatch.setattr(config, "launch_dir", lambda: str(launched))
+
+    assert door.session_problem() == ""
+    assert door.session_file() == str(launched / ".ezviz_token.json")
+    ez.bind.write_text("SIGNUID")
+    assert door.open_door()["ok"] is True
+    # The unlock writes the canonical name, so the next start finds it
+    # beside the database whatever folder the launcher was run from.
+    assert json.loads(ez.token.read_text())["session_id"]
+
+
 def test_a_name_with_no_dot_to_strip_is_not_looked_for_twice(ez, monkeypatch):
     """The fallback is the same path when there is no leading dot."""
     monkeypatch.setenv("EZVIZ_TOKEN_FILE", str(ez.dir / "somewhere.json"))
-    assert door.token_paths() == [str(ez.dir / "somewhere.json")]
+    named = str(ez.dir / "somewhere.json")
+    paths = door.token_paths()
+    assert paths[0] == named
+    assert paths.count(named) == 1
 
 
 def test_a_failed_unlock_is_still_a_200(client, monkeypatch):
