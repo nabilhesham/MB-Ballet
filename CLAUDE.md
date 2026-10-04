@@ -2337,6 +2337,28 @@ to copy it in *again*, since telling somebody to copy in a file they are
 looking straight at explains nothing. Both name the path in `technical`,
 which is the only thing that settles it from a console.
 
+**A dot-less `ezviz_token.json` beside it is read too**, and that is about
+Windows rather than about taste. The file arrives on the reception machine
+by hand, and a name beginning with a dot is genuinely hard to produce there:
+Explorer refuses a rename to `.ezviz_token.json` outright, and with known
+extensions hidden a copied file can sit as `.ezviz_token.json.txt` with
+nothing on screen to show it. Either way the kiosk says "no session is saved
+on this computer" to somebody looking straight at the file they just copied
+in. `door.token_paths()` is the list and the canonical name is always first;
+the fallback is **read-only**, since the first unlock writes the canonical
+name in `open_door()`'s `finally`, so a machine that started with the
+dot-less one ends up holding both and the right one wins from then on.
+
+**`GET /api/access/door` names the file it is looking for**, which is the
+other half of the same hour. The path existed only in `technical` — which
+the kiosk deliberately never shows — and on the startup banner, which a
+double-clicked binary scrolls past; so "it says there is no session and the
+file is right there" had no way to be settled from the screen. The route
+answers `configured`, `token_file`, `also_accepted` and `session` (the
+problem sentence, or empty), and opening that URL in the browser is now the
+whole diagnosis. The session's *contents* never leave: a path is not a
+credential, that file is, and this server answers on 127.0.0.1 only.
+
 **The startup banner reports it, and the launchers cannot.** `start.sh` and
 `START.bat` check for the *library*, which is about the environment they
 built — but the machine that matters double-clicks a binary and runs
@@ -2589,6 +2611,19 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       section. `.github/dependabot.yml` plus the monthly canary job are what
       should surface the next one without it being on this list first.
 - [ ] Auto-start on boot, and disable laptop sleep / lid-close suspend.
+- [ ] **The machine's clock is load-bearing and nothing checks it.**
+      `db.now()` is `time.time()` on the reception PC, so a clock that is
+      wrong is an app that is wrong in ways that read as bugs: the absent
+      sweep settles sessions early, a check-in is stamped at a time that
+      never happened, "one check-in per day" is keyed to the wrong day, and
+      the dashboard marks a class as running before it starts. This has
+      already happened once — the reception PC ran about fifty minutes fast
+      and Windows synced it back, leaving a scan recorded at 15:35 on a
+      screen whose clock read 14:44, and a "now" pill on a 15:30 class.
+      Nothing in the app can tell a fast clock from a busy evening, so the
+      honest options are a note in the setup checklist (enable Windows time
+      sync) or a startup line comparing the clock against something — which
+      needs the internet the app otherwise does not.
 - [ ] Key rotation: single secret. Changing it kills every printed card at once.
       Needs an accepted-keys list with an overlap window.
 

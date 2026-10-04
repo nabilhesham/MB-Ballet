@@ -452,9 +452,63 @@ def client(academy):
 
 def test_the_kiosk_can_ask_whether_there_is_a_door(client, monkeypatch):
     monkeypatch.delenv("EZVIZ_LOCK_SERIAL", raising=False)
-    assert client.get("/api/access/door").json() == {"configured": False}
+    assert client.get("/api/access/door").json()["configured"] is False
     monkeypatch.setenv("EZVIZ_LOCK_SERIAL", "BK5433560")
-    assert client.get("/api/access/door").json() == {"configured": True}
+    assert client.get("/api/access/door").json()["configured"] is True
+
+
+def test_the_door_endpoint_names_the_file_it_looks_for(client, monkeypatch):
+    """
+    The question that costs the most time when the door will not open, and
+    the one the kiosk cannot answer: *which* file is it looking for.
+
+    "No EZVIZ session is saved on this computer" gets read standing next to
+    the file somebody has just copied in. The path lived only in
+    `technical`, which the kiosk never shows, and on the startup banner,
+    which a double-clicked binary scrolls past. One URL in a browser settles
+    it now.
+    """
+    monkeypatch.setenv("EZVIZ_LOCK_SERIAL", "BK5433560")
+    r = client.get("/api/access/door").json()
+    assert r["token_file"].endswith(".ezviz_token.json")
+    assert any(p.endswith("/ezviz_token.json") for p in r["also_accepted"])
+    # The session's *contents* never leave: a path is not a credential, and
+    # this one grants door access.
+    assert set(r) == {"configured", "token_file", "also_accepted", "session"}
+
+
+# ------------------------------------------- the name Windows leaves you with
+def test_a_session_saved_without_the_leading_dot_is_still_found(ez):
+    """
+    Explorer refuses a rename to a name starting with a dot, and hides known
+    extensions, so a session copied onto the reception PC by hand can easily
+    end up as `ezviz_token.json`. The app said "no session is saved on this
+    computer" while somebody was looking straight at the file.
+    """
+    saved = json.loads(ez.token.read_text())
+    ez.token.unlink()
+    (ez.dir / "ezviz_token.json").write_text(json.dumps(saved))
+
+    assert door.session_problem() == ""
+    ez.bind.write_text("SIGNUID")
+    assert door.open_door()["ok"] is True
+
+
+def test_the_real_name_wins_when_both_are_there(ez):
+    """
+    The fallback is read-only -- an unlock writes the canonical name, so a
+    machine that started with the dot-less one ends up holding both. The
+    one door.py maintains is the one it must read.
+    """
+    (ez.dir / "ezviz_token.json").write_text(json.dumps({"session_id": "stale"}))
+    ez.token.write_text(json.dumps({"session_id": "live", "feature_code": "me"}))
+    assert door._load_token()["session_id"] == "live"
+
+
+def test_a_name_with_no_dot_to_strip_is_not_looked_for_twice(ez, monkeypatch):
+    """The fallback is the same path when there is no leading dot."""
+    monkeypatch.setenv("EZVIZ_TOKEN_FILE", str(ez.dir / "somewhere.json"))
+    assert door.token_paths() == [str(ez.dir / "somewhere.json")]
 
 
 def test_a_failed_unlock_is_still_a_200(client, monkeypatch):
