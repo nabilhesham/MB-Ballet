@@ -176,6 +176,9 @@ def test_the_two_env_parsers_agree(tmp_path, monkeypatch):
         MB_SQLITE_PATH=academy.db
         a line with no equals sign
         MB_MONGO_URI=mongodb://h:27017/?a=1&b=2
+        EZVIZ_TERMINAL="iphone"
+        EZVIZ_EMAIL='reception@example.com'
+        MB_MONGO_DB=half"quoted
 
         MB_DB_BACKEND=sqlite
     """
@@ -196,3 +199,12 @@ def test_the_two_env_parsers_agree(tmp_path, monkeypatch):
     assert from_spec == from_app
     assert from_spec["ENTRY_SECRET"] == "spaced out"
     assert from_spec["MB_MONGO_URI"] == "mongodb://h:27017/?a=1&b=2"
+    # Quotes come off on both sides. They have to: the standalone unlock
+    # script documents `EZVIZ_TERMINAL="iphone"` and reads `.env` through
+    # python-dotenv, which strips them, so a file written that way meant two
+    # different things to the two programs -- and a door that would not open
+    # while the setting looked right in the file.
+    assert from_spec["EZVIZ_TERMINAL"] == "iphone"
+    assert from_spec["EZVIZ_EMAIL"] == "reception@example.com"
+    # Unbalanced is left alone rather than half-stripped.
+    assert from_spec["MB_MONGO_DB"] == 'half"quoted'

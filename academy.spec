@@ -42,8 +42,17 @@ def _read_env(path):
             if line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            values[k.strip()] = v.strip()
+            values[k.strip()] = _unquote(v)
     return values
+
+
+def _unquote(raw):
+    """`KEY="value"` is the value. The copy of config._unquote() -- see there
+    for why quotes have to come off, and keep the two in step."""
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1]
+    return v
 
 
 def _bake_env(spec_dir, work_dir):
