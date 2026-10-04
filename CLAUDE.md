@@ -1926,6 +1926,17 @@ today (a booking marked present in advance carries an earlier day's).
 reason — it sat one panel away from the recent-attendance chips, which have
 always used the session's own date, and disagreed with them.
 
+**The session page's CHECKED IN column is the same trap one screen along,
+and it now shows the day whenever the stamp is not today's.** It was
+`fmtTime`, a bare `HH:MM` — fine for the common case and unreadable for the
+one that matters, because `checked_in_at` is the instant somebody pressed
+**Present**, and a roster marked in advance carries whatever evening that
+was. "08:11 PM" against a 3:30 class at twenty past three reads as the app
+having invented a time, not as a mark made the night before; it was reported
+as a bug twice. `lib/format.js`'s `fmtWhen()` is the rule — bare time today,
+`fmtFull` otherwise — and today stays bare on purpose, since a date on every
+row is noise that hides the one row carrying a different day.
+
 **A refusal has two temperatures.** `_deny()` carries a `severity`: `"stop"`
 is the default and reads red, `"warn"` reads amber and is what the
 second-scan-today case returns. Scanning twice is the ordinary thing a

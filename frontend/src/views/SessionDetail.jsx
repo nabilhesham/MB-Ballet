@@ -1,7 +1,7 @@
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtTime, hrs } from '../lib/format';
+import { fmtFull, fmtWhen, hrs } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -187,7 +187,11 @@ export default function SessionDetail() {
             { label: 'STATUS', sortValue: r => r.status, cell: r => <StatusPill status={r.status} /> },
             {
               label: 'CHECKED IN', className: 'num mute', hideSm: true, sortValue: r => r.checked_in_at || 0,
-              cell: r => (r.checked_in_at ? fmtTime(r.checked_in_at) : '—'),
+              // fmtWhen, not fmtTime: this stamp is when somebody pressed
+              // Present, which for a roster marked in advance is another day
+              // altogether. A bare "08:11 PM" beside a 3:30 class reads as a
+              // fault in the app rather than as a mark made last night.
+              cell: r => (r.checked_in_at ? fmtWhen(r.checked_in_at) : '—'),
             },
             {
               label: 'MARK AS', sortable: false,

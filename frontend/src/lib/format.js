@@ -18,6 +18,21 @@ export const fmtFull = ts =>
 export const fmtDay = ts =>
   new Date(ts * 1000).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
 
+/* A moment, with its day attached **only when it is not today**.
+ *
+ * `fmtTime` alone is a lie by omission wherever the timestamp is not
+ * guaranteed to be today's, and `checked_in_at` is exactly that: it is the
+ * instant somebody pressed Present, which for a class marked in advance is
+ * an earlier day entirely (see access.set_status, and the "Today means the
+ * session's day" note in CLAUDE.md). A roster reading "08:11 PM" against a
+ * 3:30 class at 3:17 in the afternoon is unreadable — it looks like a clock
+ * fault in the app rather than a mark somebody made on another evening.
+ *
+ * Today stays bare, because that is the common case and a date on every row
+ * of a roster is noise that hides the one row carrying a different day. */
+export const fmtWhen = ts =>
+  (isoDay(ts) === todayISO() ? fmtTime(ts) : fmtFull(ts));
+
 /* A timestamp as its local calendar day, "YYYY-MM-DD". Not toISOString():
    that is UTC, and an evening class in Alexandria can land on the next day. */
 export const isoDay = ts => {
