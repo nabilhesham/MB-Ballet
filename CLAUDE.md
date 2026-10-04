@@ -2369,8 +2369,10 @@ somebody whose session already existed, on the machine that had signed in.
 `door._no_session()` tells them apart on whether the file is there at all —
 missing says to copy it in (and offers the sign-in second), unreadable says
 to copy it in *again*, since telling somebody to copy in a file they are
-looking straight at explains nothing. Both name the path in `technical`,
-which is the only thing that settles it from a console.
+looking straight at explains nothing. Both name a path in `technical`, which
+is the only thing that settles it from a console — the one that was found
+when something was, and **every** place that was looked in when nothing was,
+since the file is usually sitting in one of the others.
 
 **A dot-less `ezviz_token.json` beside it is read too**, and that is about
 Windows rather than about taste. The file arrives on the reception machine
@@ -2384,15 +2386,53 @@ the fallback is **read-only**, since the first unlock writes the canonical
 name in `open_door()`'s `finally`, so a machine that started with the
 dot-less one ends up holding both and the right one wins from then on.
 
+**And the folder the app was started from, because that is where the script
+leaves it.** `unlock_dl05_fast.py` defaults its session to
+`./.ezviz_token.json` — relative — and that script is how the first session
+gets minted at all, so on the machine where somebody ran it the file is
+sitting wherever they were standing. "The script opens the door and the app
+does not" came down to the two reading different files. `config.launch_dir()`
+is the cwd captured **at import**, before `load_env()`'s `chdir`, which is
+the only moment it is still knowable; `door._candidates()` is the canonical
+folder then that one, crossed with the dotted and dot-less names, so
+`token_paths()` is at most four entries with the canonical one always first.
+In a source checkout the two folders are the same and nothing is added. A
+session found anywhere but the first still converges: the `finally` writes
+`config.ezviz_token_file()`, so the next start reads it from beside the
+database.
+
+**The bind travels with it.** `.bind` is named after the session file it
+belongs to, so the pair the script wrote sits together wherever that was —
+`door.bind_paths()` is therefore `token_paths()` with `.bind` appended, same
+order, same read-only-but-the-first rule. Looking only beside the canonical
+path meant re-fetching a bind the script had already proven, *and choosing a
+terminal again while doing it*, which is the second way the two can diverge
+on one account.
+
+**Which is why `_fetch_bind_code()` skips a terminal named `hassio` as well
+as its own.** That line was in the script and was dropped in the port as
+incidental; it is not. It names a Home Assistant integration's terminal
+rather than a phone, and the lock refuses a bind naming one exactly as it
+refuses a bind naming us — so an account carrying one had the script picking
+the phone and the app picking the integration, on the same account, with
+only `code 10002`-shaped rejections to go on. Both exclusions fall back to
+the full list rather than leaving nothing: a door that might open beats one
+that cannot.
+
 **`GET /api/access/door` names the file it is looking for**, which is the
 other half of the same hour. The path existed only in `technical` — which
 the kiosk deliberately never shows — and on the startup banner, which a
 double-clicked binary scrolls past; so "it says there is no session and the
 file is right there" had no way to be settled from the screen. The route
-answers `configured`, `token_file`, `also_accepted` and `session` (the
-problem sentence, or empty), and opening that URL in the browser is now the
-whole diagnosis. The session's *contents* never leave: a path is not a
-credential, that file is, and this server answers on 127.0.0.1 only.
+answers `configured`, `token_file`, `also_accepted`, `using` (which of them
+the session is actually being read from, or empty), `bind_file` (likewise,
+or `"env"` for `EZVIZ_BIND_CODE`) and `session` (the problem sentence, or
+empty), and opening that URL in the browser is now the whole diagnosis.
+`using` and `bind_file` are the two that settle a script-works-app-does-not
+report: either they are on the same two files or they are not. The
+session's and the bind's *contents* never leave — a path is not a
+credential, both of those files are, and this server answers on 127.0.0.1
+only.
 
 **The startup banner reports it, and the launchers cannot.** `start.sh` and
 `START.bat` check for the *library*, which is about the environment they
@@ -2401,8 +2441,9 @@ neither, so a check living there never runs where it is needed. The first
 anyone heard of a missing session was an amber line under a client's
 verdict, with the client standing at the counter. `server.py`'s lifespan
 asks `door.session_problem()` — the same question `_client()` asks, so the
-two cannot drift — and prints one line naming the path it looked at. It
-never blocks the start: a door-less install is a legitimate one. A source
+two cannot drift — and prints one line naming the path it looked at, or,
+when there is a session, which of the four files it is using. It never
+blocks the start: a door-less install is a legitimate one. A source
 checkout with `EZVIZ_EMAIL`/`EZVIZ_PASSWORD` in `.env` can mint its own
 session on the first unlock, so it says nothing there.
 

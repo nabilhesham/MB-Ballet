@@ -300,6 +300,15 @@ def door_state():
     return {"configured": door.configured(),
             "token_file": config.ezviz_token_file(),
             "also_accepted": door.token_paths()[1:],
+            # Which one it is actually reading, which is the half that
+            # settles "the standalone script opens the door and this does
+            # not": either they are on the same file or they are not.
+            "using": door.session_file(),
+            # The bind is the other half of what the script carries, and a
+            # missing one makes the app look a terminal up for itself --
+            # which is the second way it can diverge from a script that
+            # works. The *path* only: a bind code grants door access.
+            "bind_file": door.bind_file_in_use(),
             "session": door.session_problem()}
 
 
