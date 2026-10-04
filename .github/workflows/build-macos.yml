@@ -256,8 +256,11 @@ jobs:
               echo "account. Harmless if the lock ignores that field; add the"
               echo "secret if an unlock ever comes back refused with a code."
             fi
-            echo "Baking: the door. The binary still needs .ezviz_token.json"
-            echo "beside it -- the session is never baked in."
+            echo "Baking: the door. The binary still needs"
+            echo ".ezviz_token.json beside it, and .ezviz_token.json.bind"
+            echo "with it -- neither is ever baked in, because both open"
+            echo "the door. Without the .bind the first unlock looks the"
+            echo "phone up again and may pick a different terminal."
           else
             echo "Baking: NO DOOR. EZVIZ_LOCK_SERIAL is set neither as a"
             echo "secret nor as a repository variable, so this binary will"

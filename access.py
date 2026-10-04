@@ -574,18 +574,21 @@ def sweep_invalidate():
     _sweep_deadline = 0
 
 
-# How long the background sweep waits between passes.
+# How long the background sweep waits between passes. It used to be a flat
+# hour, which is the only reason a no-show ever became absent an hour after
+# their class rather than when it ended: the *rule* has always been
+# `ends_at < now` (settle_absences), but on a laptop sitting on the kiosk
+# screen nothing reads attendance, so the loop was the only thing applying it
+# and it woke on its own cadence instead of the timetable's.
 #
-# Everything the sweep acts on is now a *day* boundary -- absences and
-# completions wait for the day to end (see _sweep), and
-# lift_expired_freezes() already compared a date -- so the next moment it can
-# have work is the next local midnight, and that is what the deadline is.
-#
-# The ceiling keeps an hourly pass underneath it as a heartbeat for what a
-# deadline cannot see: a suspended laptop, a clock jump, a write made while
-# the loop was already asleep. The floor is what stops a pass that lands
-# exactly on midnight from spinning, since `_next_midnight()` is strictly
-# ahead of any `now` it is given but a slow pass can return after it.
+# The deadline above already knows the exact moment there can be work -- the
+# next session end, or midnight for a freeze -- so the loop waits for that
+# instead. The floor keeps a session ending this very second from spinning
+# the loop (`next_sweep_deadline` answers `ends_at >= now`, and
+# settle_absences wants `<`, so the first pass after it has nothing to do);
+# the ceiling keeps the old hourly pass as a heartbeat for the things a
+# deadline cannot see -- a suspended laptop, a clock jump, a write made while
+# the loop was already asleep.
 SWEEP_WAIT_MIN = 5
 SWEEP_WAIT_MAX = 3600
 
@@ -608,9 +611,9 @@ def _next_midnight(now: int) -> int:
 
 def settle_past_sessions(repo) -> int:
     """
-    A session is completed, and whoever never checked in to it absent, once
-    **the day it ran on is over**. Called on startup and before anything that
-    reads attendance, so what is on screen is never stale.
+    Any booking whose session has finished but was never checked in becomes
+    absent. Called on startup and before anything that reads attendance, so
+    what is on screen is never stale.
 
     Dated freezes are lifted first: a plan that came out of a freeze last week
     should have its slots settled normally, and one still frozen is skipped
@@ -623,38 +626,86 @@ def settle_past_sessions(repo) -> int:
     if db.now() < _sweep_deadline:
         return 0
     settled = _sweep(repo)
-    # After the sweep, not before: `now` has to be read after the writes, so a
-    # pass that was still running at midnight does not set a deadline a day
-    # further out than it earned.
-    _sweep_deadline = _next_midnight(db.now())
+    # After the sweep, not before: `now` has to be read after the writes so a
+    # session that ended during them is not skipped over until tomorrow.
+    now = db.now()
+    nxt = repo.next_sweep_deadline(now)
+    _sweep_deadline = min(_next_midnight(now), nxt) if nxt else _next_midnight(now)
     return settled
 
 
+# How far back a repair looks for a session that is still running. One
+# marked completed that started more than a day ago cannot be, whatever its
+# duration column says.
+REPAIR_WINDOW_S = 86400
+
+
+def _repair_running_sessions(repo, now: int) -> int:
+    """
+    Put a session that is still running back to `scheduled`, and give its
+    no-shows their slots back. Returns how many were reopened.
+
+    **This is a repair for a state the app can reach and cannot otherwise
+    leave.** A session whose stored `ends_at` is earlier than its own
+    duration says gets completed early, and `settle_absences()` writes every
+    no-show absent at that wrong moment -- mid-class, with the students in
+    the room. From then on the dashboard shows the class as `completed` while
+    it is visibly running, and a client who arrives late is met with the
+    MANUAL CHECK-IN swap instead of an ordinary check-in, because the slot
+    the kiosk would have spent already reads `absent`.
+
+    Two writes, in that order:
+
+    * **`ends_at` is rewritten wherever it disagrees with
+      `starts_at + duration_hours*3600`.** That column is supposed to have
+      one writer (`ends_at_of()`, through the four paths named there) and
+      `db.migrate()` fills it where it is NULL -- but NULL is not the only
+      way to be wrong, and a row that is wrong by an hour is invisible: the
+      session simply ends early, every time, with nothing on any screen to
+      say why. Repairing it here means the next sweep is working from the
+      duration the session itself carries, which is the whole point.
+    * **A `completed` session whose corrected end is still ahead goes back to
+      `scheduled`**, and its `absent` bookings back to `booked`.
+
+    It gives back *every* absence on such a session, including one reception
+    marked by hand during the class. That is deliberate rather than careless:
+    nothing distinguishes the two (`set_status` leaves `checked_in_at` NULL
+    for both), and the sweep will write the hand-marked one again at the real
+    end of the class, so the record converges on the same answer. What it
+    will not do is hold a late arrival out of a class that is still running.
+
+    The cost is one read per sweep, scoped to the window above plus
+    everything still ahead -- and the sweep only runs once a session's end
+    has passed (see the deadline in settle_past_sessions).
+    """
+    reopened = []
+    for s in repo.find("sessions", {"starts_at": {"gte": now - REPAIR_WINDOW_S}}):
+        fields = {}
+        true_end = ends_at_of(s["starts_at"], s["duration_hours"])
+        if s["ends_at"] != true_end:
+            fields["ends_at"] = true_end
+        # A cancelled session has its ends_at kept honest -- slot_conflict()
+        # reads it when somebody un-cancels -- but is never reopened: it
+        # occupies nothing on purpose.
+        if (s["status"] == "completed"
+                and s["starts_at"] <= now < true_end):
+            fields["status"] = "scheduled"
+            reopened.append(s["id"])
+        if fields:
+            repo.update("sessions", s["id"], fields)
+    if reopened:
+        repo.update_where("bookings",
+                          {"session_id": {"in": reopened}, "status": "absent"},
+                          {"status": "booked"})
+    return len(reopened)
+
+
 def _sweep(repo) -> int:
-    """
-    The day's end is the line, not the session's.
-
-    It was the session's own end: `ends_at < now`, so a 3:30 class had its
-    no-shows marked absent at 5pm. That is too early to be true. A client who
-    turns up late, or at the next class, or whose attendance reception only
-    gets round to entering in the evening, has not failed to come -- and once
-    the slot reads `absent` the kiosk stops checking them in the ordinary way
-    and offers the MANUAL CHECK-IN swap instead, which is a different piece
-    of work for the same person walking through the same door. Settling at
-    midnight gives the whole day to be wrong about, which is how long
-    reception actually has.
-
-    The cost, and it is real: between a class ending and midnight a no-show's
-    slot still reads `booked`, so their SESSIONS LEFT is one higher than it
-    will be tomorrow. The alternative was spending a session on somebody who
-    walks in twenty minutes later, which is worse: that one needs a human to
-    undo, and this one corrects itself.
-
-    `day_bounds()[0]` is today's midnight, and sessions are settled strictly
-    *before* it -- so everything up to and including yesterday, and nothing
-    from today however long ago it finished.
-    """
     with repo.begin():
+        # The repair runs first, because both writes below read `ends_at`: a
+        # row whose stored end is wrong would otherwise be completed again in
+        # this same pass, and the two would take turns for ever.
+        _repair_running_sessions(repo, db.now())
         # The frozen plans are read first and passed in rather than joined:
         # Mongo has no cross-collection update, and there are never more than
         # a handful of them. One read, not two -- lift_expired_freezes() asks
@@ -664,10 +715,10 @@ def _sweep(repo) -> int:
         # waits through at the desk.
         frozen = repo.find("subscriptions", {"frozen_on": {"ne": None}})
         lifted = lift_expired_freezes(repo, frozen)
-        today_began, _ = day_bounds()
+        now = db.now()
         still_frozen = [r["id"] for r in frozen if r["id"] not in lifted]
-        settled = repo.settle_absences(today_began, still_frozen)
-        repo.complete_finished_sessions(today_began)
+        settled = repo.settle_absences(now, still_frozen)
+        repo.complete_finished_sessions(now)
         return settled
 
 
@@ -852,8 +903,14 @@ def _decide(repo, client, cred, base, t, rows, sub):
         when = (f" at {time.strftime('%H:%M', time.localtime(at))}"
                 if at and start <= at <= end else "")
         _log(repo, cid, cred_id, None, "deny", "already checked in today")
+        # The code is what puts the door on this one refusal -- see the note
+        # in reception.html's show(). A client who is already checked in today
+        # has a spent slot proving they belong inside; stepping out and coming
+        # back is not a second visit to be charged for, and it is not a reason
+        # to make them wait at a locked door either.
         return _deny(f"Already checked in today{when} for {done['class_name']}",
-                     detail="nothing was deducted", severity="warn", **base)
+                     detail="nothing was deducted", severity="warn",
+                     code="already_checked_in", **base)
 
     # The card's own plan: freezing the ballet plan must not turn away a
     # client arriving for the flexibility class she is paid up in. Passed in
@@ -2285,7 +2342,7 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
 #
 # The day is passed in rather than read off the clock, so the Cards screen
 # can ask about any date and opens on today. Same shape as
-# `sessions_in_range(start, end)` and `settle_absences(before, ...)`.
+# `sessions_in_range(start, end)` and `settle_absences(now, ...)`.
 # ======================================================================
 
 def next_day(iso: str) -> str:

@@ -117,21 +117,10 @@ def test_a_fractional_duration_is_respected(empty):
 
 # -------------------------------------------------- settle_past_sessions
 
-def test_a_session_from_a_past_day_becomes_completed(empty):
-    """
-    30 hours back, not 4: the sweep settles a session once its *day* is over,
-    so "ended a few hours ago" is deliberately still scheduled. See
-    access._sweep().
-    """
-    sid = add(empty, empty.ballet, db.now() - 30 * 3600, 1.5)
-    access.settle_past_sessions(empty.repo)
-    assert empty.repo.get("sessions", sid)["status"] == "completed"
-
-
-def test_a_session_that_ended_earlier_today_is_left_alone(empty):
+def test_a_session_that_has_ended_becomes_completed(empty):
     sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.5)
     access.settle_past_sessions(empty.repo)
-    assert empty.repo.get("sessions", sid)["status"] == "scheduled"
+    assert empty.repo.get("sessions", sid)["status"] == "completed"
 
 
 def test_a_session_still_running_is_left_alone(empty):
@@ -166,7 +155,7 @@ def test_a_booking_on_a_cancelled_session_is_not_swept_absent(empty):
 def test_the_sweep_returns_how_many_bookings_it_settled(empty):
     repo = empty.repo
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
-    for offset in (30, 34):          # both on a day that is over
+    for offset in (4, 8):
         sid = add(empty, empty.ballet, db.now() - offset * 3600, 1.0)
         _ins(repo, "bookings", client_id=cid, session_id=sid,
              status="booked", created_at=db.now())
@@ -176,7 +165,7 @@ def test_the_sweep_returns_how_many_bookings_it_settled(empty):
 def test_the_sweep_is_idempotent(empty):
     repo = empty.repo
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
-    sid = add(empty, empty.ballet, db.now() - 30 * 3600, 1.0)
+    sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.0)
     _ins(repo, "bookings", client_id=cid, session_id=sid,
          status="booked", created_at=db.now())
     assert access.settle_past_sessions(repo) == 1

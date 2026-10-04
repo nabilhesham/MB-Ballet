@@ -58,15 +58,20 @@ class SessionsPort(ABC):
         """
 
     @abstractmethod
-    def complete_finished_sessions(self, before: int) -> int:
-        """
-        Mark every scheduled session that ended before `before` completed.
+    def complete_finished_sessions(self, now: int) -> int:
+        """Mark every scheduled session whose end has passed completed."""
 
-        The bound is passed in rather than read off the clock here, the same
-        shape `sessions_in_range()` and `settle_absences()` use: the rule for
-        *which* moment it is belongs in access.py, and today it is the start
-        of today rather than now -- a session is completed once its day is
-        over. See access._sweep().
+    @abstractmethod
+    def next_sweep_deadline(self, now: int):
+        """
+        The earliest `ends_at` at or after `now` among sessions that are not
+        cancelled, or None when nothing is left to end.
+
+        This is the next moment `access.settle_past_sessions()` could
+        possibly have work to do, which is what lets it skip itself entirely
+        until then -- see the deadline note there. NULL `ends_at` is excluded
+        for the same reason the sweep itself excludes it: a row the sweep
+        cannot act on cannot be the reason to wake it up.
         """
 
     @abstractmethod
@@ -148,15 +153,11 @@ class BookingsPort(ABC):
         """
 
     @abstractmethod
-    def settle_absences(self, before: int, frozen_sub_ids: list) -> int:
+    def settle_absences(self, now: int, frozen_sub_ids: list) -> int:
         """
-        Sweep still-booked slots to absent for every session that ended
-        before `before`, skipping plans that are frozen — a paused client
-        must never lose a session. Returns how many were settled.
-
-        `before` is the start of today, not now: a no-show is only settled
-        once the day is over, so somebody who turns up late is still checked
-        in the ordinary way. access._sweep() is where that is decided.
+        Sweep still-booked slots of finished sessions to absent, skipping
+        plans that are frozen — a paused client must never lose a session.
+        Returns how many were settled.
         """
 
 
