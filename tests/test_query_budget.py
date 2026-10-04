@@ -57,7 +57,7 @@ class Counted:
                "salary_hours", "adjustments_sum", "taught_totals_bulk",
                "instructor_sessions",
                "plan_counts", "plan_counts_bulk", "attendance_counts", "plan_rows",
-               "check_in_booking", "settle_absences",
+               "check_in_booking", "settle_absences", "next_sweep_deadline",
                "active_plans_with_clients", "last_session_ts", "max_starts_at",
                "last_session_ts_bulk",
                "recent_events", "event_totals", "joined_counts")
@@ -324,16 +324,16 @@ def test_the_sweep_skips_itself_until_it_can_do_something(academy, repo):
     """
     settle_past_sessions() runs at the top of nine read endpoints, so its
     cost was a fifth to a third of every page in the admin. It skips itself
-    until the moment it could possibly have work -- the next local midnight,
-    now that everything it settles waits for the day to end -- which is an
-    exact skip rather than a throttle: nothing it looks at can change before
-    then.
+    until the moment it could possibly have work -- the earlier of the next
+    session end and the next midnight -- which is an exact skip rather than
+    a throttle: nothing it looks at can change before then.
     """
     access.sweep_invalidate()
 
     with Counted() as first:
         access.settle_past_sessions(repo)
     assert len(first), "the first sweep must actually run"
+    assert first.count_of("next_sweep_deadline") == 1, first.report()
 
     with Counted() as second:
         access.settle_past_sessions(repo)

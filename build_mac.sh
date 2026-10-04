@@ -219,10 +219,12 @@ printf "    so cards already printed still scan.\n\n"
 # saved session is not baked either, for the same reason, which is why it
 # has to be copied in by hand.
 if [ "$DOOR" = yes ]; then
-  printf "    The door is in. Copy .ezviz_token.json from this\n"
-  printf "    folder in beside the binary too: the saved EZVIZ\n"
-  printf "    session is deliberately not built in, because it\n"
-  printf "    opens the front door.\n\n"
+  printf "    The door is in. Copy .ezviz_token.json AND\n"
+  printf "    .ezviz_token.json.bind from this folder in beside the\n"
+  printf "    binary too: neither is built in, because both open\n"
+  printf "    the front door. Without the .bind the first unlock\n"
+  printf "    looks the phone up again, which is slower and can\n"
+  printf "    pick a different one.\n\n"
 else
   printf "    NO DOOR in this build: pyezvizapi did not install,\n"
   printf "    although %s is new enough for it. The binary works\n" \

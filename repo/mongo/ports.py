@@ -174,11 +174,17 @@ class MongoSessions(SessionsPort, _Helpers):
                 "duration_hours": s["duration_hours"],
                 "class_name": k["name"] if k else None}
 
-    def complete_finished_sessions(self, before):
+    def complete_finished_sessions(self, now):
         return self.db["sessions"].update_many(
-            {"status": "scheduled", "ends_at": {"$lt": before, "$ne": None}},
+            {"status": "scheduled", "ends_at": {"$lt": now, "$ne": None}},
             {"$set": {"status": "completed"}},
             session=self.session).modified_count
+
+    def next_sweep_deadline(self, now):
+        doc = self.db["sessions"].find_one(
+            {"status": {"$ne": "cancelled"}, "ends_at": {"$gte": now, "$ne": None}},
+            {"ends_at": 1}, sort=[("ends_at", 1)], session=self.session)
+        return doc["ends_at"] if doc else None
 
     def session_detail(self, session_id):
         s = self.get("sessions", session_id)
@@ -406,7 +412,7 @@ class MongoBookings(BookingsPort, _Helpers):
             session=self.session)
         return res.matched_count > 0
 
-    def settle_absences(self, before, frozen_sub_ids):
+    def settle_absences(self, now, frozen_sub_ids):
         # Driven from the bookings, not from the sessions. Reading the id of
         # every finished session and sending the lot back as an `$in` was two
         # round trips whose payload grew with the academy's whole history --
@@ -426,7 +432,7 @@ class MongoBookings(BookingsPort, _Helpers):
                 "foreignField": "_id", "as": "_s",
                 "pipeline": [
                     {"$match": {"status": {"$ne": "cancelled"},
-                                "ends_at": {"$lt": before, "$ne": None}}},
+                                "ends_at": {"$lt": now, "$ne": None}}},
                     {"$project": {"_id": 1}}]}},
             {"$match": {"_s": {"$ne": []}}},
             {"$project": {"_id": 1}},

@@ -979,6 +979,22 @@ function show(r, opts){
      someone presses Esc, which is also what stops the next card replacing a
      verdict nobody has finished reading. */
   if(auto) doCheckIn();
+  /* The door opens for a client who is already checked in today, and this is
+     the only refusal it opens for.
+
+     Every path that *spends* a slot opens the door (see CLAUDE.md), and this
+     one spends nothing -- but the slot is already spent, which is the point:
+     the card has just proved this person is a member who has been admitted to
+     a class today. Somebody who steps out to a car and comes back scans
+     again, gets the amber "already checked in today, nothing was deducted",
+     and used to stand at a locked door while the receptionist worked out that
+     the only thing left was to get up and open it by hand.
+
+     No other refusal gets it, and the reasons are not interchangeable: a
+     revoked card, a frozen plan, an unpaid one and "nothing of theirs runs
+     today" are all cases where the door staying shut is the answer. The code
+     is the only thing branched on, exactly as with MANUAL CHECK-IN above. */
+  else if(!r.granted && r.code === 'already_checked_in') openDoor();
 
   refresh();
 }

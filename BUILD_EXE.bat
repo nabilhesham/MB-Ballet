@@ -239,10 +239,12 @@ REM  below is parsed as one group, so nothing inside it may contain a
 REM  parenthesis, a pipe or a redirect. Check the echo lines before editing.
 :door_note
 if "%DOOR%"=="yes" (
-    echo     The door is in. Copy .ezviz_token.json from this
-    echo     folder in beside the .exe as well -- the saved EZVIZ
-    echo     session is deliberately NOT built into the binary,
-    echo     because it opens the front door.
+    echo     The door is in. Copy .ezviz_token.json AND
+    echo     .ezviz_token.json.bind from this folder in beside the
+    echo     .exe as well -- neither is built into the binary,
+    echo     because both open the front door. Without the .bind
+    echo     the first unlock looks the phone up again, which is
+    echo     slower and can pick a different one.
 ) else (
     echo     NO DOOR in this build: pyezvizapi did not install,
     echo     although Python %PYVER% is new enough for it. The exe

@@ -1338,7 +1338,7 @@ fallback `_decide()` makes. `tests/test_lapsed_students.py` holds the
 boundary, both fallbacks, and that nothing is deleted.
 
 **The date bound is passed in rather than read inside the port**, the same
-shape `sessions_in_range(start, end)` and `settle_absences(before, …)` already
+shape `sessions_in_range(start, end)` and `settle_absences(now, …)` already
 use. That is what keeps `LAPSED_GRACE_MONTHS` in `access.py` where the
 business rules live, instead of a constant inside the data layer that
 `repo/` would have to import `access` to reach.
@@ -1553,70 +1553,94 @@ the first, and nothing is deducted.
 sessions for that card's class, not just one starting imminently — making
 reception wait for the exact start time helps nobody.
 
-**A session is completed, and its no-shows absent, at the end of the day it
-ran on — not at the end of the class.** `access.settle_past_sessions()` is
-the sweep, and it runs on startup, before every read that touches
-attendance, and on its own in the background.
+**Past sessions settle themselves.** `access.settle_past_sessions()` marks any
+still-`booked` slot absent once its session has ended, and runs on startup,
+before every read that touches attendance, and on its own in the background.
+Nothing on screen is stale.
 
-The line used to be the session's own end (`ends_at < now`), so a 3:30 class
-had its absences written at 5pm. **That is too early to be true.** A client
-who turns up late, or whose attendance reception only gets round to entering
-in the evening, has not failed to come — and the moment a slot reads
-`absent` the kiosk stops checking them in the ordinary way and offers the
-MANUAL CHECK-IN swap instead, which is a different piece of work for the
-same person walking through the same door. Settling at midnight gives
-reception the whole day to be wrong about it, which is how long they
-actually have.
+**Settling at the end of the *day* was tried and taken out again.** It was a
+reasonable answer to a real complaint — a no-show's slot read `absent` while
+reception might still be about to mark them present — but it is the wrong
+trade for this academy: a session stayed `scheduled` for hours after it
+finished, SESSIONS LEFT read one too many all evening, and the Sessions list
+could not tell a class that had ended from one still running. The line is the
+session's own end again. What the day version was actually fixing was a
+*wrong* end, which is the repair below.
 
-`access._sweep()` passes `day_bounds()[0]` — today's midnight — to
-`settle_absences()` and `complete_finished_sessions()`, which both compare
-strictly *before* it: everything up to and including yesterday, nothing from
-today however long ago it finished. The bound is passed in rather than read
-inside the port, the same shape `sessions_in_range(start, end)` uses, so the
-rule lives in `access.py` with the other business rules.
+**A class that is still running is put back, and that is a repair for a state
+the app could reach and not leave.** `access._repair_running_sessions()` runs
+at the top of every sweep, before either write, and does two things:
 
-**Two costs, both deliberate.** Between a class ending and midnight a
-no-show's slot still reads `booked`, so their SESSIONS LEFT is one higher
-than it will be tomorrow — the alternative is spending a session on somebody
-who walks in twenty minutes later, which needs a human to undo where this
-corrects itself. And a client whose only slot today is a class that has
-already finished is now *checked in to it* by a scan rather than refused
-with the swap offer: right for the latecomer it is built for, and slightly
-wrong for somebody who skipped Ballet and turned up to Flexibility, which
-reception corrects from the profile.
+| | |
+|---|---|
+| `ends_at` disagrees with `starts_at + duration_hours*3600` | rewrite it |
+| `completed` but the corrected end is still ahead | back to `scheduled`, and its `absent` bookings back to `booked` |
 
-**The background pass therefore waits for midnight.** Everything the sweep
-settles is now a day boundary, and `lift_expired_freezes()` already compared
-a date, so the next moment it can have work is the next local midnight —
-`access.seconds_to_next_sweep()` is that wait, and `server.py`'s
-`_settle_loop` sleeps it. `SWEEP_WAIT_MAX` (one hour) keeps an hourly pass
-underneath as a heartbeat for what a deadline cannot see: a suspended
-laptop, a clock jump, a write made while the loop was already asleep.
-`SWEEP_WAIT_MIN` (5s) stops a pass that returns *after* the midnight it
-computed from spinning. A failed pass waits a minute — long enough not to
-hammer a backend that is down.
+The failure it ends was on the academy's own screen: a 3:30 class showing
+`completed` at twenty past three with two students already marked absent, in
+a room they were sitting in. A stored `ends_at` an hour short of a 1.5-hour
+class ends that class early *every time*, and nothing afterwards puts either
+the status or the absences back — so the dashboard prints `completed` where
+it should print `now`, and a client arriving late is met with the MANUAL
+CHECK-IN swap instead of an ordinary check-in, because the slot the kiosk
+would have spent already reads `absent`.
 
-(This replaced a loop that woke at the next session end, which was the right
-answer to the previous rule and is the wrong answer to this one. The screen
-that made the matching mistake from the other side was the Sessions list,
-splitting upcoming from past at a flat hour after the *start* so a 1.5-hour
-class moved to "past" half an hour before the instructor stopped teaching
-it; it reads `ends_at`, which is still right for a question about the
-class rather than about the day.)
+`ends_at` is supposed to have one writer (`ends_at_of()`, through the four
+paths named beside it) and `db.migrate()` fills it where it is NULL — but
+**NULL is not the only way to be wrong**, and a row wrong by an hour is
+invisible: the class simply ends early, with nothing on any screen to say
+why. Repairing it means the next sweep works from the duration the session
+itself carries, which is what "mark them absent when the session ends" means.
+
+Two deliberate details. It gives back **every** absence on a reopened
+session, including one reception marked by hand mid-class: nothing
+distinguishes the two (`set_status` leaves `checked_in_at` NULL for both),
+and the sweep writes the hand-marked one again at the real end, so the record
+converges — where the other way round holds a latecomer out of a class that
+is still running. And a **cancelled** session has its `ends_at` kept honest,
+because un-cancelling asks `slot_conflict()` about it, but is never reopened:
+it occupies nothing on purpose.
+
+The cost is one read per sweep, scoped to `REPAIR_WINDOW_S` back (a day — a
+session that started longer ago than that cannot still be running) plus
+everything ahead. It is a read the sweep only makes once a session's end has
+passed, because of the deadline below.
+
+**The background pass waits for the next session to end, not for an hour.**
+The rule has always been the session's own end — `settle_absences()` is
+`ends_at < now`, and `ends_at` is `starts_at + duration_hours*3600` — but
+`server.py`'s `_settle_loop` slept a flat hour between passes, and on the
+machine that matters that loop is the only thing applying the rule: a laptop
+sitting on the kiosk reads no attendance for hours at a time. So a client
+who did not turn up became absent at some point in the hour *after* their
+class rather than when the class finished, and the session page said
+"booked" in between.
+
+`access.seconds_to_next_sweep()` is the wait now — the deadline below, which
+already knows the exact moment there can be work. `SWEEP_WAIT_MIN` (5s) is
+what stops a session ending this very second spinning the loop, since
+`next_sweep_deadline()` answers `ends_at >= now` while `settle_absences()`
+wants `<`, so the pass that lands exactly on an end has nothing to do.
+`SWEEP_WAIT_MAX` (one hour) keeps the old cadence underneath as a heartbeat
+for what a deadline cannot see: a suspended laptop, a clock jump, a write
+made while the loop was already asleep. A failed pass waits a minute — long
+enough not to hammer a backend that is down, short enough that a blip costs
+one session's worth of lateness.
+
+The one screen that made the same mistake from the other side was the
+Sessions list, which split upcoming from past at a flat hour after the
+*start*: a 1.5-hour class moved to "past" half an hour before the instructor
+finished teaching it. It reads `ends_at` now, like everything else.
 
 **It skips itself when it provably has nothing to do, which is not the same
-as throttling it.** Everything the sweep acts on is a date boundary now —
-`booked`→`absent` and `scheduled`→`completed` both wait for the day to end,
-and `lift_expired_freezes()` compares `frozen_until` against a date. So once
-it has run it cannot do anything again before the next local midnight, and
-`access._sweep_deadline` is exactly that. Before it the sweep costs **zero
-round trips** rather than four.
-
-That also removed a port method: the deadline used to be the earlier of the
-next session end and midnight, and `repo.next_sweep_deadline()` existed on
-both backends to answer the first half. With the day as the line there is
-nothing to ask — midnight is arithmetic — so it is gone, and the first read
-after a write costs one round trip less than it did.
+as throttling it.** What the sweep acts on is wall-clock time crossing a
+session's `ends_at` — both halves, `booked`→`absent` and
+`scheduled`→`completed` — or a date boundary, which is what
+`lift_expired_freezes()` compares `frozen_until` against. So once it has run,
+it cannot do anything again before the earlier of the next session end and
+the next local midnight. `access._sweep_deadline` is that moment, from
+`repo.next_sweep_deadline()`, and before it the sweep costs **zero round
+trips** rather than four.
 
 That distinction is the whole point and a throttle was declined for it: a
 throttle trades the invariant above for speed, where skipping until a moment
@@ -2369,6 +2393,21 @@ client let in by one and not the other is a difference nobody can explain at
 the counter. Undo is the one asymmetry and cannot be otherwise: a door
 already opened cannot be un-opened, so undoing a check-in refunds the
 session and nothing else.
+
+**And one refusal opens it: `already_checked_in`.** That one spends nothing —
+but the slot is already spent, which is the point: the card has just proved
+this person is a member who has been admitted to a class today. Somebody who
+steps out to a car and comes back scans again, gets the amber "Already
+checked in today at 15:22 — nothing was deducted", and used to stand at a
+locked door while reception worked out that the only thing left was to get up
+and open it by hand. The code is the only thing `reception.html` branches on,
+exactly as with MANUAL CHECK-IN, and `tests/test_access.py` holds that the
+refusal still carries it — losing it is a door that silently stops opening.
+
+**No other refusal gets it, and the reasons are not interchangeable.** A
+revoked card, a frozen plan, an unpaid one and "nothing of theirs runs today"
+are every one of them a case where the door staying shut *is* the answer; the
+first two would be the room's own security model undone by a convenience.
 
 **`pyezvizapi` needs Python 3.12**, so `requirements.txt` installs it under
 a version marker and `door.py` imports it *inside* its functions. Both are
