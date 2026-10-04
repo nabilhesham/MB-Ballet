@@ -574,21 +574,18 @@ def sweep_invalidate():
     _sweep_deadline = 0
 
 
-# How long the background sweep waits between passes. It used to be a flat
-# hour, which is the only reason a no-show ever became absent an hour after
-# their class rather than when it ended: the *rule* has always been
-# `ends_at < now` (settle_absences), but on a laptop sitting on the kiosk
-# screen nothing reads attendance, so the loop was the only thing applying it
-# and it woke on its own cadence instead of the timetable's.
+# How long the background sweep waits between passes.
 #
-# The deadline above already knows the exact moment there can be work -- the
-# next session end, or midnight for a freeze -- so the loop waits for that
-# instead. The floor keeps a session ending this very second from spinning
-# the loop (`next_sweep_deadline` answers `ends_at >= now`, and
-# settle_absences wants `<`, so the first pass after it has nothing to do);
-# the ceiling keeps the old hourly pass as a heartbeat for the things a
-# deadline cannot see -- a suspended laptop, a clock jump, a write made while
-# the loop was already asleep.
+# Everything the sweep acts on is now a *day* boundary -- absences and
+# completions wait for the day to end (see _sweep), and
+# lift_expired_freezes() already compared a date -- so the next moment it can
+# have work is the next local midnight, and that is what the deadline is.
+#
+# The ceiling keeps an hourly pass underneath it as a heartbeat for what a
+# deadline cannot see: a suspended laptop, a clock jump, a write made while
+# the loop was already asleep. The floor is what stops a pass that lands
+# exactly on midnight from spinning, since `_next_midnight()` is strictly
+# ahead of any `now` it is given but a slow pass can return after it.
 SWEEP_WAIT_MIN = 5
 SWEEP_WAIT_MAX = 3600
 
@@ -611,9 +608,9 @@ def _next_midnight(now: int) -> int:
 
 def settle_past_sessions(repo) -> int:
     """
-    Any booking whose session has finished but was never checked in becomes
-    absent. Called on startup and before anything that reads attendance, so
-    what is on screen is never stale.
+    A session is completed, and whoever never checked in to it absent, once
+    **the day it ran on is over**. Called on startup and before anything that
+    reads attendance, so what is on screen is never stale.
 
     Dated freezes are lifted first: a plan that came out of a freeze last week
     should have its slots settled normally, and one still frozen is skipped
@@ -626,15 +623,37 @@ def settle_past_sessions(repo) -> int:
     if db.now() < _sweep_deadline:
         return 0
     settled = _sweep(repo)
-    # After the sweep, not before: `now` has to be read after the writes so a
-    # session that ended during them is not skipped over until tomorrow.
-    now = db.now()
-    nxt = repo.next_sweep_deadline(now)
-    _sweep_deadline = min(_next_midnight(now), nxt) if nxt else _next_midnight(now)
+    # After the sweep, not before: `now` has to be read after the writes, so a
+    # pass that was still running at midnight does not set a deadline a day
+    # further out than it earned.
+    _sweep_deadline = _next_midnight(db.now())
     return settled
 
 
 def _sweep(repo) -> int:
+    """
+    The day's end is the line, not the session's.
+
+    It was the session's own end: `ends_at < now`, so a 3:30 class had its
+    no-shows marked absent at 5pm. That is too early to be true. A client who
+    turns up late, or at the next class, or whose attendance reception only
+    gets round to entering in the evening, has not failed to come -- and once
+    the slot reads `absent` the kiosk stops checking them in the ordinary way
+    and offers the MANUAL CHECK-IN swap instead, which is a different piece
+    of work for the same person walking through the same door. Settling at
+    midnight gives the whole day to be wrong about, which is how long
+    reception actually has.
+
+    The cost, and it is real: between a class ending and midnight a no-show's
+    slot still reads `booked`, so their SESSIONS LEFT is one higher than it
+    will be tomorrow. The alternative was spending a session on somebody who
+    walks in twenty minutes later, which is worse: that one needs a human to
+    undo, and this one corrects itself.
+
+    `day_bounds()[0]` is today's midnight, and sessions are settled strictly
+    *before* it -- so everything up to and including yesterday, and nothing
+    from today however long ago it finished.
+    """
     with repo.begin():
         # The frozen plans are read first and passed in rather than joined:
         # Mongo has no cross-collection update, and there are never more than
@@ -645,10 +664,10 @@ def _sweep(repo) -> int:
         # waits through at the desk.
         frozen = repo.find("subscriptions", {"frozen_on": {"ne": None}})
         lifted = lift_expired_freezes(repo, frozen)
-        now = db.now()
+        today_began, _ = day_bounds()
         still_frozen = [r["id"] for r in frozen if r["id"] not in lifted]
-        settled = repo.settle_absences(now, still_frozen)
-        repo.complete_finished_sessions(now)
+        settled = repo.settle_absences(today_began, still_frozen)
+        repo.complete_finished_sessions(today_began)
         return settled
 
 
@@ -2266,7 +2285,7 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
 #
 # The day is passed in rather than read off the clock, so the Cards screen
 # can ask about any date and opens on today. Same shape as
-# `sessions_in_range(start, end)` and `settle_absences(now, ...)`.
+# `sessions_in_range(start, end)` and `settle_absences(before, ...)`.
 # ======================================================================
 
 def next_day(iso: str) -> str:

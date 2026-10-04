@@ -61,15 +61,10 @@ class SqliteSessions(SessionsPort):
             sql + " ORDER BY s.starts_at, s.id LIMIT 1", params).fetchone()
         return dict(row) if row else None
 
-    def complete_finished_sessions(self, now):
+    def complete_finished_sessions(self, before):
         return self.conn.execute(
             "UPDATE sessions SET status='completed'"
-            " WHERE status='scheduled' AND ends_at < ?", (now,)).rowcount
-
-    def next_sweep_deadline(self, now):
-        return self.conn.execute(
-            "SELECT MIN(ends_at) t FROM sessions"
-            " WHERE ends_at >= ? AND status != 'cancelled'", (now,)).fetchone()["t"]
+            " WHERE status='scheduled' AND ends_at < ?", (before,)).rowcount
 
     def session_detail(self, session_id):
         row = self.conn.execute(
@@ -184,7 +179,7 @@ class SqliteBookings(BookingsPort):
             "UPDATE bookings SET status='present', checked_in_at=?"
             " WHERE id=? AND status != 'present'", (at, booking_id)).rowcount > 0
 
-    def settle_absences(self, now, frozen_sub_ids):
+    def settle_absences(self, before, frozen_sub_ids):
         # The frozen plans are fetched separately and passed in rather than
         # joined, because Mongo has no cross-collection update and there are
         # never more than a handful of them.
@@ -192,7 +187,7 @@ class SqliteBookings(BookingsPort):
                " WHERE status='booked'"
                "   AND session_id IN (SELECT id FROM sessions"
                "        WHERE status != 'cancelled' AND ends_at < ?)")
-        params = [now]
+        params = [before]
         if frozen_sub_ids:
             sql += (f" AND (subscription_id IS NULL"
                     f"      OR subscription_id NOT IN ({_marks(frozen_sub_ids)}))")
