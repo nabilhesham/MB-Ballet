@@ -62,6 +62,47 @@ def test_comments_and_blank_lines_are_skipped(env_dir):
     assert config.mongo_db() == "named"
 
 
+def test_a_quoted_value_loses_its_quotes(env_dir, monkeypatch):
+    """
+    The bug: `.env` kept the quotes, and the door would not open while every
+    setting looked right in the file --
+
+        EZVIZ_TERMINAL='"iphone"' matched no bound terminal
+
+    -- because the standalone unlock script documents the setting that way
+    and reads `.env` through python-dotenv, which strips them. One file, two
+    meanings. The same thing silently applies to every other setting: a
+    quoted ENTRY_SECRET signs cards with a key two characters longer than
+    the one written down, and a quoted Mongo URI is not a URI.
+    """
+    monkeypatch.delenv("EZVIZ_TERMINAL", raising=False)
+    (env_dir / ".env").write_text(
+        'EZVIZ_TERMINAL="iphone"\n'
+        "MB_MONGO_DB='named'\n"
+        "ENTRY_SECRET=\"signs-every-card\"\n")
+    config.load_env()
+    assert os.environ["EZVIZ_TERMINAL"] == "iphone"
+    assert config.mongo_db() == "named"
+    assert os.environ["ENTRY_SECRET"] == "signs-every-card"
+
+
+def test_an_unbalanced_quote_is_left_exactly_as_written(env_dir):
+    """Half-stripping a value nobody meant to quote would be a second way to
+    change a setting without saying so. A password may contain a quote."""
+    (env_dir / ".env").write_text('MB_MONGO_DB=half"quoted\n')
+    config.load_env()
+    assert config.mongo_db() == 'half"quoted'
+
+
+def test_a_value_that_is_only_quotes_is_empty(env_dir, monkeypatch):
+    """`KEY=""` means empty, which for a serial means no door -- not a
+    two-character serial that cannot match anything."""
+    monkeypatch.delenv("EZVIZ_LOCK_SERIAL", raising=False)
+    (env_dir / ".env").write_text('EZVIZ_LOCK_SERIAL=""\n')
+    config.load_env()
+    assert config.ezviz_serial() == ""
+
+
 def test_a_missing_env_file_is_not_an_error(env_dir):
     config.load_env()
     assert config.backend() == "sqlite"

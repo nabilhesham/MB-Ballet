@@ -2814,6 +2814,39 @@ All `MB_`-prefixed, because `load_env()` sets any `KEY=VALUE` it finds and
 must not collide with something already on the machine. Real environment
 variables beat the file. See `.env.example`.
 
+**Surrounding quotes come off the value** (`config._unquote()`), and leaving
+them on cost an evening. The door answered
+
+```
+EZVIZ_TERMINAL='"iphone"' matched no bound terminal
+```
+
+with the setting sitting in `.env` looking exactly right. The quotes are not
+a typo: `unlock_dl05_fast.py` — the standalone script the door was ported
+from, and the thing people copy their settings out of — documents them that
+way, and it reads `.env` through **python-dotenv, which strips them**. So one
+file meant two different things to the two programs, and the terminal was
+merely where it showed. It is not the only setting it reaches: a quoted
+`ENTRY_SECRET` signs every card with a key two characters longer than the one
+written down, and a quoted Mongo URI is not a URI at all — both fail in ways
+that name something else entirely.
+
+Matching single or double quotes only, and deliberately nothing cleverer:
+dotenv also expands `\n` and `\"` inside double quotes, and an Atlas password
+containing a backslash is likelier here than a value wanting an escape. An
+unbalanced quote is left exactly as written rather than half-removed, `KEY=""`
+is empty (so a quoted-empty serial is still "no door", not a two-character
+one), and inline `# comments` after a value are still part of the value.
+`academy.spec::_read_env` carries the same three lines — that is the
+"keep the two in step" duplication below, and `tests/test_bake_env.py` asserts
+both sides strip identically.
+
+**One consequence worth knowing before upgrading**: if a `.env` has had
+`ENTRY_SECRET="..."` *with* quotes while cards were being printed, those cards
+were signed with the quoted string and will stop verifying once this strips
+them. Reissuing is the fix, and it is the same one-way cost as changing the
+secret.
+
 **`mongo` with no URI raises at startup — it never falls back to SQLite.** A
 silent fallback means reception writing a day of attendance into a local
 file nobody looks at again.

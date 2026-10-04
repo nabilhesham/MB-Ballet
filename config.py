@@ -113,6 +113,9 @@ def load_env() -> None:
     ENTRY_SECRET was unset — so on a machine where the secret was exported in
     the shell, every *other* setting in the file was ignored, which would now
     silently mean "the Mongo URI is missing".
+
+    **A quoted value is unquoted** — see `_unquote()`, which is the rest of
+    this story.
     """
     global _env_loaded
     os.chdir(app_dir())
@@ -133,7 +136,37 @@ def load_env() -> None:
             if line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
+            os.environ.setdefault(k.strip(), _unquote(v))
+
+
+def _unquote(raw: str) -> str:
+    """
+    `KEY="value"` is the value, without the quotes.
+
+    This parser used to keep them, and the result was a door that would not
+    open while every setting looked right in the file:
+
+        EZVIZ_TERMINAL='"iphone"' matched no bound terminal
+
+    The quotes come from somewhere specific. `unlock_dl05_fast.py` — the
+    standalone script the door was ported from, and the thing people copy
+    their settings out of — documents them that way, and it reads `.env`
+    through python-dotenv, which strips them. So the same file meant two
+    different things to the two programs, and this was the one setting where
+    that showed. It is not: `ENTRY_SECRET="..."` signs cards with a key two
+    characters longer than the one in the file, and a quoted Mongo URI is not
+    a URI at all.
+
+    Matching single or double quotes only, and deliberately nothing cleverer
+    — dotenv also expands `\n` and `\"` inside double quotes, which this does
+    not, because an Atlas password containing a backslash is likelier here
+    than a value wanting an escape. Unbalanced quotes are left exactly as
+    written rather than half-removed.
+    """
+    v = raw.strip()
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+        return v[1:-1]
+    return v
 
 
 def set_env_value(key: str, value: str) -> None:
