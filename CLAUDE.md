@@ -264,7 +264,7 @@ repo/             The data-access interface and its two implementations.
                   Nothing outside repo/sqlite/ writes SQL -- see the
                   Repository section below.
   base.py          The twelve primitives, the transaction boundary, and the
-                   admin methods. An ABC: a backend missing one fails at
+                   admin methods (init_schema, ping, is_empty, drop_all). An ABC: a backend missing one fails at
                    construction rather than at reception -- and
                    tests/test_backends_complete.py is what makes that
                    true before a build rather than during one.
@@ -3167,6 +3167,51 @@ cannot be checked is a **fault in the build**; a name that cannot be looked up
 is the SRV filtering below; and no answer at all is either no internet or an
 IP missing from **Atlas → Network Access**, which is per-network, so a machine
 that works in one place stops working in another.
+
+**It could not fire, and that is why the wall kept being reported.**
+`data.connect()` builds a `MongoClient` and touches no network at all — the
+driver connects lazily — so for as long as that function guarded only the
+connect, it guarded a call that cannot fail the way it describes. The first
+round trip was `starter.init_schema()` on the *next line*, one statement
+outside the `try`, and what came out was exactly the eighty-line
+`ServerDescription` dump quoted above with the three sentences never printed.
+`repo.ping()` is the fix: an admin method on both backends (a `ping` command
+on Mongo, `SELECT 1` on SQLite, where `connect()` really has opened the file),
+called inside the handler so **the first round trip is one this function
+owns**. `tests/test_startup_explains.py` holds that, including that
+`init_schema()` is never what finds out.
+
+**The detail is written here, not by `run_app.py`.** That file logs an
+unhandled exception to `error.log` beside the binary — but uvicorn *catches* a
+lifespan failure, logs "Application startup failed. Exiting." and returns
+normally, so nothing above it ever raises and this one case was the one where
+the promised file was never written. `_log_startup_failure()` appends the
+traceback itself, and the message names the path it actually used.
+
+**And what escapes is deliberately trimmed** — `raise RuntimeError(...) from
+None`. uvicorn prints whatever leaves the handler *after* everything the
+handler printed, so chaining the pymongo cause would scroll the explanation
+off the terminal and leave the dump as the last thing on screen, which is the
+whole failure this replaces. The last line is a sentence instead, and the
+dump is in `error.log`.
+
+**The first connection gets 20 seconds, not 5, and the 5 was the bug.** The
+reasoning behind it was sound — a kiosk with a client at the desk should be
+told quickly that the database is unreachable rather than hang for half a
+minute — but it was applied to the one moment that is not that. This document
+records a **16-second connect** from Alexandria to the Frankfurt cluster with
+a 20-second worst case (see the latency note under Known gaps), and five
+seconds cannot complete that handshake: no replica-set member ever became
+known, and the app refused to start against a database that was working
+perfectly, with every server reading `server_type: Unknown`. Nobody is
+standing at the desk during startup — the app is not up yet — so a slow start
+beats no start. The cost is that a read attempted while the line is genuinely
+down waits 20s rather than 5 before saying so, on a path that fails either
+way; if that ever needs to be short again, lower it **per read** with
+`pymongo.timeout()`, which is also the only direction CSOT allows.
+`serverSelectionTimeoutMS` and `connectTimeoutMS` are both set in
+`repo/mongo/client.py`, and `tests/test_parity.py`'s teardown client matches
+them — a probe that cannot connect leaves a throwaway database behind.
 
 **`mongodb+srv://` needs a DNS SRV lookup that some networks filter.** This
 has already bitten: it fails with a DNS timeout that looks nothing like a

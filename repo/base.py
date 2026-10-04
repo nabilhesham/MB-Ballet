@@ -179,6 +179,22 @@ class Repo(ABC):
     # ---------------------------------------------------------- admin
 
     @abstractmethod
+    def ping(self) -> None:
+        """
+        Prove the backend is actually reachable, and raise if it is not.
+
+        Needed because `connect()` does not prove anything on a networked
+        backend: a `MongoClient` is built without touching the network, so
+        the first failure lands on whatever statement happens to run first.
+        That was `init_schema()`, one line outside the handler that exists to
+        explain exactly this -- so reception got the ServerDescription dump
+        `server.py`'s `_connect_or_explain()` was written to replace.
+
+        Cheap on both: a `ping` command on Mongo, a no-op statement on
+        SQLite, where the file was already opened by `connect()`.
+        """
+
+    @abstractmethod
     def init_schema(self) -> None:
         """
         Create whatever the backend needs before it can be written to.

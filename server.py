@@ -183,9 +183,18 @@ def _connect_or_explain():
     The distinctions below are the three real causes, and they need different
     actions from different people -- which is why one message for all three
     would be no better than the dump.
+
+    **`ping()` is what makes any of this run at all.** `data.connect()` builds
+    a MongoClient and touches no network, so for a year this handler guarded a
+    call that cannot fail the way it describes: the first round trip was
+    `init_schema()` on the next line, outside the `try`, and a developer with
+    a slow link got precisely the eighty-line ServerDescription wall quoted
+    above. The first round trip has to be one this function owns.
     """
     try:
-        return data.connect()
+        starter = data.connect()
+        starter.ping()
+        return starter
     except Exception as exc:
         if config.backend() != config.MONGO:
             raise
@@ -211,8 +220,39 @@ def _connect_or_explain():
             print("  works in one place stops working in another.")
             print("  Check the internet first, then Atlas -> Network Access.")
         print()
-        print("  The full technical detail is in error.log beside this program.")
-        raise
+        # Written here rather than left to run_app.py, which never sees this:
+        # uvicorn catches a lifespan failure, logs "Application startup
+        # failed" and returns normally, so nothing above it raises and the
+        # promise this line makes was false in the one case it is read in.
+        path = _log_startup_failure(exc)
+        print(f"  The full technical detail is in {path}.")
+        print()
+        # `from None` on purpose. The chained pymongo exception is the dump
+        # this whole function exists to replace, and uvicorn prints whatever
+        # escapes here *after* the block above -- so chaining it would scroll
+        # the explanation off a terminal and leave the wall as the last word.
+        raise RuntimeError(
+            "The database could not be reached, so the system cannot start. "
+            "See the lines above, and error.log.") from None
+
+
+def _log_startup_failure(exc: BaseException) -> str:
+    """The traceback, appended to error.log beside the app. Best effort."""
+    import datetime
+    import traceback
+    path = os.path.join(APP_DIR, "error.log")
+    try:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(f"\n{'=' * 70}\n"
+                     f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S}  "
+                     f"startup: database unreachable\n{'=' * 70}\n")
+            fh.write("".join(traceback.format_exception(
+                type(exc), exc, exc.__traceback__)))
+    except OSError:
+        # A read-only folder must not turn a failure that has already been
+        # explained into a second, more confusing one.
+        return "error.log (which could not be written)"
+    return path
 
 
 async def _settle_loop():
