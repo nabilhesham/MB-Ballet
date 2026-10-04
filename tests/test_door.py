@@ -534,8 +534,25 @@ def test_the_door_endpoint_names_the_file_it_looks_for(client, monkeypatch):
     assert any(p.endswith("/ezviz_token.json") for p in r["also_accepted"])
     # The session's *contents* never leave: a path is not a credential, and
     # this one grants door access.
-    assert set(r) == {"configured", "token_file", "also_accepted", "using",
-                      "bind_file", "session"}
+    assert set(r) == {"configured", "library", "token_file", "also_accepted",
+                      "using", "bind_file", "session"}
+
+
+def test_the_endpoint_answers_whether_the_library_is_installed(client, ez,
+                                                               monkeypatch):
+    """
+    The second way the door can be missing, and it reads on the kiosk exactly
+    like the first. It is also the one a `pip show` answers wrongly: that
+    reports for whichever pip is first on PATH, and the machine this came
+    from had the package in the base interpreter's site-packages where the
+    venv running the app could not see it.
+    """
+    assert client.get("/api/access/door").json()["library"] is True
+    # A real failed import rather than a patched answer: None in sys.modules
+    # is what Python raises ImportError on, which is the state a 3.11 machine
+    # (or a venv missing the package) is actually in.
+    monkeypatch.setitem(sys.modules, "pyezvizapi", None)
+    assert client.get("/api/access/door").json()["library"] is False
 
 
 # ------------------------------------------- the name Windows leaves you with

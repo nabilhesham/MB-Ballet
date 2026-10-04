@@ -651,6 +651,52 @@ launch, the same rule `pymongo` follows there. A receptionist finding the
 "the lock software is not installed", and this is the only place that
 distinction is visible.
 
+**Both ask `door.configured()` rather than matching `.env` themselves**, and
+the grep they used to do is what that rule exists to prevent. `.env` holding
+`EZVIZ_LOCK_SERIAL=...` is one way a lock is set up; a serial exported in the
+environment, or written `KEY = value`, is another, and `config.load_env()`
+reads both where `findstr /r "^EZVIZ_LOCK_SERIAL=..*"` reads one. So the
+launchers printed no door line at all on a machine whose kiosk was showing
+the button -- two switches for one fact, disagreeing exactly as predicted.
+The library is asked the same way: by importing it in the interpreter that is
+about to run the app.
+
+**And a missing library is now installed rather than only reported**, once,
+never blocking -- the same shape `pymongo` has. Which exposed the real bug
+one level down, below.
+
+**The launchers' "packages installed" check could not see
+`requirements.txt` change, and that is what kept the door shut.** The probe
+is a fixed list of imports (`fastapi, uvicorn, qrcode, PIL, multipart`), so a
+package *added* to `requirements.txt` later never reached a virtual
+environment built before it: the list still imported, the install was
+skipped, and the launcher printed a tick. `pyezvizapi` was that package. Then
+`pip install pyezvizapi` typed by hand went to whichever `pip` was first on
+PATH -- which on the machine this happened on was the **base interpreter's**
+site-packages, not `.venv-linux`'s -- so `pip show pyezvizapi` reported
+version 1.0.5.0 installed while the kiosk answered `No module named
+'pyezvizapi'` on every press. Both statements were true about different
+interpreters.
+
+The fix is a stamp: the SHA-256 of `requirements.txt`, written beside the
+interpreter (`sys.prefix`, so it lands inside the venv, or inside the
+embeddable Python that installs into itself) after a successful install.
+A changed file reinstalls, an unchanged one costs a hash. **Adding every
+package to the import probe would not do** -- that is what makes a reception
+laptop reinstall on a start where nothing changed, and retry for ever when
+offline, which is why `pymongo` is deliberately outside it.
+
+Two failures, two answers, because they are not the same emergency: the
+app cannot import what it needs (first run) **dies**; `requirements.txt`
+moved on a machine that otherwise works **warns and starts anyway**, since a
+laptop one package behind beats one that will not open because the wifi is
+down.
+
+**`GET /api/access/door` answers `library` for the same reason**: a missing
+library and an unset serial read identically on the kiosk, and `pip show` is
+not the question -- the answer that matters is the one the interpreter
+running the app gives.
+
 **No Mac to build on?** `.github/workflows/build-macos.yml` builds the macOS
 binary on a real GitHub-hosted Mac instead — trigger it from the Actions tab
 or `gh workflow run build-macos.yml` (both reachable from Windows/WSL), then
@@ -2424,7 +2470,8 @@ other half of the same hour. The path existed only in `technical` — which
 the kiosk deliberately never shows — and on the startup banner, which a
 double-clicked binary scrolls past; so "it says there is no session and the
 file is right there" had no way to be settled from the screen. The route
-answers `configured`, `token_file`, `also_accepted`, `using` (which of them
+answers `configured`, `library` (can this interpreter import `pyezvizapi`),
+`token_file`, `also_accepted`, `using` (which of them
 the session is actually being read from, or empty), `bind_file` (likewise,
 or `"env"` for `EZVIZ_BIND_CODE`) and `session` (the problem sentence, or
 empty), and opening that URL in the browser is now the whole diagnosis.

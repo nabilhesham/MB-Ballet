@@ -298,6 +298,12 @@ def door_state():
     the session's *contents* are never returned, and nothing here writes.
     """
     return {"configured": door.configured(),
+            # Whether this interpreter can import the lock library, which is
+            # the other way the door can be missing and reads identically on
+            # the kiosk. `pip show` is not the same question -- it answers
+            # for whichever pip is first on PATH, which on the machine this
+            # came from was not the one the app runs in.
+            "library": door.library_installed(),
             "token_file": config.ezviz_token_file(),
             "also_accepted": door.token_paths()[1:],
             # Which one it is actually reading, which is the half that
