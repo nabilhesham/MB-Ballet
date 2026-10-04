@@ -90,12 +90,41 @@ def _save(path: str, text: str) -> None:
         pass
 
 
+def token_paths() -> list[str]:
+    """
+    Where to look for the cached session: the real name, then the one
+    Windows leaves you with.
+
+    `config.ezviz_token_file()` is the canonical path and the only one
+    anything here *writes* -- but the file arrives on the reception machine
+    by hand, and on Windows a name beginning with a dot is genuinely hard to
+    produce: Explorer refuses a rename to ".ezviz_token.json" outright, and
+    with known extensions hidden a copied file can end up as
+    ".ezviz_token.json.txt" with nothing on screen to show it. Either way
+    the app reports "no session is saved on this computer" while somebody is
+    looking straight at the file they just copied in.
+
+    So a dot-less `ezviz_token.json` beside it is read as a fallback. It is
+    deliberately read-only: the first unlock writes the canonical name in
+    the `finally` below, which from then on wins here, so the two converge
+    rather than drifting. The canonical path is always first, and the same
+    fallback applies to a path named in `EZVIZ_TOKEN_FILE` -- Windows
+    mangles that name exactly as readily, and one rule is better than two.
+    """
+    named = config.ezviz_token_file()
+    folder, base = os.path.split(named)
+    plain = os.path.join(folder, base.lstrip("."))
+    return [named] if plain == named else [named, plain]
+
+
 def _load_token() -> dict | None:
-    try:
-        with open(config.ezviz_token_file(), encoding="utf-8") as fh:
-            return json.load(fh)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return None
+    for path in token_paths():
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            continue
+    return None
 
 
 def _load_bind() -> str | None:
@@ -138,8 +167,11 @@ _UNREADABLE = (
 def _no_session() -> tuple[str, str]:
     """The sentence for the screen and the one for the log, as a pair."""
     path = config.ezviz_token_file()
-    pair = _MISSING if not os.path.exists(path) else _UNREADABLE
-    return pair[0], pair[1].format(path=path)
+    there = [p for p in token_paths() if os.path.exists(p)]
+    pair = _MISSING if not there else _UNREADABLE
+    # Name what was actually found when something was: "unreadable" about a
+    # file at a path that holds nothing is the sentence that wastes an hour.
+    return pair[0], pair[1].format(path=there[0] if there else path)
 
 
 def session_problem() -> str:

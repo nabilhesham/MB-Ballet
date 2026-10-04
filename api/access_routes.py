@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 import access
 import cards
+import config
 import db
 import door
 import repo as data
@@ -284,8 +285,22 @@ def door_state():
     answer is no -- which is the state a laptop with no lock settings in
     `.env` is in, and is exactly how the screen behaved before the door
     existed. One question with one answer; see door.configured().
+
+    It also answers the question that costs the most time when the door
+    will not open: **which file the app is actually looking for.** "No
+    EZVIZ session is saved on this computer" is read standing next to the
+    file somebody has just copied in, and the path that settles it only
+    existed in `technical` -- which the kiosk deliberately never shows --
+    and on the startup banner, which a double-clicked binary scrolls past.
+    Opening this URL in the browser is now the whole diagnosis.
+
+    A path is not a credential, and this server answers on 127.0.0.1 only;
+    the session's *contents* are never returned, and nothing here writes.
     """
-    return {"configured": door.configured()}
+    return {"configured": door.configured(),
+            "token_file": config.ezviz_token_file(),
+            "also_accepted": door.token_paths()[1:],
+            "session": door.session_problem()}
 
 
 @router.post("/api/access/door/open")
