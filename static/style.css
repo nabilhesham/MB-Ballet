@@ -358,6 +358,12 @@ select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns=
 
 .danger-zone{border:1px solid #EDCFCB;border-radius:var(--r);padding:18px;background:var(--bad-soft)}
 .danger-zone h2{margin-top:0;color:var(--bad);font-size:17px}
+/* A free-text note in a table cell: one line, the rest on hover. A note has
+   no fixed length, and wrapped it makes every row of the table tall -- see
+   components/Notes.jsx. */
+.notecell{display:inline-block;max-width:220px;overflow:hidden;
+          text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+
 .warnline{background:var(--warn-soft);border-radius:var(--r-sm);padding:12px 15px;
           font-size:13px;color:var(--warn);margin-bottom:20px}
 .infoline{background:var(--info-soft);border-radius:var(--r-sm);padding:12px 15px;

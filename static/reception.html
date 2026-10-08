@@ -381,6 +381,12 @@
     <button id="btnName"><span class="em">◉</span> Name</button>
   </div>
   <div class="srcstat"><span class="led" id="led"></span><span id="ledText">listening</span></div>
+  <!-- The clock, when this computer and the app disagree about it. Empty and
+       invisible otherwise, which is every ordinary day -- see clockCheck()
+       below, and /api/clock for why a wrong clock is four wrong answers. -->
+  <div id="clockWarn" class="sub"
+       style="display:none;margin-top:10px;color:var(--warn);font-size:11px;
+              line-height:1.5"></div>
 
   <div id="manualBox" style="display:none;margin-top:10px">
     <label style="margin-top:4px">MEMBER NUMBER</label>
@@ -1537,9 +1543,65 @@ async function refresh(){
   }catch(e){}
 }
 
+/* ================================================================
+   THE CLOCK
+
+   `db.now()` on the machine running the app decides when a class is over,
+   when a no-show becomes absent, which day a scan belongs to for
+   one-check-in-per-day, and what time the check-in is stamped with. A clock
+   an hour fast is four wrong answers, and every one of them reads as a bug
+   in the code: a 1.5-hour class "completes after one hour", and a client
+   checked in at 15:40 appears on the roster at 16:40.
+
+   Nothing in the app could tell that from a busy evening. This browser is a
+   second clock, and two clocks that disagree are a fact. The admin shows the
+   same thing (Shell.jsx); the kiosk shows it because reception is where the
+   consequence lands, on a screen nobody reloads for days.
+   ================================================================ */
+const SKEW_TOLERANCE_S = 120;
+
+function clockGap(secs){
+  const s = Math.round(Math.abs(secs));
+  if(s < 90) return s + 's';
+  const m = Math.round(s / 60);
+  return m < 60 ? m + 'm' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+
+async function clockCheck(){
+  let r, t0, t1;
+  try{
+    t0 = Date.now();
+    r = await (await fetch('/api/clock')).json();
+    t1 = Date.now();
+  }catch(e){ return; }                 /* unreachable is not a clock fault */
+  /* The midpoint of the request, not its end: a slow answer would otherwise
+     read as the server being behind by one round trip. */
+  const skew = r.epoch - (t0 + t1) / 2000;
+  const tz = r.offset_minutes !== -new Date().getTimezoneOffset();
+  const el = $('clockWarn');
+  if(Math.abs(skew) <= SKEW_TOLERANCE_S && !tz){
+    el.style.display = 'none';
+    return;
+  }
+  const bits = [];
+  if(Math.abs(skew) > SKEW_TOLERANCE_S){
+    bits.push('The app\u2019s clock is ' + clockGap(skew) + ' '
+      + (skew > 0 ? 'ahead of' : 'behind') + ' this computer\u2019s. Check-ins are '
+      + 'stamped ' + clockGap(skew) + ' ' + (skew > 0 ? 'late' : 'early')
+      + ' and classes end ' + clockGap(skew) + ' ' + (skew > 0 ? 'early' : 'late')
+      + '. Fix the clock on the computer running MB Ballet.');
+  }
+  if(tz) bits.push('It is also in a different timezone from this browser.');
+  el.textContent = bits.join(' ');
+  el.style.display = 'block';
+}
+
 updateIdle(); refresh(); setInterval(refresh, 20000);
 /* Asked once, on load: whether this laptop has a lock to open. */
 doorReady();
+/* And the clock, re-checked with every refresh: the drift that causes this
+   arrives mid-shift, when a laptop wakes from sleep. */
+clockCheck(); setInterval(clockCheck, 10 * 60 * 1000);
 </script>
 </body>
 </html>

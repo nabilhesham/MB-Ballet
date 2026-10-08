@@ -97,6 +97,51 @@ def test_the_class_roster_carries_each_students_balance(client):
     assert dana["remaining"] is not None and dana["expires_on"]
 
 
+def test_every_client_list_carries_the_clients_own_note(client):
+    """
+    One note, three lists. Reception writes what they need at the counter in
+    `clients.notes`, and reading one used to mean opening the profile — so
+    the Clients list, a class's roster and a session's roster all show it,
+    and all three have to be *given* it. The two rosters select named
+    columns, which is how a field gets left out of one and not the others.
+    """
+    a = client.academy
+    note = "allergic to the studio cat; mother collects at 5"
+    assert client.put(f"/api/clients/{a.dual}",
+                      json={"name_en": "Dana Halim", "phone": "01129200365",
+                            "notes": note}).status_code == 200
+
+    on_list = {r["id"]: r for r in client.get("/api/clients").json()}
+    assert on_list[a.dual]["notes"] == note
+
+    roster = {r["id"]: r for r in
+              client.get(f"/api/classes/{a.ballet}").json()["students"]}
+    assert roster[a.dual]["notes"] == note
+
+    sess = {r["id"]: r for r in
+            client.get(f"/api/sessions/{a.today_ballet}").json()["roster"]}
+    assert sess[a.dual]["notes"] == note
+
+
+def test_the_clock_can_be_compared_with_the_browsers(client):
+    """
+    The check CLAUDE.md's Known gaps asked for, and it needs no internet.
+    `db.now()` decides when a class is over, when a no-show becomes absent,
+    which day a scan belongs to and what time a check-in is stamped with --
+    so a machine an hour fast is four wrong answers, each of which reads as a
+    bug in the code. The browser is the second clock; this is what it asks.
+    """
+    import time
+
+    r = client.get("/api/clock").json()
+    assert abs(r["epoch"] - time.time()) < 5, r
+    # The offset too: a *timezone* that disagrees leaves absolute timestamps
+    # looking right while breaking the day boundaries and the HH:MM the
+    # kiosk reads aloud.
+    assert -24 * 60 <= r["offset_minutes"] <= 24 * 60, r
+    assert r["local"][:2] == "20", r
+
+
 def test_that_balance_is_this_classs_plan_and_not_another(client):
     """
     The one that matters. Dana holds twelve Ballet sessions and eight

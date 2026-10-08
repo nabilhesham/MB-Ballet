@@ -358,7 +358,8 @@ class MongoClasses(ClassesPort, _Helpers):
         # theirs has run out. Nothing is deleted -- see ports.py.
         rows = [{"id": cid, "name_en": people[cid]["name_en"],
                  "phone": people[cid]["phone"],
-                 "photo_path": people[cid]["photo_path"], **t}
+                 "photo_path": people[cid]["photo_path"],
+                 "notes": people[cid]["notes"], **t}
                 for cid, t in tally.items()
                 if cid in people and people[cid]["active"]
                 and latest.get(cid, "") >= lapsed_before]
@@ -542,7 +543,8 @@ class MongoAccess(AccessPort, _Helpers):
                  "id": b["client_id"],
                  "name_en": people[b["client_id"]]["name_en"],
                  "phone": people[b["client_id"]]["phone"],
-                 "photo_path": people[b["client_id"]]["photo_path"]}
+                 "photo_path": people[b["client_id"]]["photo_path"],
+                 "notes": people[b["client_id"]]["notes"]}
                 for b in mine if b["client_id"] in people]
         rows.sort(key=lambda r: (r["name_en"] or "", r["id"]))
         return rows

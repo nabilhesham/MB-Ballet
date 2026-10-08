@@ -54,6 +54,95 @@ function useClock() {
   });
 }
 
+/* The server's clock against this browser's, and the two timezones with it.
+ *
+ * `/api/clock` says why this exists; the short version is that `db.now()` on
+ * the machine running the app decides when a class is over, when a no-show
+ * becomes absent, which day a check-in belongs to and what time it is
+ * stamped with -- and nothing in the app could tell a clock an hour fast
+ * from a busy evening. The browser is a second clock, and two clocks that
+ * disagree are a fact rather than a guess.
+ *
+ * Re-checked every ten minutes rather than once, because the drift that
+ * causes this arrives mid-session: a laptop waking from sleep, or a virtual
+ * machine whose clock stops while the host sleeps. */
+function useClockCheck() {
+  const [state, setState] = useState(null);
+  useEffect(() => {
+    let live = true;
+    const check = async () => {
+      try {
+        const t0 = Date.now();
+        const r = await fetch('/api/clock');
+        const t1 = Date.now();
+        const s = await r.json();
+        if (!live) return;
+        setState({
+          // The midpoint of the request, not its end: on a slow answer the
+          // round trip would otherwise read as the server being behind.
+          skew: s.epoch - (t0 + t1) / 2000,
+          server: s.offset_minutes,
+          browser: -new Date().getTimezoneOffset(),
+        });
+      } catch { /* the app being unreachable is not a clock problem */ }
+    };
+    check();
+    const id = setInterval(check, 10 * 60 * 1000);
+    return () => { live = false; clearInterval(id); };
+  }, []);
+  return state;
+}
+
+const SKEW_TOLERANCE_S = 120;
+
+/* "1h 2m", "3m", "45s" — the size of the disagreement, in the units someone
+   would say it in. */
+function roughly(seconds) {
+  const s = Math.round(Math.abs(seconds));
+  if (s < 90) return `${s}s`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+const offsetLabel = mins => {
+  const sign = mins < 0 ? '-' : '+';
+  const a = Math.abs(mins);
+  return `${sign}${String(Math.floor(a / 60)).padStart(2, '0')}:${String(a % 60).padStart(2, '0')}`;
+};
+
+function ClockWarning() {
+  const c = useClockCheck();
+  if (!c) return null;
+  const bad = Math.abs(c.skew) > SKEW_TOLERANCE_S;
+  const tz = c.server !== c.browser;
+  if (!bad && !tz) return null;
+  return (
+    <div className="warnline">
+      {bad && (
+        <>
+          <b>The app&apos;s clock is {roughly(c.skew)} {c.skew > 0 ? 'ahead of' : 'behind'} this
+          computer&apos;s.</b>{' '}
+          Everything about time is that far out: a class is completed and its
+          no-shows marked absent {roughly(c.skew)} {c.skew > 0 ? 'early' : 'late'}, and every
+          check-in is stamped {roughly(c.skew)} {c.skew > 0 ? 'late' : 'early'}. Fix the clock on
+          the computer running MB Ballet, then reload — nothing in the app can
+          correct for it.
+        </>
+      )}
+      {bad && tz && <br />}
+      {tz && (
+        <>
+          <b>The app and this browser disagree about the timezone</b>{' '}
+          ({offsetLabel(c.server)} against {offsetLabel(c.browser)}). Day
+          boundaries and the times reception reads aloud come from different
+          offsets until they match.
+        </>
+      )}
+    </div>
+  );
+}
+
 const closeNav = () => document.body.classList.remove('nav-open');
 
 export default function Shell({ children }) {
@@ -114,7 +203,10 @@ export default function Shell({ children }) {
         <div className="foot">{clock}</div>
       </nav>
 
-      <main id="view">{children}</main>
+      {/* Above the page rather than in the sidebar: a wrong clock makes every
+          figure on every screen wrong, which is not a footnote. It clears
+          itself the moment the two agree. */}
+      <main id="view"><ClockWarning />{children}</main>
     </>
   );
 }
