@@ -132,7 +132,7 @@ class SqliteClasses(ClassesPort):
     def class_students(self, class_id, lapsed_before):
         return [dict(r) for r in self.conn.execute(
             self._PLAN_END +
-            " SELECT cl.id, cl.name_en, cl.phone, cl.photo_path,"
+            " SELECT cl.id, cl.name_en, cl.phone, cl.photo_path, cl.notes,"
             "       COUNT(b.id) AS slots,"
             "       SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) AS attended"
             "  FROM bookings b JOIN sessions s ON s.id=b.session_id"
@@ -365,7 +365,7 @@ class SqliteAccess(AccessPort):
     def session_roster(self, session_id):
         return [dict(r) for r in self.conn.execute(
             "SELECT b.id AS booking_id, b.status, b.checked_in_at,"
-            "       cl.id, cl.name_en, cl.phone, cl.photo_path"
+            "       cl.id, cl.name_en, cl.phone, cl.photo_path, cl.notes"
             "  FROM bookings b JOIN clients cl ON cl.id = b.client_id"
             " WHERE b.session_id = ? ORDER BY cl.name_en, cl.id",
             (session_id,)).fetchall()]

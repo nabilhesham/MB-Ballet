@@ -240,6 +240,21 @@ row the route already holds. A bound that is not a date is refused in words
 ("Pick a day, or clear the date filter."), the same shape the Cards screen's
 `on=` uses.
 
+**The client's own note is a column on all three lists that name
+clients** — the Clients list, a class's roster and a session's roster —
+through one `<Notes>` component. It is `clients.notes`, about the *person*,
+not the plan's note, which belongs to one purchase (see the data model); and
+until now the only way to read one was to open the profile, which is not
+something anybody does with a client standing at the counter or a register
+to take. Capped to one line with the whole text on hover, because a note has
+no fixed length and a wrapped one makes every row of the table tall enough
+to push the columns people are scanning off the screen.
+
+The two rosters select named columns rather than `SELECT *`, so both backends
+had to be *given* the field — which is exactly how it ends up on one list and
+not the others; `tests/test_routes.py` asks all three in one test for that
+reason.
+
 DataTables and jQuery were tried from a CDN in the old vanilla frontend and
 removed — the library's own CSS fought the padding and type scale of
 everything else, and back when there was no build step at all, a CDN tag
@@ -1606,6 +1621,54 @@ session that started longer ago than that cannot still be running) plus
 everything ahead. It is a read the sweep only makes once a session's end has
 passed, because of the deadline below.
 
+**The clock is checked against the browser's, and that is what two "bugs"
+turned out to be.** `db.now()` is `time.time()` on the machine running the
+app, and it decides four separate things: when a class is over, when a
+no-show becomes absent, which day a scan belongs to for one-check-in-per-day,
+and what time a check-in is stamped with. A machine an hour fast is therefore
+wrong in four ways at once, and **every one of them reads as a bug in the
+code**. Two were reported as exactly that:
+
+| what was reported | what it was |
+|---|---|
+| "the session completes after one hour, the duration is 2 hours, and a client arriving late is marked absent" | the server passes `ends_at` an hour before the class really ends |
+| "the CHECKED IN column is +1 of the actual time" | the stamp is an absolute instant and the browser renders it honestly |
+
+Both were reproduced by running the app with its clock exactly one hour fast
+and changing nothing else: a 2-hour class 1h20 in showed `completed` with its
+student already `absent`, and a check-in made at 11:14 was stamped 12:14.
+Same cause, opposite-looking symptoms, which is why neither pointed at it.
+
+**The browser is the second clock, and two clocks that disagree are a fact
+rather than a guess.** `GET /api/clock` answers the server's epoch, its local
+time and its UTC offset; `Shell.jsx` and the kiosk compare against their own
+and print one amber line when they differ by more than two minutes, naming
+the size and what it is doing to the figures. It needs no internet — which is
+what made this checkable at all, next to a design that keeps reception
+working without any. The offset is compared separately: a *timezone* that
+disagrees leaves absolute timestamps looking right while breaking the day
+boundaries and the `HH:MM` the kiosk reads aloud.
+
+Re-checked every ten minutes rather than once, because this arrives
+mid-shift: a laptop waking from sleep, or a virtual machine whose clock stops
+while its host sleeps (running the app under WSL while the browser is on
+Windows is exactly that shape — `sudo hwclock -s` inside WSL resyncs it).
+The startup banner prints the server's local time and offset for the same
+reason, where somebody can compare it with the clock in the corner of their
+own screen.
+
+**Nothing compensates, deliberately.** An app that quietly corrected for a
+wrong clock would write attendance at times that never happened, and the
+correction would itself be invisible. The line says what to fix.
+
+**Both ends of a session are on the screen now** — the session page's header
+and the calendar's agenda rows read `10:54 AM – 12:24 PM`, from `ends_at`
+rather than from the duration beside it. Those are two different things on
+purpose: `ends_at` is the column the sweep compares against, so a row where
+it disagrees with the duration ends the class early every time (see the
+repair above), and until it was printed there was no screen that could show
+the disagreement.
+
 **The background pass waits for the next session to end, not for an hour.**
 The rule has always been the session's own end — `settle_absences()` is
 `ends_at < now`, and `ends_at` is `starts_at + duration_hours*3600` — but
@@ -2773,19 +2836,15 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       section. `.github/dependabot.yml` plus the monthly canary job are what
       should surface the next one without it being on this list first.
 - [ ] Auto-start on boot, and disable laptop sleep / lid-close suspend.
-- [ ] **The machine's clock is load-bearing and nothing checks it.**
-      `db.now()` is `time.time()` on the reception PC, so a clock that is
-      wrong is an app that is wrong in ways that read as bugs: the absent
-      sweep settles sessions early, a check-in is stamped at a time that
-      never happened, "one check-in per day" is keyed to the wrong day, and
-      the dashboard marks a class as running before it starts. This has
-      already happened once — the reception PC ran about fifty minutes fast
-      and Windows synced it back, leaving a scan recorded at 15:35 on a
-      screen whose clock read 14:44, and a "now" pill on a 15:30 class.
-      Nothing in the app can tell a fast clock from a busy evening, so the
-      honest options are a note in the setup checklist (enable Windows time
-      sync) or a startup line comparing the clock against something — which
-      needs the internet the app otherwise does not.
+- [x] **The machine's clock is load-bearing, and the app now says when it
+      is wrong** — see "The clock is checked against the browser's" below.
+      It stays on this list as a *fixed* entry because the cost of
+      forgetting it is high: `db.now()` is `time.time()` on whatever machine
+      runs the app, and a clock an hour fast is four wrong answers at once,
+      every one of which reads as a bug in the code rather than as a clock.
+      What is still not done is correcting for it, and that is deliberate —
+      an app that silently compensated for a wrong clock would write
+      attendance at times that never happened.
 - [ ] Key rotation: single secret. Changing it kills every printed card at once.
       Needs an accepted-keys list with an overlap window.
 

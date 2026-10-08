@@ -189,7 +189,19 @@ function AgendaList({ days, sessions, todayStr, onRowClick, onAddClick }) {
             </div>
             {mine.length ? mine.map(s => (
               <div key={s.id} className="slotrow" onClick={() => onRowClick(s.id)}>
-                <div className="tm">{fmtTime(s.starts_at)}</div>
+                {/* Both ends, not just the start. The calendar is where
+                    somebody checks what is running at a given hour, and a
+                    class's end is also the moment the app completes it and
+                    marks its no-shows absent (see the sweep in CLAUDE.md) —
+                    from `ends_at`, the column that decides it, so a row
+                    where that disagrees with the duration beside it is
+                    visible rather than silently early. */}
+                <div className="tm">
+                  {fmtTime(s.starts_at)}<br />
+                  <span style={{ color: 'var(--dim)' }}>
+                    {fmtTime(s.ends_at ?? s.starts_at + s.duration_hours * 3600)}
+                  </span>
+                </div>
                 <div className="bd">
                   <div className="nm"><span className="dot" style={{ background: s.colour }} />{s.class_name}</div>
                   <div className="sub">

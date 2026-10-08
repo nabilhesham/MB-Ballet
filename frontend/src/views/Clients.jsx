@@ -6,6 +6,7 @@ import { fmtISODay } from '../lib/format';
 import { useModal } from '../components/Modal';
 import DataTable from '../components/DataTable';
 import Avatar from '../components/Avatar';
+import Notes from '../components/Notes';
 import { BalancePill, Pill } from '../components/Pill';
 import Empty from '../components/Empty';
 import ClientForm from '../modals/ClientForm';
@@ -140,6 +141,14 @@ export default function Clients() {
             {
               label: 'CARDS', sortValue: r => r.cards || 0,
               cell: r => (r.cards ? <Pill kind="ok">{r.cards}</Pill> : <Pill kind="warn">none</Pill>),
+            },
+            {
+              /* The client's own note, the one about the person. Reception
+                 writes what they need at the counter in it, and reading one
+                 used to mean opening the profile. See components/Notes.jsx
+                 for why it is capped to a line. */
+              label: 'NOTES', className: 'mute', hideSm: true,
+              sortValue: r => r.notes || '', cell: r => <Notes text={r.notes} />,
             },
           ]}
         />

@@ -11,6 +11,7 @@ paths, the FastAPI app, the startup event, and the static mounts.
 
 import asyncio
 import contextlib
+import datetime
 import os
 import sys
 
@@ -91,6 +92,16 @@ async def _lifespan(app):
         print("  Keep a backup of that file — losing it invalidates every card.\n")
 
     print(f"  Database: {config.describe()}")
+    # The clock, because it is load-bearing and silent. db.now() decides when
+    # a class is over, when a no-show becomes absent and what time a check-in
+    # is stamped with -- so a machine an hour fast is an app that is wrong in
+    # four ways, each of which reads as a bug in the code. Printing it costs
+    # nothing and is the one place somebody can compare it against the clock
+    # in the corner of their own screen. /api/clock is the same question
+    # asked from the browser, which answers it without anybody looking.
+    local = datetime.datetime.now().astimezone()
+    print(f"  Clock:    {local:%Y-%m-%d %H:%M} {local:%z} "
+          f"(check this matches this computer's own clock)")
     # Through the repository, not db.init(). Calling the SQLite one directly
     # created an empty academy.db beside the binary even when the backend was
     # MongoDB — harmless, but it looks exactly like the app quietly ignoring

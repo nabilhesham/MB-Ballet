@@ -8,6 +8,7 @@ import { useToast } from '../components/Toast';
 import DataTable from '../components/DataTable';
 import { Pill, BalancePill } from '../components/Pill';
 import Avatar from '../components/Avatar';
+import Notes from '../components/Notes';
 import Empty from '../components/Empty';
 import ClassForm from '../modals/ClassForm';
 import SessionForm from '../modals/SessionForm';
@@ -169,6 +170,13 @@ export default function ClassDetail() {
                 : r.unassigned > 0
                   ? <Pill kind="warn">{r.unassigned} unassigned</Pill>
                   : <BalancePill row={r} />),
+            },
+            {
+              /* The client's own note, the one about the person — the same
+                 column the Clients list and a session's roster show, so one
+                 client reads the same wherever reception meets them. */
+              label: 'NOTES', className: 'mute', hideSm: true,
+              sortValue: r => r.notes || '', cell: r => <Notes text={r.notes} />,
             },
           ]}
         />

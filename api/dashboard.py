@@ -1,5 +1,7 @@
-"""/api/dashboard — the single landing-page summary endpoint."""
+"""/api/dashboard — the single landing-page summary endpoint, and /api/clock."""
 
+import datetime
+import time
 from datetime import date
 
 from fastapi import APIRouter
@@ -10,6 +12,43 @@ import repo as data
 
 
 router = APIRouter()
+
+
+@router.get("/api/clock")
+def clock():
+    """
+    The server's own clock, for the browser to compare against its own.
+
+    **This is the check CLAUDE.md's Known gaps asked for, and it needs no
+    internet.** `db.now()` is `time.time()` on whatever machine runs the app,
+    and that number decides when a class is over, when a no-show becomes
+    absent, what "today" means for one-check-in-per-day, and what time a
+    check-in is stamped with. A clock an hour fast is therefore an app that
+    is wrong in four ways at once, and every one of them reads as a bug in
+    the code rather than as a clock:
+
+        a 3:30 class, 1.5 hours long, "completes after one hour" -- because
+        the server thinks it is 17:00 when the wall clock says 16:00, so it
+        has passed 17:00, the session's real end;
+
+        and the same client's check-in, made at 15:40, shows 16:40 on the
+        roster -- because the stamp is an absolute instant and the browser
+        renders it honestly.
+
+    Nothing in the app could tell a fast clock from a busy evening, and that
+    is what this ends: the browser has a second clock, and two clocks that
+    disagree are a fact rather than a guess. The frontend compares and says
+    so; see `Shell.jsx`. Also returns the offset, because a *timezone* that
+    disagrees breaks the day boundaries and the kiosk's "already checked in
+    at HH:MM" line while leaving absolute timestamps looking right.
+
+    Deliberately free: no database, no sweep. It is fetched by every screen.
+    """
+    t = db.now()
+    off = datetime.datetime.now().astimezone().utcoffset()
+    return {"epoch": t,
+            "local": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)),
+            "offset_minutes": int(off.total_seconds() // 60) if off else 0}
 
 
 @router.get("/api/dashboard")

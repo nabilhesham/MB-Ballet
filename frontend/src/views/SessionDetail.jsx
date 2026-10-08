@@ -1,13 +1,14 @@
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtWhen, hrs } from '../lib/format';
+import { fmtFull, fmtTime, fmtWhen, hrs } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
 import DataTable from '../components/DataTable';
 import { StatusPill } from '../components/Pill';
 import Avatar from '../components/Avatar';
+import Notes from '../components/Notes';
 import Empty from '../components/Empty';
 import SessionForm from '../modals/SessionForm';
 import DeleteSessionWithAttendance from '../modals/DeleteSessionWithAttendance';
@@ -25,6 +26,8 @@ export default function SessionDetail() {
 
   const now = Date.now() / 1000;
   const ended = s.starts_at + s.duration_hours * 3600 < now;
+  // What the end *should* be, for a row whose `ends_at` was never written.
+  const endOf = r => r.starts_at + r.duration_hours * 3600;
   const present = s.roster.filter(m => m.status === 'present').length;
   const absent = s.roster.filter(m => m.status === 'absent').length;
   const pending = s.roster.filter(m => m.status === 'booked').length;
@@ -114,7 +117,17 @@ export default function SessionDetail() {
           <div className="eyebrow">Session</div>
           <h1><span className="dot" style={{ background: s.colour, width: 13, height: 13 }} />{s.class_name}</h1>
           <div className="sub">
-            {fmtFull(s.starts_at)} · {hrs(s.duration_hours)} ·{' '}
+            {/* The end time, from the stored `ends_at` rather than from the
+                duration beside it — and those are two different things on
+                purpose. That column is what the sweep compares against to
+                complete the session and mark its no-shows absent (see
+                db.py), so a row where it disagrees with the duration ends
+                the class early, every time, with nothing on screen to say
+                so. Printing it is what makes such a row visible on the one
+                screen somebody opens to ask why. access._repair_running_
+                sessions() corrects it; this is how you can tell it did. */}
+            {fmtFull(s.starts_at)} – {fmtTime(s.ends_at ?? endOf(s))} ·{' '}
+            {hrs(s.duration_hours)} ·{' '}
             <a href={`#/class/${s.class_id}`} style={{ color: 'var(--brand-deep)' }}>view class</a>
           </div>
         </div>
@@ -192,6 +205,15 @@ export default function SessionDetail() {
               // altogether. A bare "08:11 PM" beside a 3:30 class reads as a
               // fault in the app rather than as a mark made last night.
               cell: r => (r.checked_in_at ? fmtWhen(r.checked_in_at) : '—'),
+            },
+            {
+              /* The client's own note. Same column as the Clients list and
+                 the class roster, so one client reads the same wherever
+                 reception meets them — and this is the screen where
+                 attendance is actually taken, which is when a note about the
+                 person is worth something. */
+              label: 'NOTES', className: 'mute', hideSm: true,
+              sortValue: r => r.notes || '', cell: r => <Notes text={r.notes} />,
             },
             {
               label: 'MARK AS', sortable: false,
