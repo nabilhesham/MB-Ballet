@@ -9,6 +9,7 @@ import DataTable from '../components/DataTable';
 import { StatusPill } from '../components/Pill';
 import Avatar from '../components/Avatar';
 import Notes from '../components/Notes';
+import Classes from '../components/Classes';
 import Empty from '../components/Empty';
 import SessionForm from '../modals/SessionForm';
 import DeleteSessionWithAttendance from '../modals/DeleteSessionWithAttendance';
@@ -196,6 +197,14 @@ export default function SessionDetail() {
             {
               label: 'MOBILE', className: 'num mute', hideSm: true, sortValue: r => r.phone || '',
               cell: r => r.phone || '—',
+            },
+            {
+              /* The same column as the Clients list and the class roster —
+                 every class they are in, so one client reads the same
+                 wherever reception meets them. */
+              label: 'CLASS', className: 'mute', hideSm: true,
+              sortValue: r => (r.classes || []).map(c => c.name).join(', '),
+              cell: r => <Classes rows={r.classes} />,
             },
             { label: 'STATUS', sortValue: r => r.status, cell: r => <StatusPill status={r.status} /> },
             {

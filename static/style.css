@@ -358,6 +358,13 @@ select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns=
 
 .danger-zone{border:1px solid #EDCFCB;border-radius:var(--r);padding:18px;background:var(--bad-soft)}
 .danger-zone h2{margin-top:0;color:var(--bad);font-size:17px}
+/* The classes a client is in, in a table cell. They wrap rather than
+   truncate -- a client is in one or two, so the cell stays short, and the
+   second one is exactly what the column exists to show (see
+   components/Classes.jsx). */
+.classcell{display:inline-flex;flex-wrap:wrap;gap:3px 10px}
+.classchip{white-space:nowrap}
+
 /* A free-text note in a table cell: one line, the rest on hover. A note has
    no fixed length, and wrapped it makes every row of the table tall -- see
    components/Notes.jsx. */

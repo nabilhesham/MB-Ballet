@@ -123,6 +123,44 @@ def test_every_client_list_carries_the_clients_own_note(client):
     assert sess[a.dual]["notes"] == note
 
 
+def test_every_client_list_names_the_classes_they_are_in(client):
+    """
+    The column that replaced SCHOOL, on the three lists that name clients.
+    Dana holds live plans in both classes, which is the ordinary case at a
+    children's academy and the reason this is not `active_plans_for()` with
+    the name attached: that answers with one plan, the soonest to expire, so
+    she would read as whichever of the two happened to end first.
+    """
+    a = client.academy
+    want = {"Ballet Level 8", "Evening Flexibility"}
+
+    on_list = {r["id"]: r for r in client.get("/api/clients").json()}
+    assert {c["name"] for c in on_list[a.dual]["classes"]} == want
+    # The colour travels with it: the dot beside the name on every screen
+    # that tells two classes apart.
+    assert all(c["colour"] for c in on_list[a.dual]["classes"])
+
+    # On the class roster it earns its place by showing the *other* one.
+    roster = {r["id"]: r for r in
+              client.get(f"/api/classes/{a.ballet}").json()["students"]}
+    assert {c["name"] for c in roster[a.dual]["classes"]} == want
+
+    sess = {r["id"]: r for r in
+            client.get(f"/api/sessions/{a.today_ballet}").json()["roster"]}
+    assert {c["name"] for c in sess[a.dual]["classes"]} == want
+
+
+def test_a_client_with_no_live_plan_names_no_class(client):
+    """
+    Not the last class they ever took: the column answers "which classes is
+    this person in", and somebody whose plan has gone is in none. `planless`
+    has never had one.
+    """
+    a = client.academy
+    rows = {r["id"]: r for r in client.get("/api/clients").json()}
+    assert rows[a.planless]["classes"] == []
+
+
 def test_the_clock_can_be_compared_with_the_browsers(client):
     """
     The check CLAUDE.md's Known gaps asked for, and it needs no internet.

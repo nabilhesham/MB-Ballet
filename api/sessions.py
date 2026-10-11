@@ -177,6 +177,11 @@ def get_session(sid: int):
         if not s:
             raise HTTPException(404, "no such session")
         s["roster"] = access.session_roster(repo, sid)
+        # The classes each of them is in, the same column the Clients list
+        # and the class roster carry. One round trip for the whole roster.
+        classes = repo.classes_for([r["id"] for r in s["roster"]])
+        for row in s["roster"]:
+            row["classes"] = classes.get(row["id"], [])
         return s
     finally:
         repo.close()

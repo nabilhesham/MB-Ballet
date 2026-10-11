@@ -441,6 +441,26 @@ class SqlitePlans(PlansPort):
             out.setdefault(r["client_id"], dict(r))
         return out
 
+    def classes_for(self, client_ids):
+        if not client_ids:
+            return {}
+        rows = self.conn.execute(
+            "SELECT s.client_id, cl.id, cl.name, cl.colour"
+            "  FROM subscriptions s JOIN classes cl ON cl.id = s.class_id"
+            f" WHERE s.active=1 AND s.client_id IN ({_marks(client_ids)})"
+            " ORDER BY cl.name, cl.id", tuple(client_ids)).fetchall()
+        out = {}
+        for r in rows:
+            mine = out.setdefault(r["client_id"], [])
+            # One plan per class per client is the invariant (see
+            # active_plan()), but two live plans in one class is a state the
+            # database can hold, and the same class twice in a cell would
+            # read as a fault in the screen rather than in the data.
+            if not any(c["id"] == r["id"] for c in mine):
+                mine.append({"id": r["id"], "name": r["name"],
+                             "colour": r["colour"]})
+        return out
+
 
 class SqliteInstructors(InstructorsPort):
 

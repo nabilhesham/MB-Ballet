@@ -9,6 +9,7 @@ import DataTable from '../components/DataTable';
 import { Pill, BalancePill } from '../components/Pill';
 import Avatar from '../components/Avatar';
 import Notes from '../components/Notes';
+import Classes from '../components/Classes';
 import Empty from '../components/Empty';
 import ClassForm from '../modals/ClassForm';
 import SessionForm from '../modals/SessionForm';
@@ -152,6 +153,15 @@ export default function ClassDetail() {
             {
               label: 'MOBILE', className: 'num', hideSm: true, sortValue: r => r.phone || '',
               cell: r => r.phone || '—',
+            },
+            {
+              /* Every class they are in, which on this page earns its place
+                 by showing the *others*: this class is the heading, and the
+                 second one is what somebody taking the register cannot see
+                 anywhere else without opening a profile. */
+              label: 'CLASS', className: 'mute', hideSm: true,
+              sortValue: r => (r.classes || []).map(c => c.name).join(', '),
+              cell: r => <Classes rows={r.classes} />,
             },
             { label: 'SLOTS', className: 'num', sortValue: r => r.slots, cell: r => r.slots },
             { label: 'ATTENDED', className: 'num', sortValue: r => r.attended || 0, cell: r => r.attended || 0 },
