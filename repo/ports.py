@@ -395,6 +395,26 @@ class PlansPort(ABC):
         One round trip, for the clients list.
         """
 
+    @abstractmethod
+    def classes_for(self, client_ids: list) -> dict:
+        """
+        `{client_id: [{"id", "name", "colour"}]}` — **every** class each of
+        them is in right now, from their live plans, named and sorted by
+        name. One round trip.
+
+        Deliberately not `active_plans_for()` with the name attached. That
+        one answers with a single plan, the soonest to expire, which is the
+        right answer to "what needs attention" and the wrong one to "which
+        classes is this person in": a child taking Ballet and Flexibility
+        would read as one of the two, and which of them changed as the dates
+        moved. Every list that names clients shows this column, and a column
+        that quietly drops half a client's classes is worse than no column.
+
+        A client with no live plan is absent from the answer rather than
+        present with an empty list, the same shape `card_counts_bulk()` and
+        the other bulk reads use.
+        """
+
 
 class InstructorsPort(ABC):
 

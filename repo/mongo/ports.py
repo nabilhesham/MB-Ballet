@@ -895,6 +895,34 @@ class MongoPlans(PlansPort, _Helpers):
             out.setdefault(p["client_id"], p)
         return out
 
+    def classes_for(self, client_ids):
+        ids = [c for c in client_ids if c is not None]
+        if not ids:
+            return {}
+        # One round trip, like plan_rows(): the live plans with their class
+        # joined, rather than the plans and then an `$in` over classes. This
+        # is charged to three lists that reception opens all day.
+        docs = self._agg("subscriptions", [
+            {"$match": {"active": 1, "client_id": {"$in": ids}}},
+            {"$lookup": {"from": "classes", "localField": "class_id",
+                         "foreignField": "_id", "as": "_c"}},
+            {"$set": {"_class": {"$first": "$_c"}}},
+            {"$project": {"client_id": 1, "_class": 1}},
+        ])
+        out = {}
+        for d in docs:
+            cl = d.get("_class")
+            if not cl:
+                continue                    # a plan whose class is gone
+            mine = out.setdefault(d["client_id"], [])
+            # Same de-duplication as SQLite, for the same reason.
+            if not any(c["id"] == cl["_id"] for c in mine):
+                mine.append({"id": cl["_id"], "name": cl.get("name"),
+                             "colour": cl.get("colour")})
+        for mine in out.values():
+            mine.sort(key=lambda c: ((c["name"] or ""), c["id"]))
+        return out
+
 
 class MongoEvents(EventsPort, _Helpers):
 

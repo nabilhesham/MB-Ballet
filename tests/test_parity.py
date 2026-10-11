@@ -248,6 +248,10 @@ def test_the_port_methods_agree(built):
          lambda r: r.day_attendance_totals(*access.day_bounds())),
         ("active_plans_with_clients", lambda r: r.active_plans_with_clients()),
         ("active_plans_for", lambda r: r.active_plans_for([a.dual, a.solo_ballet])),
+        # Dana holds live plans in both classes, which is what makes this
+        # worth comparing: the order the two names come back in is part of
+        # the contract, and SQLite sorts in SQL while Mongo sorts in Python.
+        ("classes_for", lambda r: r.classes_for([a.dual, a.solo_ballet, a.planless])),
         ("plan_counts_bulk",
          lambda r: r.plan_counts_bulk([a.dual_ballet_plan, a.dual_flex_plan])),
         ("attendance_counts", lambda r: r.attendance_counts(a.ballet_sessions[:5])),

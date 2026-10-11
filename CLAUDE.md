@@ -240,6 +240,33 @@ row the route already holds. A bound that is not a date is refused in words
 ("Pick a day, or clear the date filter."), the same shape the Cards screen's
 `on=` uses.
 
+**CLASS replaced SCHOOL on the Clients list, and is a column on the two
+rosters beside it.** Which school a child goes to is a thing the enrolment
+form asks and nobody reads again; which class they are in is what the three
+lists that name clients are about. The rosters never had a school column, so
+there it is new — and it earns its place on a class page precisely by
+showing the *others*: a child on the Ballet roster who also comes to
+Flexibility reads as both, which is otherwise invisible without opening a
+profile. Each name carries its class colour, the same dot the calendar and
+the class list use.
+
+**Every class, not the one.** `repo.classes_for()` is its own port method
+rather than the class already sitting on `plan_state()`, and the difference
+is the whole point: that one answers with a *single* plan, the soonest to
+expire (see `active_plans_for()`), which is the right answer to "what needs
+attention" and the wrong one to "which classes is this person in" — a child
+taking two would read as whichever happened to end first, and the answer
+would change as the dates moved. One round trip per list on both backends: a
+join on SQLite, a `$lookup` on Mongo, written the way `plan_rows()` is.
+
+It is read from their **live plans**, so a client whose plan has gone reads
+`—` rather than carrying the last class they ever took; membership derived
+from bookings would say otherwise, but that question already has a screen
+(the class roster itself, with its lapsed cutoff) and it is not what a
+column beside PLAN and LEFT should mean. The archived clients list keeps
+SCHOOL: an archived client has no live plan, so the column there would be a
+blank one replacing a full one.
+
 **The client's own note is a column on all three lists that name
 clients** — the Clients list, a class's roster and a session's roster —
 through one `<Notes>` component. It is `clients.notes`, about the *person*,

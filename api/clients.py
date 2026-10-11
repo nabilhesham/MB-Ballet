@@ -118,9 +118,16 @@ def list_clients(q: str = "", status: str = "all", on: str = None,
         plans = repo.active_plans_for(ids)
         states = access.plan_states(repo, [p["id"] for p in plans.values()])
         cards = repo.card_counts_bulk(ids)
+        # Which classes they are in, which took the SCHOOL column's place.
+        # Its own round trip rather than the class on `state` below, because
+        # that one is a single plan -- the soonest to expire -- and a child
+        # taking Ballet and Flexibility would read as whichever of the two
+        # happened to end first. See repo.classes_for().
+        classes = repo.classes_for(ids)
         for d in out:
             sub = plans.get(d["id"])
             state = states.get(sub["id"], {}) if sub else {}
+            d["classes"] = classes.get(d["id"], [])
             d.update({
                 "plan": state.get("plan"),
                 "sessions_total": state.get("sessions_total"),

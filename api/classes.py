@@ -125,6 +125,14 @@ def _with_plan_state(repo, clid: int, students: list) -> None:
     """
     if not students:
         return
+    # The classes each of them is in, which on *this* page is worth a column
+    # precisely because it shows the others: a child on the Ballet roster who
+    # also comes to Flexibility reads as both, and the receptionist taking
+    # the register can see it without opening a profile. One round trip for
+    # the whole roster -- see repo.classes_for().
+    classes = repo.classes_for([r["id"] for r in students])
+    for row in students:
+        row["classes"] = classes.get(row["id"], [])
     subs = repo.find("subscriptions", {"class_id": clid, "active": 1},
                      sort=[("expires_on", 1)])
     by_client = {}

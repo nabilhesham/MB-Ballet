@@ -7,6 +7,7 @@ import { useModal } from '../components/Modal';
 import DataTable from '../components/DataTable';
 import Avatar from '../components/Avatar';
 import Notes from '../components/Notes';
+import Classes from '../components/Classes';
 import { BalancePill, Pill } from '../components/Pill';
 import Empty from '../components/Empty';
 import ClientForm from '../modals/ClientForm';
@@ -116,8 +117,13 @@ export default function Clients() {
               cell: r => r.age ?? '—',
             },
             {
-              label: 'SCHOOL', className: 'mute', hideSm: true, sortValue: r => r.school || '',
-              cell: r => r.school || '—',
+              /* Replaced SCHOOL, which answered a question nobody asks at
+                 the counter. The classes come from their live plans, so a
+                 client with none reads "—" rather than carrying the last
+                 class they ever took. */
+              label: 'CLASS', className: 'mute', hideSm: true,
+              sortValue: r => (r.classes || []).map(c => c.name).join(', '),
+              cell: r => <Classes rows={r.classes} />,
             },
             {
               /* The column the range above filters on. A filter over
