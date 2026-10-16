@@ -32,6 +32,15 @@ const NAV = [
       { to: '/cards', icon: '▢', label: 'Cards & renewals' },
     ],
   },
+  {
+    // The shop is its own group: it is the one thing in the app that is not
+    // about the timetable or the people on it, and the money it takes is
+    // the second half of the dashboard's till figure.
+    group: 'SHOP',
+    items: [
+      { to: '/products', icon: '▣', label: 'Products' },
+    ],
+  },
 ];
 
 // Mirrors static/app.js's render(): a detail route's path has its trailing

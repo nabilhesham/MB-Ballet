@@ -263,6 +263,53 @@ CREATE TABLE IF NOT EXISTS appointments (
     created_at  INTEGER NOT NULL
 );
 
+-- The shop. Leotards, shoes, hairnets: things the academy sells over the
+-- counter, which is the second thing money arrives for and until now the
+-- only one the till figure did not know about.
+CREATE TABLE IF NOT EXISTS products (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    -- Nullable for the same reason a plan's price is: a thing whose price
+    -- nobody has written down must not be reported as zero revenue. A sale
+    -- copies this at the moment it happens -- see product_sales.unit_price.
+    price       REAL,
+    -- What is on the shelf. Deliberately a plain count rather than a ledger
+    -- of movements: the academy counts the box, and a stock history nobody
+    -- queries is schema churn. A sale takes one off and removing that sale
+    -- puts it back, which is the only arithmetic there is.
+    stock       INTEGER NOT NULL DEFAULT 0,
+    notes       TEXT,
+    -- The picture, as a URL this app answers -- the same column every other
+    -- picture in the app carries. See images.py.
+    photo_path  TEXT,
+    active      INTEGER NOT NULL DEFAULT 1,
+    created_at  INTEGER NOT NULL
+);
+
+-- One sale: this client bought this many of this product. It is the shop's
+-- counterpart of a subscription, and the two deliberately share the rules
+-- that matter.
+CREATE TABLE IF NOT EXISTS product_sales (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id  INTEGER NOT NULL REFERENCES products(id),
+    client_id   INTEGER NOT NULL REFERENCES clients(id),
+    qty         INTEGER NOT NULL DEFAULT 1,
+    -- **Copied from the product at the moment of sale, never read back
+    -- through it.** Re-pricing a leotard must not rewrite what last month's
+    -- till took -- the same reason instructor pay is `hours x rate` at read
+    -- time and this is not: a rate correction should re-price the month, a
+    -- shop price change should not re-price a receipt. Nullable, like the
+    -- product's own price, and `qty x unit_price` is the line total.
+    unit_price  REAL,
+    -- The day the money is dated, exactly as subscriptions.paid_on is, so
+    -- one rule governs the whole till: reception writes the sale down when
+    -- it happens and the figure lands on the day it is dated. NULL is
+    -- unpaid and falls out of every day rather than counting as zero in one.
+    paid_on     TEXT,
+    notes       TEXT,
+    created_at  INTEGER NOT NULL
+);
+
 -- Free-form key/value settings. Only a handful, so a table beats a config file
 -- that would drift out of sync with what the UI shows.
 CREATE TABLE IF NOT EXISTS settings (
@@ -312,6 +359,11 @@ CREATE INDEX IF NOT EXISTS ix_ih_date     ON instructor_hours(work_date);
 CREATE INDEX IF NOT EXISTS ix_cli_joined  ON clients(joined_on);
 CREATE INDEX IF NOT EXISTS ix_sub_starts  ON subscriptions(starts_on);
 CREATE INDEX IF NOT EXISTS ix_appt_date  ON appointments(on_date);
+-- The shop: the client profile lists one client's purchases, the product
+-- page lists one product's buyers, and the till reads one day's.
+CREATE INDEX IF NOT EXISTS ix_psale_client  ON product_sales(client_id);
+CREATE INDEX IF NOT EXISTS ix_psale_product ON product_sales(product_id);
+CREATE INDEX IF NOT EXISTS ix_psale_paid    ON product_sales(paid_on);
 
 -- Added for the joins that already existed but had nothing to stand on. Each
 -- one backs a query in repo/sqlite/ports.py that was scanning without it;

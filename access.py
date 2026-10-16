@@ -2582,9 +2582,131 @@ def day_income(repo, day: str) -> dict:
     counting as zero in one, which is the rule the month's figures already
     follow.
     """
-    r = repo.takings("paid_on", day, next_day(day))
-    return {"paid": round(r["paid"], 2), "plans": r["plans"],
-            "unpriced": r["unpriced"]}
+    plans = repo.takings("paid_on", day, next_day(day))
+    shop = repo.shop_takings(day, next_day(day))
+    return {"paid": round(plans["paid"] + shop["paid"], 2),
+            "plans": plans["plans"],
+            "unpriced": plans["unpriced"],
+            "plan_paid": round(plans["paid"], 2),
+            "shop_paid": round(shop["paid"], 2),
+            "shop_sales": shop["sales"],
+            "shop_items": shop["items"],
+            "shop_unpriced": shop["unpriced"]}
+
+
+# ---------------------------------------------------------------- the shop
+#
+# The academy sells leotards, shoes and hairnets over the counter, and until
+# there was a products table that was money the till figure could not see.
+# A sale is deliberately built out of the same pieces a plan is: a `paid_on`
+# dated the day the money arrives, a price that is *nullable* because a thing
+# nobody wrote a price for must not be reported as zero, and a figure that
+# counts the unpriced separately rather than folding them in.
+
+def sell_product(repo, product_id: int, client_id: int, qty=1,
+                 paid_on: str = None, notes: str = None) -> dict:
+    """
+    Sell `qty` of a product to a client, and take it off the shelf.
+
+    **The price is copied, not referenced.** `unit_price` is whatever the
+    product cost at this moment; re-pricing it next term must not rewrite
+    what today's till took. That is the opposite of instructor pay, which is
+    `hours x rate` at read time precisely so a corrected rate re-prices the
+    month -- the difference is whether the stored number is a receipt or an
+    estimate, and a receipt is what this is.
+
+    **Stock is checked before the insert**, the same count-then-insert shape
+    `book()` uses for a plan's slots and under the same single-writer
+    reality: it is enough for one laptop and is not a claim about concurrent
+    writers.
+
+    `paid_on` left out means **today** -- a sale over the counter is paid as
+    it happens, which is the common case and the one a receptionist should
+    not have to type. An explicit empty string means unpaid, and falls out
+    of every day's till rather than counting as zero in one, exactly as an
+    unpaid plan does.
+    """
+    with repo.begin():
+        p = repo.get("products", product_id)
+        if p is None or not p["active"]:
+            return {"ok": False, "error": "no such product"}
+        c = repo.get("clients", client_id)
+        if c is None or not c["active"]:
+            return {"ok": False, "error": "no such client"}
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty < 1:
+            return {"ok": False, "error": "how many? one or more"}
+        if qty > (p["stock"] or 0):
+            left = p["stock"] or 0
+            return {"ok": False,
+                    "error": f"only {left} {p['name']} left in stock — "
+                             f"add stock first, or sell {left or 'none'}"}
+        day = _iso_day(db.now()) if paid_on is None else (paid_on or None)
+        sale_id = repo.insert("product_sales", {
+            "product_id": product_id, "client_id": client_id, "qty": qty,
+            "unit_price": p["price"], "paid_on": day, "notes": notes,
+            "created_at": db.now()})
+        repo.update("products", product_id, {"stock": (p["stock"] or 0) - qty})
+        return {"ok": True, "sale_id": sale_id,
+                "stock": (p["stock"] or 0) - qty,
+                "paid": None if p["price"] is None else round(p["price"] * qty, 2)}
+
+
+def unsell_product(repo, sale_id: int) -> dict:
+    """
+    Undo a sale: the row goes, the stock comes back, and the money leaves
+    today's till.
+
+    **This is a real delete, and it is the appointments exception rather than
+    a hole in the deletion policy.** That policy protects the record of who
+    attended what; a sale has no attendance, no plan, no card and nothing
+    pointing at it. What it has instead is a wrong number in a day's takings,
+    and a greyed-out row that still had to be subtracted somewhere would be
+    worse at the only job the figure has. The stock is given back for the
+    same reason the money is: the thing is still in the box.
+    """
+    with repo.begin():
+        s = repo.get("product_sales", sale_id)
+        if s is None:
+            return {"ok": False, "error": "no such sale"}
+        p = repo.get("products", s["product_id"])
+        repo.delete("product_sales", sale_id)
+        if p is not None:
+            repo.update("products", s["product_id"],
+                        {"stock": (p["stock"] or 0) + (s["qty"] or 0)})
+        return {"ok": True, "product_id": s["product_id"],
+                "qty": s["qty"], "paid_on": s["paid_on"]}
+
+
+def archive_product(repo, product_id: int, hard: bool = False) -> dict:
+    """
+    Stop selling a product. Archived by default, like everything else with
+    history behind it: a sale points at it, and the client profile that
+    lists that sale has to go on naming what was bought.
+
+    `hard` is refused outright while any sale exists, for exactly that
+    reason -- the same refusal `?hard=true` meets elsewhere when attendance
+    exists.
+    """
+    with repo.begin():
+        p = repo.get("products", product_id)
+        if p is None:
+            return {"ok": False, "error": "no such product"}
+        sold = repo.count("product_sales", {"product_id": product_id})
+        if hard:
+            if sold:
+                return {"ok": False,
+                        "error": f"{sold} sale{'' if sold == 1 else 's'} name "
+                                 f"this product — archive it instead, so the "
+                                 f"clients who bought it still show what they "
+                                 f"bought"}
+            repo.delete("products", product_id)
+            return {"ok": True, "deleted": True}
+        repo.update("products", product_id, {"active": 0})
+        return {"ok": True, "archived": True, "sales": sold}
 
 
 # ======================================================================

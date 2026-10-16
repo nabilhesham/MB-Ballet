@@ -11,7 +11,8 @@ import db
 import identity
 
 from ..ports import (AccessPort, BookingsPort, ClassesPort, ClientsPort,
-                     EventsPort, InstructorsPort, PlansPort, SessionsPort)
+                     EventsPort, InstructorsPort, PlansPort, SessionsPort,
+                     ShopPort)
 
 
 def _marks(values):
@@ -111,8 +112,10 @@ class SqliteClasses(ClassesPort):
             "  (SELECT COUNT(*) FROM ("
             "     SELECT b.client_id FROM bookings b"
             "       JOIN sessions s ON s.id=b.session_id"
+            "       LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
             "       LEFT JOIN plan_end pe ON pe.sub_id = b.subscription_id"
             "      WHERE s.class_id=c.id"
+            f"       AND {self._FUNDS_THIS_CLASS % 'c.id'}"
             "      GROUP BY b.client_id"
             f"     HAVING MAX({self._BOOKING_END}) >= ?)) AS students"
             " FROM classes c LEFT JOIN instructors i ON i.id = c.instructor_id"
@@ -129,6 +132,11 @@ class SqliteClasses(ClassesPort):
             " WHERE s.class_id=? ORDER BY s.starts_at DESC, s.id DESC LIMIT ?",
             (class_id, limit)).fetchall()]
 
+    # Membership is the booking's *plan's* class, not the session's -- see
+    # ports.py's class_students(). One string so the roster and the Classes
+    # list's count cannot drift; `?` is this class, twice.
+    _FUNDS_THIS_CLASS = "(b.subscription_id IS NULL OR sub.class_id = %s)"
+
     def class_students(self, class_id, lapsed_before):
         return [dict(r) for r in self.conn.execute(
             self._PLAN_END +
@@ -137,11 +145,78 @@ class SqliteClasses(ClassesPort):
             "       SUM(CASE WHEN b.status='present' THEN 1 ELSE 0 END) AS attended"
             "  FROM bookings b JOIN sessions s ON s.id=b.session_id"
             "  JOIN clients cl ON cl.id=b.client_id"
+            "  LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
             "  LEFT JOIN plan_end pe ON pe.sub_id = b.subscription_id"
             " WHERE s.class_id=? AND cl.active=1"
+            f"   AND {self._FUNDS_THIS_CLASS % '?'}"
             " GROUP BY cl.id"
             f" HAVING MAX({self._BOOKING_END}) >= ?"
-            " ORDER BY cl.name_en, cl.id", (class_id, lapsed_before)).fetchall()]
+            " ORDER BY cl.name_en, cl.id",
+            (class_id, class_id, lapsed_before)).fetchall()]
+
+
+class SqliteShop(ShopPort):
+
+    # One join, three sets of columns -- the same idiom the three booking
+    # lists use. A sale names a product and a buyer; which of the two the
+    # caller already knows is the only difference between the questions.
+    _SALE_JOIN = ("  FROM product_sales ps"
+                  "  JOIN products p ON p.id = ps.product_id"
+                  "  JOIN clients c ON c.id = ps.client_id")
+
+    # The line total. NULL unit_price is unpriced, not zero, so it has to
+    # drop out of the sum rather than add nothing to it -- COALESCE(SUM(..))
+    # over no rows is what makes the answer a number either way.
+    _LINE = "ps.qty * ps.unit_price"
+
+    def shop_takings(self, day_from, day_to):
+        r = self.conn.execute(
+            f"SELECT COALESCE(SUM({self._LINE}),0) paid,"
+            "       COALESCE(SUM(ps.qty),0) items,"
+            "       COUNT(*) sales,"
+            "       SUM(CASE WHEN ps.unit_price IS NULL THEN 1 ELSE 0 END) unpriced"
+            "  FROM product_sales ps JOIN clients c ON c.id = ps.client_id"
+            " WHERE c.active=1 AND ps.paid_on >= ? AND ps.paid_on < ?",
+            (day_from, day_to)).fetchone()
+        return {"paid": r["paid"] or 0, "items": r["items"] or 0,
+                "sales": r["sales"] or 0, "unpriced": r["unpriced"] or 0}
+
+    def purchases_between(self, day_from, day_to):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT ps.id, ps.qty, ps.unit_price, ps.paid_on, ps.notes,"
+            "       ps.product_id, ps.client_id,"
+            "       p.name AS product_name, c.name_en AS client_name"
+            + self._SALE_JOIN +
+            " WHERE c.active=1 AND ps.paid_on >= ? AND ps.paid_on < ?"
+            " ORDER BY c.name_en, ps.id", (day_from, day_to)).fetchall()]
+
+    def plans_paid_between(self, day_from, day_to):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT s.id, s.plan, s.price, s.paid_on, s.sessions_total,"
+            "       s.client_id, c.name_en AS client_name,"
+            "       cl.name AS class_name, cl.colour"
+            "  FROM subscriptions s JOIN clients c ON c.id = s.client_id"
+            "  LEFT JOIN classes cl ON cl.id = s.class_id"
+            " WHERE c.active=1 AND s.paid_on >= ? AND s.paid_on < ?"
+            " ORDER BY c.name_en, s.id", (day_from, day_to)).fetchall()]
+
+    def client_purchases(self, client_id):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT ps.id, ps.qty, ps.unit_price, ps.paid_on, ps.notes,"
+            "       ps.created_at, ps.product_id,"
+            "       p.name AS product_name, p.photo_path"
+            + self._SALE_JOIN +
+            " WHERE ps.client_id=?"
+            " ORDER BY ps.created_at DESC, ps.id DESC", (client_id,)).fetchall()]
+
+    def product_buyers(self, product_id):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT ps.id, ps.qty, ps.unit_price, ps.paid_on, ps.notes,"
+            "       ps.created_at, ps.client_id,"
+            "       c.name_en AS client_name, c.phone, c.photo_path"
+            + self._SALE_JOIN +
+            " WHERE ps.product_id=?"
+            " ORDER BY ps.created_at DESC, ps.id DESC", (product_id,)).fetchall()]
 
 
 class SqliteBookings(BookingsPort):

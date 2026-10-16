@@ -16,6 +16,7 @@ Skipped entirely when MB_TEST_MONGO_URI is unset.
 
 import os
 import uuid
+from datetime import date as _date, timedelta
 
 import pytest
 
@@ -319,6 +320,66 @@ def test_selling_a_plan_agrees(built):
         price=900.0), "add_plan")
     on_both(repos, lambda r: r.find("subscriptions", {"client_id": a.planless}),
             "the plan that was sold")
+
+
+def test_the_shop_agrees(built):
+    """
+    Products, a sale, and all five of the shop's reads.
+
+    The whole of it is new on both sides at once, so there is nothing
+    holding the two together but this: SQLite answers with one join and
+    three sets of columns, Mongo with one `$lookup` pipeline and a Python
+    filter on the client's `active` flag. The *dict* is the contract.
+    """
+    repos, acs = built
+    a = acs[0]
+    today = _date.today().isoformat()
+    yday = (_date.today() - timedelta(days=1)).isoformat()
+
+    on_both(repos, lambda r: r.insert("products", {
+        "name": "Leotard", "price": 350.0, "stock": 5, "notes": "navy",
+        "photo_path": None, "active": 1, "created_at": db.now()}), "a product")
+    on_both(repos, lambda r: r.insert("products", {
+        "name": "Hairnet", "price": None, "stock": 2, "notes": None,
+        "photo_path": None, "active": 1, "created_at": db.now()}),
+        "an unpriced product")
+    priced, unpriced = 1, 2
+
+    on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=2,
+                                                 paid_on=today), "sell")
+    on_both(repos, lambda r: access.sell_product(r, unpriced, a.solo_ballet,
+                                                 qty=1, paid_on=today),
+            "sell unpriced")
+    on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=1,
+                                                 paid_on=yday), "sell yesterday")
+    # Unpaid: no paid_on at all, which a bare range comparison matches on
+    # MongoDB and never on SQLite — the same trap `takings` carries.
+    on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=1,
+                                                 paid_on=""), "sell unpaid")
+
+    on_both(repos, lambda r: r.get("products", priced), "the stock after")
+    on_both(repos, lambda r: r.shop_takings(today, access.next_day(today)),
+            "shop_takings")
+    on_both(repos, lambda r: r.shop_takings("2999-01-01", "2999-01-02"),
+            "shop_takings over nothing")
+    on_both(repos, lambda r: r.purchases_between(today, access.next_day(today)),
+            "purchases_between")
+    on_both(repos, lambda r: r.purchases_between("2999-01-01", "2999-01-02"),
+            "purchases_between over nothing")
+    on_both(repos, lambda r: r.plans_paid_between("2000-01-01", "2999-01-01"),
+            "plans_paid_between")
+    on_both(repos, lambda r: r.client_purchases(a.dual), "client_purchases")
+    on_both(repos, lambda r: r.client_purchases(a.planless),
+            "client_purchases none")
+    on_both(repos, lambda r: r.product_buyers(priced), "product_buyers")
+    on_both(repos, lambda r: r.product_buyers(unpriced),
+            "product_buyers unpriced")
+
+    # And removing one gives the stock back on both.
+    sale = on_both(repos, lambda r: r.find_one(
+        "product_sales", {"product_id": priced, "paid_on": yday}), "the sale")
+    on_both(repos, lambda r: access.unsell_product(r, sale["id"]), "unsell")
+    on_both(repos, lambda r: r.get("products", priced), "the stock back")
 
 
 def test_booking_and_unbooking_agree(built):

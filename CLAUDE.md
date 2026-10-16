@@ -149,6 +149,21 @@ date at all and falls out of every day rather than counting as zero in one,
 which is the rule the month's figures already follow; a plan paid with no
 amount written down is still counted separately, never as zero.
 
+**It is plans *plus* the shop**, and the card shows the total with the two
+halves and their unit counts under it. They are different kinds of money —
+a plan names a class, a sale names a quantity — and one figure was only
+half the answer once the academy started selling leotards over the same
+counter. `access.day_income()` returns both from one call; the shop's half
+follows exactly the same `paid_on` rule, so there is one till and not two.
+
+**Clicking the card opens who paid what** — `/api/dashboard/till`, every
+plan paid on the day and every product sold on it, named. A **drill-down**
+rather than part of the dashboard payload: the card is two numbers, the
+list behind it is two queries nobody needs until they ask, and this is the
+page reception opens most — the same reasoning that moved the attention
+list off it. `on=` defaults to today and takes any ISO day, so the same
+popup answers "what did we take last Thursday" without a second endpoint.
+
 **Cards & renewals asks two questions about one day**
 (`access.day_attention()`), and the day is passed in rather than read off
 the clock — the screen opens on today and reception can set it to any date:
@@ -343,7 +358,7 @@ server.py         FastAPI app, paths, the lifespan handler, cache policy,
 api/              One router module per resource, wired into server.py with
                   ordinary static imports (clients.py, plans.py,
                   classes.py, instructors.py, sessions.py, access_routes.py,
-                  dashboard.py, images.py, appointments.py).
+                  dashboard.py, images.py, appointments.py, products.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
 seed.py           Wipes academy.db and rebuilds it from sheets/. --force
                   required. Always SQLite, whatever MB_DB_BACKEND says —
@@ -352,7 +367,8 @@ frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                   for the build-once-commit-the-output model.
   src/views/       One file per route: Dashboard, Calendar, Classes,
                    ClassDetail, Instructors, InstructorDetail, Cards, Sessions,
-                   SessionDetail, Clients, ClientDetail, Appointments.
+                   SessionDetail, Clients, ClientDetail, Appointments,
+                   Products, ProductDetail (+ the three Archived* lists).
   src/modals/      Every modal, one file each, imported by the view(s) that
                    open it. There is no AddStudents: booking is done from
                    the client's profile, not the session — see below.
@@ -1286,6 +1302,31 @@ system and everything else follows from it:
   at creation and allowing it a minute later leaves the state the refusal
   exists to prevent.
 
+- **products and product_sales** are the shop — leotards, shoes, hairnets.
+  A product is the offering; a sale is one client buying some of it, and it
+  is deliberately built out of the same pieces a plan is, because it is the
+  same question (what did the academy take, and on which day):
+
+  | | |
+  |---|---|
+  | `price` | nullable, like a plan's — a thing nobody wrote a price for must not be reported as zero revenue, and the unpriced are counted as their own figure |
+  | `paid_on` | the day the money is dated, the same column and the same rule TAKEN TODAY reads for plans. NULL is unpaid and falls out of every day rather than counting as zero in one. Left out of a sale it defaults to **today**: a sale over the counter is paid as it happens, and that is not something reception should have to type |
+  | `stock` | a plain count, not a ledger of movements. The academy counts the box; a stock history nobody queries is schema churn. A sale takes some off and removing the sale puts it back, which is the whole of the arithmetic |
+
+  **`product_sales.unit_price` is copied at the moment of sale and never
+  read back through the product.** Re-pricing a leotard next term must not
+  rewrite what last month's till took. That is deliberately the *opposite*
+  of instructor pay, which is `hours x rate` at read time precisely so
+  correcting a rate re-prices the month — the difference is whether the
+  stored number is a **receipt** or an **estimate**, and a sale is a
+  receipt.
+
+  A sale is made and removed from the **client's profile** (and from the
+  product's own page, which is the same transaction entered from the other
+  end — one `SellProduct` modal serves both, since two copies of the
+  quantity/price/date logic is how the two would drift). That is the same
+  reason booking a session lives on the profile and not on the session page.
+
 **The class is the spine.** A plan is bought for one class, may only be
 assigned to that class's sessions, and is proved by that class's card:
 
@@ -1312,6 +1353,24 @@ The plan picker in the UI leads with the class and fetches sessions with
 
 Class membership is derived from bookings. There is no enrolment list, which is
 why the class page shows "students with a booking" rather than a roster.
+
+**But it is the booking's *plan's* class, not the session's.** Once a slot
+is sold it may be pointed at any class's session (see the cross-class
+corrections above) — that is how "she missed Ballet on Tuesday and came to
+Flexibility on Wednesday instead" is recorded without selling a second plan.
+The session she attended is a Flexibility session, so counting bookings by
+the session's class put her on the Flexibility roster as a student of a
+class she has never bought: a visitor covering one missed hour, listed
+beside twelve people who come every week.
+
+Nothing else about that slot changes — the deduction, the attendance mark,
+the plan that paid for it, the session's own roster and her profile's
+history are all exactly as they were. It is one filter on one read.
+`class_students()` and `classes_with_counts()` both carry it and must: a
+list saying 12 students beside a page showing 11 is worse than either
+number on its own. A booking with **no** plan behind it (older rows,
+`subscription_id` NULL) still counts, because the session's class is the
+only answer there is for it — the same fallback the lapsed cutoff makes.
 
 **The roster carries each student's balance for this class** — a LEFT column
 beside SLOTS and ATTENDED, reading `expired`, `0 left`, `n left`, `n
@@ -2105,6 +2164,15 @@ no attendance, no plan, no card and nothing pointing at it — the rule above
 is protecting a record that does not exist here, and a list of cancelled
 calls is worse at the only job the list has. See the appointments note in
 the data model.
+
+**A product *sale* is the second, for the same reason.** `DELETE
+/api/product-sales/{id}` removes it outright: it has no attendance behind
+it either, and what it does have is a wrong number in a day's takings. A
+greyed-out row that still had to be subtracted somewhere would be worse at
+the only job that figure has. The stock goes back on the shelf because the
+thing is still in the box. The **product** itself is archived, never
+deleted while a sale names it — `?hard=true` is refused in those words, so
+the client who bought one still shows what they bought.
 
 Archiving is currently **one-way**: there is no restore endpoint and no
 "Admin → Archive" screen. An `admin_routes.py` once existed with a restore
@@ -3248,8 +3316,9 @@ half the app's queries are this shape and need no method of their own.
 
 **A port method is declared on the ABC its implementations inherit**, and
 that is now checked rather than assumed. `repo/ports.py` is not one ABC but
-eight -- `SessionsPort`, `ClassesPort`, `BookingsPort`, `ClientsPort`,
-`AccessPort`, `PlansPort`, `InstructorsPort`, `EventsPort` -- and
+nine -- `SessionsPort`, `ClassesPort`, `BookingsPort`, `ClientsPort`,
+`AccessPort`, `PlansPort`, `InstructorsPort`, `EventsPort`, `ShopPort` --
+and
 `repo/mongo/ports.py` mirrors them one class each, while `repo/sqlite/`
 answers the lot from one flat class. So an `@abstractmethod` added to the
 wrong one of the eight is satisfied by SQLite and leaves **MongoRepo

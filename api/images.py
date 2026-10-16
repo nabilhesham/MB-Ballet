@@ -19,7 +19,8 @@ def get_image(kind: str, owner_id: int, variant: str = ""):
     a monogram — and inventing a grey square here would take that decision
     away from the screen that knows what fits.
     """
-    if kind not in (images.CLIENT_PHOTO, images.INSTRUCTOR_PHOTO, images.CARD):
+    if kind not in (images.CLIENT_PHOTO, images.INSTRUCTOR_PHOTO,
+                    images.PRODUCT_PHOTO, images.CARD):
         raise HTTPException(404, "no such image kind")
     repo = data.connect()
     try:

@@ -16,12 +16,12 @@ from ..filters import normalise_sort
 from .filters import compile_order, compile_where
 from .ports import (SqliteAccess, SqliteBookings, SqliteClasses,
                     SqliteClients, SqliteEvents, SqliteInstructors,
-                    SqlitePlans, SqliteSessions)
+                    SqlitePlans, SqliteSessions, SqliteShop)
 
 
 class SqliteRepo(SqliteAccess, SqliteSessions, SqliteBookings,
                  SqliteClasses, SqliteClients, SqliteInstructors,
-                 SqlitePlans, SqliteEvents, Repo):
+                 SqlitePlans, SqliteEvents, SqliteShop, Repo):
 
     def __init__(self, conn):
         self.conn = conn
