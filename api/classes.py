@@ -76,7 +76,16 @@ def update_class(clid: int, body: ClassIn):
                 {"class_id": clid, "status": "scheduled",
                  "starts_at": {"gt": db.now()}},
                 {"instructor_id": body.instructor_id})
-        return {"ok": True, "cascaded_sessions": cascaded}
+            # The length cascades the same way, and for a sharper reason: a
+            # session an hour shorter than its class ends an hour early
+            # *every time*, so the sweep marks it completed and its
+            # latecomers absent while the class is still being taught. See
+            # access.relength_sessions() for why the sweep's own repair
+            # cannot reach this.
+            lengths = access.relength_sessions(repo, clid, body.duration_hours)
+        return {"ok": True, "cascaded_sessions": cascaded,
+                "relengthened": lengths["relengthened"],
+                "length_clashes": lengths["skipped"]}
     finally:
         repo.close()
 

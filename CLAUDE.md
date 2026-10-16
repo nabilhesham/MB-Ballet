@@ -1089,6 +1089,43 @@ system and everything else follows from it:
   instructor. `api/classes.py`'s `update_class` is the one place that
   cascade happens; `create_session`/`repeat_sessions` are the two places the
   fallback is read. Past and cancelled sessions are never touched by either.
+- **classes.duration_hours cascades the same way, and until it did, that was
+  a bug reported three times.** It was only a default for the next session
+  created: `api/sessions.py` copies it onto the row
+  (`body.duration_hours or cl["duration_hours"]`) and nothing touched the row
+  again. So a class seeded at one hour — `seed.py` gives the flexibility sheet
+  `duration_hours: 1.0` — and later corrected to 1.5 or 2 on the class page
+  left every session already on the timetable one hour long, while the class
+  page said 1.5. `sessions.ends_at` is written from the *session's* own
+  length, and `ends_at` is what the sweep compares against, so those sessions
+  ended an hour early **every time**: `complete_finished_sessions()` marked
+  the class completed while it was being taught, and `settle_absences()` wrote
+  off the client who walked in at 1h05 in a room they were sitting in.
+
+  **`_repair_running_sessions()` cannot reach it and in fact cements it.**
+  That repair makes `ends_at` agree with the row's own `duration_hours`,
+  which here is the number that is wrong — it is for a row disagreeing with
+  itself, not with its class. `access.relength_sessions()` is the cascade,
+  called from `update_class` beside the instructor one, and it follows the
+  same rule including overwriting a session someone had set to a different,
+  specific length: two rules for one field is how the timetable and the class
+  drift apart again.
+
+  Three differences from the instructor cascade, each forced by what a length
+  is. Its window is **not finished** rather than **not started**
+  (`starts_at > now - new_length`), because the session reception is standing
+  in front of is exactly the case this was reported from, and it is also
+  **not** filtered to `status='scheduled'`, since the early end is what
+  marked it `completed` — the next sweep's repair puts that status and those
+  absences back once the row has the right end. Shortening leaves a session
+  the new length says is already over at the length it ran: an edit must not
+  write somebody off retroactively. And a session that **cannot** be
+  lengthened is named rather than forced — one session at a time is
+  academy-wide, so a longer class can run into whatever is on next; that one
+  keeps its length and comes back in `length_clashes` as a sentence, the same
+  treatment repeating a term gives a taken evening, with the class's own
+  sessions tested against each other in start order so a back-to-back pair is
+  never laid over itself.
 - **clients** are identified by their **mobile number and their name
   together**, not by either alone -- see the rule below, and `identity.py`. They carry `age` as **REAL, not INTEGER** — the roster sheets hold
   "4.8" and "12.5" for the youngest children, and rounding a four-year-old up
@@ -1102,6 +1139,20 @@ system and everything else follows from it:
   Status is `booked` → `present` | `absent`. There is no third state: a slot is
   either used or it is not, and **both present and absent consume it**, because
   the place was reserved either way.
+
+  **`settled_at` is when the absent sweep wrote the row off, and nothing
+  else.** An absence had no timestamp at all — `checked_in_at` stays NULL on
+  one — so "marked absent too early" could not be settled from the data, only
+  argued about, which is how the same report came back three times. The stamp
+  read against the session's own end is the whole answer, and it is on the
+  session roster's CHECKED IN column (`absent 03:20 PM` against a class
+  running to 05:00 PM) because that is the screen it was reported from. It is
+  **NULL on anything the sweep did not do**: an absence marked by hand, or one
+  born absent because a plan was written down after the client started coming
+  (`_book_slots`, `book()`). `set_status()` clears it whichever way the mark
+  goes, so a client marked present does not carry the time they were written
+  off, and `_repair_running_sessions()` clears it on the absences it gives
+  back.
 - **subscriptions** are plans. `sessions_used` is a column but is dead weight —
   nothing writes it and nothing reads it. Used slots are counted live from the
   bookings by `access.plan_state()` instead, so the two can never drift apart.
@@ -1721,6 +1772,24 @@ The one screen that made the same mistake from the other side was the
 Sessions list, which split upcoming from past at a flat hour after the
 *start*: a 1.5-hour class moved to "past" half an hour before the instructor
 finished teaching it. It reads `ends_at` now, like everything else.
+
+**This loop already *is* "an event when the session duration completes", and
+that is worth saying because it has been asked for twice as a replacement
+for the sweep.** `seconds_to_next_sweep()` comes from
+`repo.next_sweep_deadline()`, which is `MIN(ends_at)` ahead of now, so the
+process wakes at the next session's end and not on a poll. A scheduled job,
+a timer per session or a queued task cannot be more accurate than this,
+because the schedule and the `ends_at < now` comparison read the *same*
+clock and the *same* column: fire the event from a wrong `ends_at` and it
+fires at the wrong moment just as the sweep does, and a machine whose clock
+is an hour fast fires it an hour early either way. Every "it marked them
+absent too early" report so far has been one of those two inputs — a stored
+end an hour short of the class (`_repair_running_sessions`), a session an
+hour shorter than its class (`relength_sessions`), or a clock an hour fast
+(`/api/clock`) — and none of them is a property of what triggers the work.
+Reach for the inputs, and for `bookings.settled_at`, which is what makes the
+next report answerable; adding a second trigger alongside this one would
+only give two things to keep in step.
 
 **It skips itself when it provably has nothing to do, which is not the same
 as throttling it.** What the sweep acts on is wall-clock time crossing a
@@ -2822,9 +2891,13 @@ physically cannot read QR), USB HID keyboard mode, must read a phone screen at
       arrived, since the person it was for has gone.
 - [ ] Rotating phone tokens: `access.py` has the `kind='phone'` path with a 90s
       freshness window, but nothing generates them client-side.
-- [ ] `settle_past_sessions` runs in-process. If the laptop is off overnight it
-      catches up on next start, which is fine — but there is no record of *when*
-      a slot was marked absent versus when the session ran.
+- [x] `settle_past_sessions` runs in-process. If the laptop is off overnight
+      it catches up on next start, which is fine — and **there is now a record
+      of when a slot was marked absent**: `bookings.settled_at`, written by
+      the sweep and shown on the session roster. See the bookings bullet in
+      the data model. What is still not recorded is when the session *ran*
+      beyond its own `starts_at`/`ends_at`, which is enough to read the two
+      against each other.
 - [ ] No migration from the pre-bookings schema. Three tables were replaced at
       once, so an old `academy.db` must be re-seeded rather than upgraded.
 - [ ] Nightly SQLite backup + a *tested* restore.
