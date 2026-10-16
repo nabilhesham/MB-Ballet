@@ -1,6 +1,6 @@
 # sheets/
 
-The academy's own Excel workbooks. `seed.py` reads these to build `academy.db`.
+The academy's own Excel workbooks. `scripts/seed.py` reads these to build `academy.db`.
 
 They hold real client names and mobile numbers, so **they are not in git** —
 same reasoning as `academy.db`, `photos/` and `cards/`. Copy them in by hand on
@@ -14,7 +14,7 @@ the machine you are seeding.
 | `flexibility.xlsx` | evening and morning flexibility rosters |
 | `August_Salaries_2026.xlsx` | the month's instructor hours |
 
-The file names are not magic — the list `seed.py` actually reads is `SHEETS` at
+The file names are not magic — the list `scripts/seed.py` actually reads is `SHEETS` at
 the top of that script. Add a term's workbook there and it is imported.
 
 ## The shape the reader expects
@@ -52,7 +52,7 @@ arrives on its own.
 
 ## Before you seed
 
-`seed.py --force --dry-run` parses everything and prints what it found without
+`python scripts/seed.py --force --dry-run` parses everything and prints what it found without
 writing to the database. Read the warnings it prints: they are every place the
 sheets were ambiguous and the reader had to choose — a year that looked like a
 typo, a date written into two columns, an instructor who teaches but is not on

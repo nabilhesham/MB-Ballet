@@ -307,7 +307,7 @@ reintroduce either.
 
 ## Files
 
-Run `./cleanup.sh` if the folder has accumulated files from earlier versions
+Run `scripts/cleanup.sh` if the folder has accumulated files from earlier versions
 (`entry.db`, `run.bat`, `run.sh`, `issue_card.py`, `reissue.py`, `test_flow.py`,
 `MB Ballet Academy.spec`, `__pycache__`, a shared `.venv`). It lists before it
 deletes and never touches data.
@@ -360,9 +360,6 @@ api/              One router module per resource, wired into server.py with
                   classes.py, instructors.py, sessions.py, access_routes.py,
                   dashboard.py, images.py, appointments.py, products.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
-seed.py           Wipes academy.db and rebuilds it from sheets/. --force
-                  required. Always SQLite, whatever MB_DB_BACKEND says —
-                  migrate_to_mongo.py is what moves it to Mongo.
 frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                   for the build-once-commit-the-output model.
   src/views/       One file per route: Dashboard, Calendar, Classes,
@@ -435,16 +432,25 @@ academy.spec      PyInstaller build definition, shared by all three build
                   the step that bakes this folder's .env into the
                   binary -- it refuses to build without one.
 run_app.py        Entry point for the packaged build.
-migrate_to_mongo.py  Copies an existing academy.db into MongoDB, preserving
-                  every integer id. --dry-run counts first.
-backfill_checkin_source.py  Fills in bookings.checked_in_by on rows written
-                  before that column existed, from the scan log. Counts by
-                  default; --write applies. Goes through repo, so it works
-                  on whichever backend is configured -- which is why it is
-                  a script and not a db.migrate() step. See the bookings
-                  bullet in the data model.
-cleanup.sh        Removes leftovers from earlier versions.
-                  (no settings page: the no-show rules it configured are gone)
+scripts/          Run by hand, never imported by the app -- see the rule
+                  under this tree.
+  seed.py          Wipes academy.db and rebuilds it from sheets/. --force
+                   required. Always SQLite, whatever MB_DB_BACKEND says —
+                   migrate_to_mongo.py is what moves it to Mongo.
+  migrate_to_mongo.py  Copies an existing academy.db into MongoDB,
+                   preserving every integer id. --dry-run counts first.
+  backfill_checkin_source.py  Fills in bookings.checked_in_by on rows
+                   written before that column existed, from the scan log.
+                   Counts by default; --write applies. Goes through repo, so
+                   it works on whichever backend is configured -- which is
+                   why it is a script and not a db.migrate() step. See the
+                   bookings bullet in the data model.
+  class_visitors.py  Reports which clients are on a class's roster only as
+                   cross-class visitors. A report and not a migration --
+                   see the note under it.
+  cleanup.sh       Removes leftovers from earlier versions.
+                   (no settings page: the no-show rules it configured are
+                   gone)
 sheets/           The academy's own workbooks — the seed reads these.
                   Real names and numbers, so not in git. See sheets/README.md.
 static/scanner-test.html   Scanner timing diagnostic, for tuning GAP_MS.
@@ -469,6 +475,20 @@ academy.db        The database, pictures included. Not in git. This IS the
                   rather than the app growing a second copy beside
                   the exe. See Configuration below.
 ```
+
+**Nothing in `scripts/` is imported by the app, and nothing in the app
+imports it.** That is the whole line: a file at the root is something the
+running app loads, a file in `scripts/` is something a person types. Four
+things were sitting at the root beside `server.py` and `access.py` looking
+exactly like part of the app — one of which wipes the database — so
+telling them apart meant reading each one.
+
+The cost, and it is the only one: a script is a directory further from the
+modules it imports, so each puts the repo root on `sys.path` as its first
+act, above `import config`, and `tests/conftest.py` adds `scripts/` for the
+tests that drive them. `scripts/` is deliberately **not** a package — there
+is no `__init__.py` and nothing is ever `scripts.seed` — because that would
+make it importable, which is the thing this split exists to prevent.
 
 `static/reception.html` and `static/scanner-test.html` are deliberately
 untouched by the React rewrite: the kiosk is the one latency-sensitive
@@ -1062,8 +1082,8 @@ Manual, when working on the code:
 
 ```bash
 set -a; source .env; set +a   # Windows: $env:ENTRY_SECRET="..."
-python seed.py --force        # rebuild from sheets/ — WIPES the database
-python seed.py --force --dry-run   # parse and report, write nothing
+python scripts/seed.py --force      # rebuild from sheets/ — WIPES the database
+python scripts/seed.py --force --dry-run   # parse and report, write nothing
 python server.py
 ```
 
@@ -1371,6 +1391,19 @@ list saying 12 students beside a page showing 11 is worse than either
 number on its own. A booking with **no** plan behind it (older rows,
 `subscription_id` NULL) still counts, because the session's class is the
 only answer there is for it — the same fallback the lapsed cutoff makes.
+
+**There is no data migration for this, and that is the finding rather than
+an omission.** Being a filter on two reads, it leaves every booking, plan
+and attendance mark where it was — so there is no column to backfill and
+nothing to rewrite, and a script that wrote anything here would be undoing
+the correction rather than applying it. What was missing was the list,
+because until the rule existed nobody could see who was on a roster for
+this reason: `scripts/class_visitors.py` names them, which class's plan paid
+for each visit, and therefore which rosters and counts have just got
+shorter. Run before and after an upgrade it reports the same thing, which
+*is* the evidence nothing moved. A client who also holds a plan in the class
+she visited is listed apart, since she is a student of it either way and her
+visit changed no count.
 
 **The roster carries each student's balance for this class** — a LEFT column
 beside SLOTS and ATTENDED, reading `expired`, `0 left`, `n left`, `n
@@ -3670,8 +3703,8 @@ that would be a wipe of the live hosted record with nothing to undo it from,
 triggered by an environment variable set for a different reason. So it builds
 its own `SqliteRepo` over `config.sqlite_path()` (`seed.py`'s `sqlite_repo()`),
 and `migrate_to_mongo.py` is the one thing that writes to Mongo — reading
-exactly what the seed produced. The two steps are `python seed.py --force`
-then `python migrate_to_mongo.py`.
+exactly what the seed produced. The two steps are `python scripts/seed.py
+--force` then `python scripts/migrate_to_mongo.py`.
 
 It calls `config.load_env()` as its first statement, above `import db`, like
 every other entry point. `start.sh` deliberately does not export `.env` into
@@ -3699,8 +3732,8 @@ and `--dry-run` reports what it would take in without touching the disk. So
 the whole thing is one command:
 
 ```bash
-python migrate_to_mongo.py --dry-run          # counts, writes nothing to Mongo
-MB_DB_BACKEND=mongo python migrate_to_mongo.py
+python scripts/migrate_to_mongo.py --dry-run   # counts, writes nothing to Mongo
+MB_DB_BACKEND=mongo python scripts/migrate_to_mongo.py
 ```
 
 **It copies by id, replacing, and never deletes.** `insert_many()` would mint

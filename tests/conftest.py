@@ -15,7 +15,13 @@ import pytest
 
 # The repo root, so `import db` works however pytest was invoked. Done before
 # any project import below.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+
+# And scripts/, which is not a package and is not importable from the root:
+# the three scripts that live there are run by hand rather than imported by
+# the app, and the tests covering them import them by name.
+sys.path.insert(1, os.path.join(_ROOT, "scripts"))
 
 # Read .env the same way the app does, so MB_TEST_MONGO_URI can live there
 # rather than being exported by hand before every run. Done before the

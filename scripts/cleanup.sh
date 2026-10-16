@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Remove files left over from earlier versions of this project.
 #
-#   ./cleanup.sh          show what would be removed
-#   ./cleanup.sh --apply  actually remove it
+#   scripts/cleanup.sh          show what would be removed
+#   scripts/cleanup.sh --apply  actually remove it
 #
 # Nothing here touches academy.db, .env, photos/, cards/ or your source files.
 
 set -u
-cd "$(dirname "$0")"
+# The leftovers are in the project folder, which is one up from this script.
+cd "$(dirname "$0")/.."
 
 APPLY=0
 [ "${1:-}" = "--apply" ] && APPLY=1
@@ -66,7 +67,7 @@ if [ "$APPLY" = "1" ]; then
   printf "  %sRemoved %d item(s).%s\n\n" "$grn" "$total" "$off"
 else
   printf "  %d item(s) would be removed.\n" "$total"
-  printf "  %sRun ./cleanup.sh --apply to do it.%s\n\n" "$dim" "$off"
+  printf "  %sRun scripts/cleanup.sh --apply to do it.%s\n\n" "$dim" "$off"
 fi
 
 echo "  Kept on purpose"

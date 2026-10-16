@@ -22,11 +22,18 @@ which nothing a person presses can land on. The script says how many it
 decided each way rather than doing it quietly -- the same rule the sheet
 reader follows for every repair it makes.
 
-    python backfill_checkin_source.py            # count, write nothing
-    python backfill_checkin_source.py --write
+    python scripts/backfill_checkin_source.py            # count, write nothing
+    python scripts/backfill_checkin_source.py --write
 """
 
+import pathlib
 import sys
+
+# This script lives in scripts/ -- apart from the app itself, so nobody has to
+# work out which files are the app and which are run by hand. The app's own
+# modules are therefore one directory up, and the path has to say so before
+# the first of them is imported.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import config
 
