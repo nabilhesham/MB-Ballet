@@ -1473,6 +1473,30 @@ shorter. Run before and after an upgrade it reports the same thing, which
 she visited is listed apart, since she is a student of it either way and her
 visit changed no count.
 
+**The commonest "the filter did not work" report is the NULL fallback, and
+it is the rule rather than a failure of it.** A booking whose
+`subscription_id` is NULL has no plan to read a class off, so the session's
+own class is the only answer there is — both port methods fall back to it
+deliberately — and such a client stays on the roster whatever class funded
+the rest of her slots. No filter can remove her, because there is nothing
+to filter on. The report used to skip those rows entirely, which made that
+case invisible in the very script written to explain the filter; it names
+them as their own group now.
+
+`--explain <class>` is what settles an individual report, and a class can
+be named rather than numbered because that is how the question arrives
+("PRE-BALLET FRIDAY 5:30"). It reads the roster from
+`repo.class_students()` — the method the screen itself calls, on whichever
+backend is configured — and then walks the same rule over the same bookings
+in the open, printing for each name which bookings keep her and why. A name
+the screen shows that it cannot account for is a bug in the filter; a name
+both agree on with a reason beside it is the filter working and the cause
+being something else. A `subscription_id` pointing at a plan that no longer
+exists is **not** the fallback and is called out separately: both backends
+read the class off the plan and get nothing, so the row is *excluded*.
+SQLite's foreign key makes that state impossible there; MongoDB has no such
+constraint, which is the whole reason the branch exists.
+
 **The roster carries each student's balance for this class** — a LEFT column
 beside SLOTS and ATTENDED, reading `expired`, `0 left`, `n left`, `n
 unassigned` or `frozen to <date>` through the same `<BalancePill>` the
