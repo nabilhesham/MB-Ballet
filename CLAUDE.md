@@ -2517,13 +2517,64 @@ The scanner is a USB HID device — it *is* a keyboard to the OS. No driver, no
 serial port, no SDK.
 
 `reception.html` separates scans from typing with four stacked layers:
-1. Ignore keystrokes when focus is in an input/textarea/select
-2. Timing: `GAP_MS = 80`, characters further apart reset the buffer
-3. Shape: minimum 10 chars, terminated by Enter
-4. Signature check server-side — the real backstop
+1. **Focus** — a field keeps the keyboard until a burst proves a scanner is
+   talking; a button never does, because a button is not somewhere text goes
+2. **Timing** — `GAP_MS = 80` says what a scanner sounds like, `HOLD_MS =
+   600` says how long a recognised token may sit half-read
+3. **Shape** — `MIN_LEN = 10` characters of base32 (`TOKEN_SHAPE`),
+   terminated by Enter
+4. **Signature check server-side** — the real backstop
 
 **Tune `GAP_MS` once hardware arrives:** open `static/scanner-test.html` in the browser, note the max
 gap, set it to roughly 3x that.
+
+**"The scanner is connected and sometimes a card does nothing" was four
+bugs, and they shared a shape: every layer was all-or-nothing, so when one
+said no the card vanished with nothing on the screen.** The indicator went
+on reading `scanner connected` throughout, because it is deliberately
+sticky — it says a scanner has been heard, not that this card was.
+
+- **A focused button swallowed everything.** Layer one ignored a keystroke
+  whose target was an `input`, a `textarea`, a `select` *or a button* — and
+  every panel on this screen is dismissed with a button, so pressing OK on
+  the door popup, or the sidebar's **Open door**, left the keyboard sitting
+  on it. The next client's card went nowhere at all. A button holds no text,
+  so there is nothing for a keystroke to go into and nothing to protect: it
+  is blurred and the scan is read. Space and Enter are left alone, since
+  those are how a focused button is pressed and neither can be part of a
+  token.
+- **One number did two jobs.** `GAP_MS` was both "is this a scanner" and
+  "how long may a half-read token sit", so a single slow character — a
+  repaint, a fetch resolving, the camera's own pass — threw away everything
+  read so far and left the terminating Enter with nothing to send. They are
+  two numbers now. Until two scanner-speed gaps have proved a burst, a slow
+  character still starts the buffer over; after that, only a pause longer
+  than `HOLD_MS` abandons it.
+- **The listener was on the bubble phase, and that one checked in the wrong
+  client.** `#manualId` and `#nameQ` both `stopPropagation()` on Enter —
+  each has its own job for that key — so the window's listener never saw
+  it. A card scanned while a half-typed name was still in the box was
+  swallowed by the name search, which pressed its first match: not a lost
+  scan but *somebody else's* check-in. It runs in the capture phase now, so
+  a proven token stops the event before either of them, and the box is put
+  back exactly as it was typed (the snapshot is taken at the keystroke that
+  *starts* a buffer, which is the one moment the field still holds only what
+  the receptionist typed).
+- **And a scan that did not survive the layers said nothing.** It now gets
+  the same amber line and soft beep a scan arriving over a verdict gets —
+  the rule this screen already had, applied to the case that needed it most.
+  Two sentences, because they are two problems: a token cut short says to
+  scan again, and a burst that is not base32 says to check the keyboard is
+  set to English, which is the layout trap this whole design is built around
+  and the one thing nothing here can fix by itself.
+
+The shape layer is what keeps the first two changes safe. A member number
+typed quickly into the Number box is not a card: it contains a 0, 1, 8 or 9,
+and `TOKEN_SHAPE` is `A–Z` and `2–7` only, exactly the alphabet `tokens.py`
+mints. Over a field or in Number/Name mode the timing bar is the whole token
+as well — all but two of its gaps have to be scanner-speed — because the
+alternative there is a receptionist typing, and taking her keyboard away
+mid-word would be a worse failure than the one this fixes.
 
 **Planned, not built:** configure the scanner to emit a prefix character (`~`)
 and gate capture on it. Makes detection deterministic rather than heuristic and
