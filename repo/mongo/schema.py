@@ -67,8 +67,8 @@ FIELDS = {
     },
     "bookings": {
         "client_id": None, "session_id": None, "subscription_id": None,
-        "status": "booked", "checked_in_at": None, "settled_at": None,
-        "created_at": None,
+        "status": "booked", "checked_in_at": None, "checked_in_by": None,
+        "settled_at": None, "created_at": None,
     },
     "images": {
         "kind": None, "owner_id": None, "variant": "", "mime": None,

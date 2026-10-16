@@ -1276,7 +1276,17 @@ def set_status(repo, session_id: int, client_id: int, status: str) -> dict:
             return {"ok": False, "error": "this client is not booked into this session"}
         repo.update("bookings", b["id"], {
             "status": status,
+            # **This stamp is when somebody pressed Present, not when the
+            # client arrived**, and `checked_in_by` is what finally says so.
+            # One column labelled CHECKED IN was covering both meanings:
+            # `check_in_booking()` writes the instant the client was at the
+            # door, and this writes the instant the roster was taken -- which
+            # for a class marked up at the end is an hour or more later. With
+            # no scanner on the desk yet, almost every mark in the academy's
+            # database is this one, and the gap was reported three times as
+            # the app adding an hour to a check-in.
             "checked_in_at": db.now() if status == "present" else None,
+            "checked_in_by": "roster" if status == "present" else None,
             # An absence marked by hand is reception's, not the sweep's, so
             # the stamp saying "the sweep wrote this off" comes off the row
             # either way -- otherwise a client marked present keeps the time

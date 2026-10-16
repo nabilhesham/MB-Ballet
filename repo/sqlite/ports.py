@@ -181,7 +181,8 @@ class SqliteBookings(BookingsPort):
 
     def check_in_booking(self, booking_id, at):
         return self.conn.execute(
-            "UPDATE bookings SET status='present', checked_in_at=?"
+            "UPDATE bookings SET status='present', checked_in_at=?,"
+            "       checked_in_by='kiosk'"
             " WHERE id=? AND status != 'present'", (at, booking_id)).rowcount > 0
 
     def settle_absences(self, now, frozen_sub_ids):
@@ -368,7 +369,8 @@ class SqliteAccess(AccessPort):
 
     def session_roster(self, session_id):
         return [dict(r) for r in self.conn.execute(
-            "SELECT b.id AS booking_id, b.status, b.checked_in_at, b.settled_at,"
+            "SELECT b.id AS booking_id, b.status, b.checked_in_at,"
+            "       b.checked_in_by, b.settled_at,"
             "       cl.id, cl.name_en, cl.phone, cl.photo_path, cl.notes"
             "  FROM bookings b JOIN clients cl ON cl.id = b.client_id"
             " WHERE b.session_id = ? ORDER BY cl.name_en, cl.id",

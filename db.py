@@ -155,6 +155,15 @@ CREATE TABLE IF NOT EXISTS bookings (
     -- "marked absent too early" impossible to settle from the data -- the
     -- stamp beside the session's own end is the whole answer.
     settled_at      INTEGER,
+    -- Which screen wrote `checked_in_at`, because the two mean different
+    -- things and one label was covering both. 'kiosk' is the instant the
+    -- client was at the door (a scan, or a number/name lookup -- both go
+    -- through check_in_booking); 'roster' is the instant somebody pressed
+    -- Present on the session page, which for a roster taken at the end of
+    -- class is an hour or more after the client actually arrived; 'sheet' is
+    -- the seed's derived stamp, which is start+10min and not an observation
+    -- at all. NULL on any row written before this column existed.
+    checked_in_by   TEXT,
     created_at      INTEGER NOT NULL,
     UNIQUE(client_id, session_id)
 );
@@ -451,7 +460,8 @@ def migrate(conn) -> None:
         "sessions": [("ends_at", "INTEGER")],
         "credentials": [("class_id", "INTEGER")],
         "appointments": [("on_time", "TEXT")],
-        "bookings": [("settled_at", "INTEGER")],
+        "bookings": [("settled_at", "INTEGER"),
+                     ("checked_in_by", "TEXT")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
                           ("class_id", "INTEGER"),

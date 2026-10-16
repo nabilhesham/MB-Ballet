@@ -1140,6 +1140,27 @@ system and everything else follows from it:
   either used or it is not, and **both present and absent consume it**, because
   the place was reserved either way.
 
+  **`checked_in_by` says which screen wrote `checked_in_at`, and that one
+  column meaning two things is the whole of "the CHECKED IN column is +1 of
+  the actual time".** There are two writers: `repo.check_in_booking()` stamps
+  the instant the client was **at the door** (a scan, or a number/name
+  lookup — both reach it through `check_in()`), and `set_status(present)`
+  stamps the instant somebody **pressed Present on the session page**, which
+  for a class marked up at the end is an hour or more after the client walked
+  in. The academy has no scanner on the desk yet, so almost every mark in its
+  database is the second kind — which is why the column kept reading late
+  against a clock that was correct to the minute and an offset that was
+  right. Nothing is added to anything: it is a different event.
+
+  The values are `kiosk`, `roster`, and `sheet` (the seed's `starts + 600`,
+  derived rather than observed — the roster sheets record *that* a student
+  attended and never at what minute). NULL on any row written before the
+  column existed, which the screen says rather than guessing. The session
+  page prints a bare time for `kiosk` and prefixes `marked` for anything
+  else, with the tooltip naming which; `set_status` clears both the stamp and
+  this when the mark goes back to absent, or an absent row would carry the
+  screen that marked it present an hour earlier.
+
   **`settled_at` is when the absent sweep wrote the row off, and nothing
   else.** An absence had no timestamp at all — `checked_in_at` stays NULL on
   one — so "marked absent too early" could not be settled from the data, only
@@ -2218,6 +2239,18 @@ remaining server-rendered times (`slot_taken_message`, the length cascade's
 `skipped`) are about a *session's* schedule rather than a stamp the app
 wrote, and name a weekday beside the hour; if either ever starts being
 compared against a screen, it needs the same treatment.
+
+**The column had two writers and one label, and that was the third report.**
+The clock and the offset were both verified correct (`+0300`, right for
+October in Egypt) and the tooltip still read "1 hour 40 minutes after the
+class started" — because `checked_in_at` is written both by a check-in at
+the door and by somebody pressing Present on the session page, and only the
+first is when the client arrived. A roster taken at the end of a 1.5-hour
+class stamps about 1h40 after the start, every time, correctly.
+`bookings.checked_in_by` is what tells them apart (see the data model), and
+the cell now reads `marked 05:10 PM` rather than `05:10 PM` for a mark made
+on that page. **Before reaching for the clock again, read what the cell
+says it is.**
 
 **And the cell's tooltip carries the one reading no clock can distort.**
 `lib/format.js`'s `sinceStart()` is the difference between the stamp and the

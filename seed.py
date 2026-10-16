@@ -355,6 +355,11 @@ def _book_attendance(repo, client_id, sub_id, student, grid, class_name, warn):
             "client_id": client_id, "session_id": session_id,
             "subscription_id": sub_id, "status": status,
             "checked_in_at": starts + 600 if slot.present else None,
+            # start+10min, derived rather than observed: the roster sheets
+            # record *that* a student attended and never at what minute. Say
+            # so in the column rather than letting it read as a door
+            # check-in -- see db.py's note on checked_in_by.
+            "checked_in_by": "sheet" if slot.present else None,
             "created_at": db.now()})
         booked += 1
     return booked
