@@ -1,6 +1,6 @@
 import { useApi } from '../api';
 import { useModal } from '../components/Modal';
-import { fmtISODay } from '../lib/format';
+import { fmtISODay, withSize } from '../lib/format';
 
 /**
  * What is behind TAKEN TODAY: every plan paid on the day and every product
@@ -16,6 +16,13 @@ import { fmtISODay } from '../lib/format';
  * They are different kinds of money with different columns — a plan names
  * a class and a sale names a quantity — and the question reception is
  * answering is usually about one or the other.
+ *
+ * **Each list scrolls on its own** (`.listcap`), rather than letting the
+ * veil scroll the whole modal. Two unbounded lists in one modal means
+ * reaching the second one scrolls the first one past, and the totals at the
+ * top and the Close button at the bottom go with it — on a day with thirty
+ * sales there was no way to see the figure the popup was opened for and the
+ * sale being questioned at the same time.
  */
 export default function TillDetail({ on }) {
   const { close } = useModal();
@@ -53,6 +60,7 @@ export default function TillDetail({ on }) {
               {data.plan_paid.toLocaleString()} EGP
             </span>
           </h4>
+          <div className="listcap">
           {data.plans.length ? data.plans.map(p => row(
             <span key="l">
               <a href={`#/client/${p.client_id}`}>{p.client_name}</a>
@@ -65,6 +73,7 @@ export default function TillDetail({ on }) {
               {p.price == null ? 'no amount' : `${p.price.toLocaleString()} EGP`}
             </span>,
           )) : <div className="empty">No plan was paid for on this day.</div>}
+          </div>
 
           <h4 style={{ margin: '18px 0 2px' }}>
             Products · {data.items} item{data.items === 1 ? '' : 's'}
@@ -72,11 +81,12 @@ export default function TillDetail({ on }) {
               {data.shop_paid.toLocaleString()} EGP
             </span>
           </h4>
+          <div className="listcap">
           {data.products.length ? data.products.map(s => row(
             <span key="l">
               <a href={`#/client/${s.client_id}`}>{s.client_name}</a>
               <span className="sub" style={{ display: 'block' }}>
-                {s.qty} × {s.product_name}
+                {s.qty} × {withSize(s.product_name, s.size)}
               </span>
             </span>,
             <span key="r" className="num" style={{ fontFamily: 'var(--mono)' }}>
@@ -85,6 +95,7 @@ export default function TillDetail({ on }) {
                 : `${((s.qty || 0) * s.unit_price).toLocaleString()} EGP`}
             </span>,
           )) : <div className="empty">Nothing was sold on this day.</div>}
+          </div>
         </>
       )}
       <div className="mact">

@@ -164,6 +164,15 @@ page reception opens most — the same reasoning that moved the attention
 list off it. `on=` defaults to today and takes any ISO day, so the same
 popup answers "what did we take last Thursday" without a second endpoint.
 
+**Each of its two lists scrolls on its own** (`.listcap`), rather than
+letting the veil scroll the whole modal. Two unbounded lists in one popup
+means reaching the second scrolls the first past, and the totals at the top
+and the Close button at the bottom go with it — on a day with thirty sales
+there was no way to see the figure the popup was opened for and the sale
+being questioned at the same time. The cap is kept on narrow screens, the
+rule `.dt-scroll.capped` already follows, and dropped only for print, where
+there is no scrolling to do and a cut-off list is a lost one.
+
 **Cards & renewals asks two questions about one day**
 (`access.day_attention()`), and the day is passed in rather than read off
 the clock — the screen opens on today and reception can set it to any date:
@@ -1331,7 +1340,7 @@ system and everything else follows from it:
   |---|---|
   | `price` | nullable, like a plan's — a thing nobody wrote a price for must not be reported as zero revenue, and the unpriced are counted as their own figure |
   | `paid_on` | the day the money is dated, the same column and the same rule TAKEN TODAY reads for plans. NULL is unpaid and falls out of every day rather than counting as zero in one. Left out of a sale it defaults to **today**: a sale over the counter is paid as it happens, and that is not something reception should have to type |
-  | `stock` | a plain count, not a ledger of movements. The academy counts the box; a stock history nobody queries is schema churn. A sale takes some off and removing the sale puts it back, which is the whole of the arithmetic |
+  | `stock` | a plain count, not a ledger of movements. The academy counts the box; a stock history nobody queries is schema churn. A sale takes some off and removing the sale puts it back, which is the whole of the arithmetic. Since sizes it is the **sum of the product's `product_stock` rows**, stored with exactly one writer — see below |
 
   **`product_sales.unit_price` is copied at the moment of sale and never
   read back through the product.** Re-pricing a leotard next term must not
@@ -1346,6 +1355,65 @@ system and everything else follows from it:
   end — one `SellProduct` modal serves both, since two copies of the
   quantity/price/date logic is how the two would drift). That is the same
   reason booking a session lives on the profile and not on the session page.
+
+  **`product_stock` is sizes, and a product with no sizes has one row with
+  `size` NULL rather than no rows at all.** A leotard comes in 34, 36 and 38
+  and a hairnet comes in none, so sizes are per product — but representing
+  the sizeless case as the *absence* of a shelf would be a second code path
+  for every question the shop asks, and the two would drift the way two
+  rules for one field always do. One NULL row instead: a sale always names a
+  size, the shelf count is always the sum of the rows, and a product can
+  gain sizes and lose them again without anything else knowing which it ever
+  was. `access.set_product_sizes()` is the only thing that rewrites the set
+  and `access.stock_rows()` the only thing that reads it in order.
+
+  The size is **REAL, not INTEGER**, for exactly the reason `clients.age` is:
+  shoe and leotard sizes come in halves, and 34.5 rounded to 34 is the
+  distinction the fitting was made on.
+
+  **`products.stock` is the sum of those rows, stored, with one writer.**
+  `access._sync_stock()` is it, and every path that changes a quantity ends
+  there — selling, unselling, rewriting the sizes. Stored rather than derived
+  because the shop list is one round trip and the figure on every card is
+  the answer to "have we got any left"; **one** writer because two is how
+  `sessions_used` became a column nothing could trust. Never set it from
+  anywhere else.
+
+  **A sale records its size the way it records its price**, and for the same
+  reason: both are receipts. `unsell_product()` puts the thing back on the
+  shelf it came off, and changing which sizes a product comes in next term
+  cannot rewrite what was handed over last month. A size whose row has since
+  gone comes back as a row of its own rather than being added to a different
+  one — inventing the number onto another size is worse than a size nobody
+  stocks showing one in it.
+
+  **A size with sales behind it is kept at zero, never removed.** Zero is
+  "none left", a real answer and the normal end of a run; removing the row
+  would leave a sale pointing at a shelf that is not there and unselling
+  with nowhere to put the thing. `set_product_sizes()` keeps it and **names**
+  it in `kept`, the same treatment `relength_sessions()` gives a session it
+  cannot lengthen — the screen says what it did instead of the save quietly
+  doing less than it said. A quantity *below* what has been sold is allowed:
+  stock is what is in the box now and a sale is a receipt for something that
+  left it, so four in the box after selling six is a fact rather than a
+  contradiction.
+
+  **Selling a sized product without naming a size is refused, with the sizes
+  in the refusal.** The stock the sale decrements belongs to one shelf, and
+  guessing takes a 34 out of the 36 pile — invisibly, since the total is
+  right either way. The kiosk never meets this; the sell modal picks the
+  size from what arrives with the product list, so it is a choice rather
+  than a fetch.
+
+  **An existing product gets its one NULL row at startup, not from
+  `db.migrate()`.** `access.ensure_stock_rows()` runs in `server.py`'s
+  lifespan, fills in any product with no rows at all, and is idempotent by
+  construction — the same shape `images.import_legacy_files()` has, and for
+  the same reason it is not a migration: `migrate()` only ever runs against
+  SQLite and the academy's database may be on Atlas. The standing cost is
+  one read of a small collection per start. The alternative was a script
+  somebody has to remember to run, on an app where a product with no rows
+  cannot be sold at all.
 
 **The class is the spine.** A plan is bought for one class, may only be
 assigned to that class's sessions, and is proved by that class's card:

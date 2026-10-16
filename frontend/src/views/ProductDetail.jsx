@@ -2,11 +2,12 @@ import { useRef } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtISODay, fmtWhen } from '../lib/format';
+import { fmtISODay, fmtSize, fmtWhen, withSize } from '../lib/format';
 import { useConfirm } from '../components/ConfirmModal';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
 import Avatar from '../components/Avatar';
+import { Pill } from '../components/Pill';
 import DataTable from '../components/DataTable';
 import Empty from '../components/Empty';
 import ProductForm from '../modals/ProductForm';
@@ -24,6 +25,11 @@ export default function ProductDetail() {
 
   if (loading) return <Empty>Loading…</Empty>;
   if (error) return <Empty>Could not load: {error.message}</Empty>;
+
+  // The shelf, one row per size. A product with no sizes has exactly one
+  // row with none, so this is empty for it and there is nothing to break
+  // down — IN STOCK beside it is already the whole answer.
+  const sizes = (p.sizes || []).filter(z => z.size != null);
 
   const onPhotoChosen = async e => {
     const file = e.target.files[0];
@@ -56,8 +62,9 @@ export default function ProductDetail() {
     title: 'Remove this sale?',
     message: (
       <>
-        {s.qty} × <b>{p.name}</b> comes off <b>{s.client_name}</b>. The stock
-        goes back on the shelf and the money leaves
+        {s.qty} × <b>{withSize(p.name, s.size)}</b> comes off{' '}
+        <b>{s.client_name}</b>. The stock
+        goes back on the shelf it came off and the money leaves
         {s.paid_on
           ? <> the takings for {fmtISODay(s.paid_on)}</>
           : ' nothing — it was unpaid'}.
@@ -91,8 +98,13 @@ export default function ProductDetail() {
           <div>
             <h1>{p.name}</h1>
             <div className="sub" style={{ fontFamily: 'var(--mono)' }}>{money(p.price)}</div>
-            <div className="row" style={{ marginTop: 8 }}>
+            <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
               <StockPill n={p.stock} />
+              {sizes.map(z => (
+                <Pill key={z.size} kind={z.qty ? 'grey' : 'bad'}>
+                  {fmtSize(z.size)} · {z.qty}
+                </Pill>
+              ))}
             </div>
           </div>
         </div>
@@ -118,6 +130,15 @@ export default function ProductDetail() {
         <div className="box kpi">
           <div className="k">IN STOCK</div>
           <div className="v" style={{ fontSize: 20, paddingTop: 8 }}>{p.stock}</div>
+          {/* The figure is the sum of the sizes and has one writer -- see
+              access._sync_stock(). Naming them under it is what makes "6 in
+              stock" answerable at the counter, where the question is always
+              "have you got a 36". */}
+          <div className="n">
+            {sizes.length
+              ? sizes.map(z => `${fmtSize(z.size)}: ${z.qty}`).join(' · ')
+              : 'one size'}
+          </div>
         </div>
         <div className="box kpi">
           <div className="k">SOLD</div>
@@ -154,6 +175,13 @@ export default function ProductDetail() {
                   <a href={`#/client/${r.client_id}`}>{r.client_name}</a>
                 </div>
               ),
+            },
+            {
+              label: 'SIZE', className: 'num mute',
+              // -1 so "one size" sorts below every real size rather than
+              // among them: it is not a number, and NaN would scatter it.
+              sortValue: r => (r.size == null ? -1 : r.size),
+              cell: r => fmtSize(r.size),
             },
             {
               label: 'QTY', className: 'num', sortValue: r => r.qty,

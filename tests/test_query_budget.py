@@ -60,7 +60,9 @@ class Counted:
                "check_in_booking", "settle_absences", "next_sweep_deadline",
                "active_plans_with_clients", "last_session_ts", "max_starts_at",
                "last_session_ts_bulk",
-               "recent_events", "event_totals", "joined_counts")
+               "recent_events", "event_totals", "joined_counts",
+               "shop_takings", "purchases_between", "plans_paid_between",
+               "client_purchases", "product_buyers")
 
     def __init__(self):
         # Its own MonkeyPatch, not the test's. undo() reverts everything the
@@ -412,11 +414,16 @@ def test_a_client_profile_costs_a_fixed_number_of_queries(client):
     # Was 16 including the sweep, before plan_states() became one call; then
     # 11, since the profile began reading which card images exist -- one find
     # for all of them, which is the right shape and a legitimate extra call.
-    # Six now, and the sweep is no longer among them: `upcoming` and
+    # Six after that, and the sweep is no longer among them: `upcoming` and
     # `history` were two port calls asking about the same bookings, and on
     # Mongo each was a fetch plus an `$in` per table behind it. One
     # client_bookings() answers both.
-    assert len(counted) <= 6, counted.report()
+    #
+    # Seven now, for `client_purchases` -- the profile lists what they bought
+    # in the shop as well as what they attended, which is a different
+    # collection and genuinely one more read. It is one for the whole list
+    # rather than one per purchase, which is the property this file is about.
+    assert len(counted) <= 7, counted.report()
 
 
 def test_a_client_profile_reads_their_bookings_once(client):
@@ -593,3 +600,72 @@ def test_a_bulk_delete_does_not_grow_a_query_per_session(client):
 
     assert len(many) <= len(few), (
         f"10x the sessions cost {len(many) - len(few)} extra calls\n{many.report()}")
+
+
+def _stocked(client, n):
+    """n products, each with three sizes. Two writes rather than 4n — the
+    point is to make the *page* do more work, not the setup."""
+    repo = client.academy.repo
+    with repo.begin():
+        pids = repo.insert_many("products", [
+            {"name": f"Thing {i}", "price": 100.0, "stock": 0, "notes": None,
+             "photo_path": None, "active": 1, "created_at": db.now()}
+            for i in range(n)])
+        repo.insert_many("product_stock", [
+            {"product_id": pid, "size": size, "qty": 2}
+            for pid in pids for size in (34, 36, 38)])
+        for pid in pids:
+            repo.update("products", pid, {"stock": 6})
+    return pids
+
+
+def test_the_shop_list_does_not_grow_a_query_per_product(client):
+    """
+    The sizes ride along with the list, which is what lets the sell modal
+    pick a product and know its shelf without a fetch. One read of
+    `product_stock` for the whole list, not one per product — which is the
+    shape the N+1 would take here, and the only one it could take.
+    """
+    _stocked(client, 2)
+    access.sweep_invalidate()
+    with Counted() as few:
+        client.get("/api/products")
+
+    _stocked(client, 40)
+    access.sweep_invalidate()
+    with Counted() as many:
+        r = client.get("/api/products")
+
+    assert r.status_code == 200 and len(r.json()) >= 42
+    assert all(len(p["sizes"]) == 3 for p in r.json())
+    assert len(many) <= len(few), (
+        f"adding 40 products cost {len(many) - len(few)} extra calls\n{many.report()}")
+
+
+def test_a_product_page_does_not_grow_a_query_per_buyer(client):
+    """Its whole payload — the product, its buyers and its shelf — in a
+    fixed number of reads."""
+    a = client.academy
+    pid = _stocked(client, 1)[0]
+    client.put(f"/api/products/{pid}",
+               json={"name": "Thing 0", "price": 100.0,
+                     "sizes": [{"size": 34, "qty": 50}]})
+    for who in (a.dual, a.solo_ballet):
+        assert client.post(f"/api/products/{pid}/sell",
+                           json={"client_id": who, "size": 34}).status_code == 200
+
+    access.sweep_invalidate()
+    with Counted() as few:
+        r = client.get(f"/api/products/{pid}")
+    assert r.status_code == 200 and len(r.json()["sales"]) == 2
+
+    for _ in range(8):
+        client.post(f"/api/products/{pid}/sell",
+                    json={"client_id": a.dual, "size": 34})
+    access.sweep_invalidate()
+    with Counted() as many:
+        r = client.get(f"/api/products/{pid}")
+
+    assert len(r.json()["sales"]) == 10
+    assert len(many) <= len(few), (
+        f"five times the sales cost {len(many) - len(few)} extra calls\n{many.report()}")

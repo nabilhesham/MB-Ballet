@@ -266,6 +266,15 @@ select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns=
 .modal .mh.bad{color:var(--bad);background:var(--bad-soft);padding:8px 10px;border-radius:8px;margin:8px 0}
 .modal .acts{display:flex;gap:10px;justify-content:flex-end;margin-top:26px;flex-wrap:wrap}
 
+/* A list inside a modal that has no length limit -- the till's plans, the
+   till's sales. The veil's own scroll cannot serve two of them: reaching
+   the second meant scrolling the first past, and on a busy day the totals
+   and the Close button went with it. A cap each keeps both headings, both
+   figures and the button where they are. Kept on narrow screens too (the
+   same rule .dt-scroll.capped follows) and dropped only for print, where
+   there is no scrolling to do and a cut-off list is a lost one. */
+.listcap{max-height:34vh;overflow-y:auto;overscroll-behavior:contain}
+
 /* ---------------------------------------------------------------- calendar */
 /* Events are positioned inside their own day column, not measured against the
    viewport after render. That was the old bug: pixel offsets from
@@ -443,6 +452,7 @@ body:not(.is-admin) .adminonly{display:none}
   .box{box-shadow:none;border-color:#ccc;break-inside:avoid}
   .dt-scroll,.dt-scroll.capped{max-height:none;overflow:visible}
   .dt-scroll.capped thead th{position:static}
+  .listcap{max-height:none;overflow:visible}
 }
 
 @media(prefers-reduced-motion:reduce){

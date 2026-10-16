@@ -117,6 +117,16 @@ async def _lifespan(app):
         moved = images.import_legacy_files(starter, config.legacy_media_dir())
         if moved:
             print(f"  Moved {moved} photo(s) and card(s) into the database.")
+
+        # And every product written down before the shop had sizes gets the
+        # one "no size" shelf row that means it has none. Same shape as the
+        # line above -- idempotent, so it finds nothing on every later start
+        # -- and here rather than in db.migrate() because migrate() only
+        # ever runs against SQLite and this database may be on Atlas. See
+        # access.ensure_stock_rows().
+        shelved = access.ensure_stock_rows(starter)
+        if shelved:
+            print(f"  Gave {shelved} product(s) a shelf to be counted on.")
     finally:
         starter.close()
 

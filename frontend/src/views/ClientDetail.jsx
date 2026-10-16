@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
 import { fetchAnyClassSessions } from '../lib/planSessions';
-import { fmtDate, fmtFull, fmtISO, fmtTime } from '../lib/format';
+import { fmtDate, fmtFull, fmtISO, fmtSize, fmtTime, withSize } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -70,8 +70,9 @@ export default function ClientDetail() {
     title: 'Remove this purchase?',
     message: (
       <>
-        {s.qty} × <b>{s.product_name}</b> comes off {c.name_en}. The stock goes
-        back on the shelf and the money leaves
+        {s.qty} × <b>{withSize(s.product_name, s.size)}</b> comes off{' '}
+        {c.name_en}. The stock goes back on the shelf it came off and the
+        money leaves
         {s.paid_on
           ? <> the takings for {fmtISO(s.paid_on)}</>
           : ' nothing — it was unpaid'}.
@@ -467,6 +468,13 @@ export default function ClientDetail() {
                 cell: r => (
                   <a href={`#/product/${r.product_id}`}>{r.product_name}</a>
                 ),
+              },
+              {
+                label: 'SIZE', className: 'num mute',
+                // -1 keeps "one size" below the real sizes rather than
+                // scattered among them.
+                sortValue: r => (r.size == null ? -1 : r.size),
+                cell: r => fmtSize(r.size),
               },
               {
                 label: 'QTY', className: 'num', sortValue: r => r.qty,

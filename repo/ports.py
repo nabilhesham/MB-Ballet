@@ -157,6 +157,14 @@ class ShopPort(ABC):
     precisely so correcting a rate re-prices the month. Both are
     deliberate, and the difference is whether the old number was a
     *receipt* or an *estimate*.
+
+    **A sale's `size` is a receipt in exactly the same way**, and every one
+    of the three sale lists below carries it. It is the shelf the thing came
+    off -- NULL when the product has no sizes, which is one real row rather
+    than the absence of one (see `product_stock` in db.py) -- so removing a
+    sale can put it back where it came from, and changing which sizes a
+    product comes in next term cannot rewrite what was handed over last
+    month. It is REAL, not an integer: shoe sizes come in halves.
     """
 
     @abstractmethod

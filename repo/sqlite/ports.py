@@ -183,7 +183,7 @@ class SqliteShop(ShopPort):
 
     def purchases_between(self, day_from, day_to):
         return [dict(r) for r in self.conn.execute(
-            "SELECT ps.id, ps.qty, ps.unit_price, ps.paid_on, ps.notes,"
+            "SELECT ps.id, ps.qty, ps.unit_price, ps.size, ps.paid_on, ps.notes,"
             "       ps.product_id, ps.client_id,"
             "       p.name AS product_name, c.name_en AS client_name"
             + self._SALE_JOIN +
@@ -202,7 +202,7 @@ class SqliteShop(ShopPort):
 
     def client_purchases(self, client_id):
         return [dict(r) for r in self.conn.execute(
-            "SELECT ps.id, ps.qty, ps.unit_price, ps.paid_on, ps.notes,"
+            "SELECT ps.id, ps.qty, ps.unit_price, ps.size, ps.paid_on, ps.notes,"
             "       ps.created_at, ps.product_id,"
             "       p.name AS product_name, p.photo_path"
             + self._SALE_JOIN +
@@ -211,7 +211,7 @@ class SqliteShop(ShopPort):
 
     def product_buyers(self, product_id):
         return [dict(r) for r in self.conn.execute(
-            "SELECT ps.id, ps.qty, ps.unit_price, ps.paid_on, ps.notes,"
+            "SELECT ps.id, ps.qty, ps.unit_price, ps.size, ps.paid_on, ps.notes,"
             "       ps.created_at, ps.client_id,"
             "       c.name_en AS client_name, c.phone, c.photo_path"
             + self._SALE_JOIN +

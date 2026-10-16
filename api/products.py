@@ -9,7 +9,7 @@ and the shop tables in db.py.
 """
 
 import os
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel
@@ -23,21 +23,62 @@ import repo as data
 router = APIRouter()
 
 
+class SizeIn(BaseModel):
+    # None is "this product has no sizes" — the same NULL product_stock.size
+    # carries. REAL, not int: shoe sizes come in halves. See
+    # access.set_product_sizes().
+    size: Optional[float] = None
+    qty: int = 0
+
+
 class ProductIn(BaseModel):
     name: str
     price: Optional[float] = None
-    stock: int = 0
     notes: Optional[str] = None
+    # How many of each size are on the shelf. `products.stock` is the sum of
+    # these and has exactly one writer (access._sync_stock) -- see the
+    # products table in db.py. Left out entirely means "leave the shelf
+    # alone", which is what an edit that only renames or re-prices wants;
+    # `[]` means "no sizes", which is a real answer and the one a hairnet
+    # gives.
+    sizes: Optional[List[SizeIn]] = None
+    # Shorthand for a product with no sizes: `stock: 20` is exactly
+    # `sizes: [{"size": null, "qty": 20}]`, which is what a hairnet would
+    # otherwise have to be written as. Not a second source of truth -- it is
+    # translated in `_sizes()` before anything is written, so there is still
+    # one writer -- and giving both at once is refused rather than one of
+    # them quietly winning.
+    stock: Optional[int] = None
 
 
 class SaleIn(BaseModel):
     client_id: int
     qty: int = 1
+    # Which shelf it came off. None is "no size", which is the only thing a
+    # sizeless product has; a product that does come in sizes refuses a sale
+    # that does not name one, rather than guessing which shelf to take it
+    # off. See access.sell_product().
+    size: Optional[float] = None
     # Left out entirely means today — a sale over the counter is paid as it
     # happens. An empty string is unpaid, and falls out of every day's till.
     # See access.sell_product().
     paid_on: Optional[str] = None
     notes: Optional[str] = None
+
+
+def _sizes(body: ProductIn):
+    """
+    The sizes as access.set_product_sizes() wants them: plain dicts, and
+    `[]` for a product with no sizes (which it turns into the one NULL row).
+
+    The `stock` shorthand is resolved here and nowhere else, which is what
+    keeps it from being a second source of truth.
+    """
+    if body.sizes is not None:
+        return [{"size": s.size, "qty": s.qty} for s in body.sizes]
+    if body.stock is not None:
+        return [{"size": None, "qty": body.stock}]
+    return []
 
 
 def _checked(body: ProductIn) -> None:
@@ -51,9 +92,14 @@ def _checked(body: ProductIn) -> None:
         raise HTTPException(400, "A product needs a name.")
     if body.price is not None and body.price < 0:
         raise HTTPException(400, "A price cannot be negative.")
-    if body.stock < 0:
-        raise HTTPException(400, "Stock cannot be negative. Zero is "
-                                 "'none left', which is a real answer.")
+    if body.sizes is not None and body.stock is not None:
+        raise HTTPException(400, "Give the sizes or a plain stock figure, "
+                                 "not both — a plain figure is the same "
+                                 "thing as one row with no size.")
+    # The quantities and the sizes themselves are checked in
+    # access.set_product_sizes(), which is the single copy of those refusals
+    # for the same reason this function is the single copy of these: the
+    # desk's own paths reach it without coming through here.
 
 
 @router.get("/api/products")
@@ -72,23 +118,48 @@ def list_products(status: str = None):
     """
     repo = data.connect()
     try:
-        return repo.find("products",
+        rows = repo.find("products",
                          {"active": 0 if status == "archived" else 1},
                          sort=[("name", 1)])
+        # The shelf, for the whole list in **one** more round trip rather
+        # than one per product. The sell modal picks a product and then needs
+        # its sizes immediately, so sending them with the list is what keeps
+        # that a choice rather than a fetch. `products.stock` is still the
+        # total on the card -- see db.py.
+        shelves = {}
+        for sh in repo.find("product_stock"):
+            shelves.setdefault(sh["product_id"], []).append(sh)
+        for r in rows:
+            r["sizes"] = sorted(
+                shelves.get(r["id"], []),
+                key=lambda x: (x["size"] is not None, x["size"] or 0, x["id"]))
+        return rows
     finally:
         repo.close()
 
 
 @router.post("/api/products")
 def create_product(body: ProductIn):
+    """
+    A new product, with its shelf.
+
+    **Even a product with no sizes gets a shelf row**, the single NULL one
+    that means "no sizes" — so there is never a product the rest of the app
+    cannot sell, and never a second code path for the sizeless case. See
+    access.set_product_sizes().
+    """
     _checked(body)
     repo = data.connect()
     try:
-        pid = repo.insert("products", {
-            "name": body.name.strip(), "price": body.price,
-            "stock": body.stock, "notes": body.notes,
-            "photo_path": None, "active": 1, "created_at": db.now()})
-        return {"id": pid}
+        with repo.begin():
+            pid = repo.insert("products", {
+                "name": body.name.strip(), "price": body.price,
+                "stock": 0, "notes": body.notes,
+                "photo_path": None, "active": 1, "created_at": db.now()})
+            r = access.set_product_sizes(repo, pid, _sizes(body))
+            if not r["ok"]:
+                raise HTTPException(400, r["error"])
+        return {"id": pid, "stock": r["stock"], "sizes": r["sizes"]}
     finally:
         repo.close()
 
@@ -104,6 +175,7 @@ def get_product(pid: int):
             raise HTTPException(404, "no such product")
         p["sales"] = repo.product_buyers(pid)
         p["sold"] = sum(s["qty"] or 0 for s in p["sales"])
+        p["sizes"] = access.stock_rows(repo, pid)
         return p
     finally:
         repo.close()
@@ -121,11 +193,21 @@ def update_product(pid: int, body: ProductIn):
     _checked(body)
     repo = data.connect()
     try:
-        if not repo.update("products", pid, {
-                "name": body.name.strip(), "price": body.price,
-                "stock": body.stock, "notes": body.notes}):
-            raise HTTPException(404, "no such product")
-        return {"ok": True}
+        with repo.begin():
+            if not repo.update("products", pid, {
+                    "name": body.name.strip(), "price": body.price,
+                    "notes": body.notes}):
+                raise HTTPException(404, "no such product")
+            # `sizes` left out means "leave the shelf alone" -- an edit that
+            # only renames or re-prices should not have to restate what is in
+            # the box. `[]` is a real answer and means "no sizes".
+            if body.sizes is None and body.stock is None:
+                return {"ok": True}
+            r = access.set_product_sizes(repo, pid, _sizes(body))
+            if not r["ok"]:
+                raise HTTPException(400, r["error"])
+        return {"ok": True, "stock": r["stock"], "sizes": r["sizes"],
+                "kept": r["kept"]}
     finally:
         repo.close()
 
@@ -182,7 +264,8 @@ def sell(pid: int, body: SaleIn):
     repo = data.connect()
     try:
         r = access.sell_product(repo, pid, body.client_id, qty=body.qty,
-                                paid_on=body.paid_on, notes=body.notes)
+                                paid_on=body.paid_on, notes=body.notes,
+                                size=body.size)
         if not r["ok"]:
             raise HTTPException(400, r["error"])
         return r

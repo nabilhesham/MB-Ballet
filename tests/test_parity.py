@@ -337,25 +337,50 @@ def test_the_shop_agrees(built):
     yday = (_date.today() - timedelta(days=1)).isoformat()
 
     on_both(repos, lambda r: r.insert("products", {
-        "name": "Leotard", "price": 350.0, "stock": 5, "notes": "navy",
+        "name": "Leotard", "price": 350.0, "stock": 0, "notes": "navy",
         "photo_path": None, "active": 1, "created_at": db.now()}), "a product")
     on_both(repos, lambda r: r.insert("products", {
-        "name": "Hairnet", "price": None, "stock": 2, "notes": None,
+        "name": "Hairnet", "price": None, "stock": 0, "notes": None,
         "photo_path": None, "active": 1, "created_at": db.now()}),
         "an unpriced product")
     priced, unpriced = 1, 2
 
+    # The shelf, which is where the quantity actually lives: the leotard
+    # comes in sizes and the hairnet does not, and both have to come back
+    # identically -- the sizeless one is a NULL `size`, which is the value
+    # a Mongo filter and a SQL one disagree about most readily.
+    on_both(repos, lambda r: access.set_product_sizes(
+        r, priced, [{"size": 34, "qty": 2}, {"size": 36.5, "qty": 3}]),
+        "sizes")
+    on_both(repos, lambda r: access.set_product_sizes(
+        r, unpriced, []), "no sizes")
+    on_both(repos, lambda r: access.stock_rows(r, priced), "the shelf")
+    on_both(repos, lambda r: access.stock_rows(r, unpriced), "no shelf sizes")
+    on_both(repos, lambda r: access.set_product_sizes(
+        r, unpriced, [{"size": None, "qty": 2}]), "restock the sizeless one")
+
     on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=2,
-                                                 paid_on=today), "sell")
+                                                 paid_on=today, size=36.5),
+            "sell")
     on_both(repos, lambda r: access.sell_product(r, unpriced, a.solo_ballet,
                                                  qty=1, paid_on=today),
             "sell unpriced")
     on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=1,
-                                                 paid_on=yday), "sell yesterday")
+                                                 paid_on=yday, size=34),
+            "sell yesterday")
+    # The refusals, which are sentences reception reads: one for a sized
+    # product sold without a size, one for a size it does not come in.
+    on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=1,
+                                                 paid_on=today),
+            "sell with no size")
+    on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=1,
+                                                 paid_on=today, size=99),
+            "sell a size it has not got")
     # Unpaid: no paid_on at all, which a bare range comparison matches on
     # MongoDB and never on SQLite — the same trap `takings` carries.
     on_both(repos, lambda r: access.sell_product(r, priced, a.dual, qty=1,
-                                                 paid_on=""), "sell unpaid")
+                                                 paid_on="", size=34),
+            "sell unpaid")
 
     on_both(repos, lambda r: r.get("products", priced), "the stock after")
     on_both(repos, lambda r: r.shop_takings(today, access.next_day(today)),
@@ -380,6 +405,17 @@ def test_the_shop_agrees(built):
         "product_sales", {"product_id": priced, "paid_on": yday}), "the sale")
     on_both(repos, lambda r: access.unsell_product(r, sale["id"]), "unsell")
     on_both(repos, lambda r: r.get("products", priced), "the stock back")
+    on_both(repos, lambda r: access.stock_rows(r, priced),
+            "and back on the size it came off")
+
+    # A product written down before sizes existed: the startup backfill has
+    # to give it the same single NULL row on both backends.
+    on_both(repos, lambda r: r.insert("products", {
+        "name": "Old shoes", "price": 200.0, "stock": 7, "notes": None,
+        "photo_path": None, "active": 1, "created_at": db.now()}), "an old one")
+    on_both(repos, lambda r: access.ensure_stock_rows(r), "ensure_stock_rows")
+    on_both(repos, lambda r: access.stock_rows(r, 3), "its new shelf")
+    on_both(repos, lambda r: access.ensure_stock_rows(r), "and again")
 
 
 def test_booking_and_unbooking_agree(built):

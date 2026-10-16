@@ -25,6 +25,20 @@ def client(academy):
         yield c
 
 
+def _shelf(repo, name, price, qty, sizes=None):
+    """A product straight into the table, with the shelf row every product
+    has. `set_product_sizes()` is how the row is made rather than a second
+    insert here, because it is the one writer of `products.stock` -- see
+    access._sync_stock()."""
+    pid = repo.insert("products", {"name": name, "price": price, "stock": 0,
+                                   "notes": None, "photo_path": None,
+                                   "active": 1, "created_at": db.now()})
+    access.set_product_sizes(repo, pid,
+                             sizes if sizes is not None
+                             else [{"size": None, "qty": qty}])
+    return pid
+
+
 def _product(client, **over):
     body = {"name": "Leotard", "price": 350.0, "stock": 5, "notes": None}
     body.update(over)
@@ -126,9 +140,7 @@ def test_a_sale_defaults_to_paid_today(academy):
     """A sale over the counter is paid as it happens — the common case, and
     the one a receptionist should not have to type."""
     repo = academy.repo
-    pid = repo.insert("products", {"name": "Shoes", "price": 200.0, "stock": 3,
-                                   "notes": None, "photo_path": None,
-                                   "active": 1, "created_at": db.now()})
+    pid = _shelf(repo, "Shoes", 200.0, 3)
 
     r = access.sell_product(repo, pid, academy.dual)
 
@@ -141,9 +153,7 @@ def test_an_explicitly_empty_paid_on_is_unpaid(academy):
     """And falls out of every day's till rather than counting as zero in
     one, exactly as an unpaid plan does."""
     repo = academy.repo
-    pid = repo.insert("products", {"name": "Shoes", "price": 200.0, "stock": 3,
-                                   "notes": None, "photo_path": None,
-                                   "active": 1, "created_at": db.now()})
+    pid = _shelf(repo, "Shoes", 200.0, 3)
 
     r = access.sell_product(repo, pid, academy.dual, paid_on="")
 
