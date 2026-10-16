@@ -421,6 +421,12 @@ academy.spec      PyInstaller build definition, shared by all three build
 run_app.py        Entry point for the packaged build.
 migrate_to_mongo.py  Copies an existing academy.db into MongoDB, preserving
                   every integer id. --dry-run counts first.
+backfill_checkin_source.py  Fills in bookings.checked_in_by on rows written
+                  before that column existed, from the scan log. Counts by
+                  default; --write applies. Goes through repo, so it works
+                  on whichever backend is configured -- which is why it is
+                  a script and not a db.migrate() step. See the bookings
+                  bullet in the data model.
 cleanup.sh        Removes leftovers from earlier versions.
                   (no settings page: the no-show rules it configured are gone)
 sheets/           The academy's own workbooks — the seed reads these.
@@ -1155,7 +1161,21 @@ system and everything else follows from it:
   The values are `kiosk`, `roster`, and `sheet` (the seed's `starts + 600`,
   derived rather than observed — the roster sheets record *that* a student
   attended and never at what minute). NULL on any row written before the
-  column existed, which the screen says rather than guessing. The session
+  column existed, which the screen says rather than guessing — and
+  **"source not recorded" is honest but useless, because the database can
+  already work it out.** `backfill_checkin_source.py` is that pass:
+  `access.check_in()` is the only thing that writes
+  `access_events.confirmed_at` and every kiosk path goes through it, so an
+  event *proves* a desk check-in and the absence of one proves the stamp was
+  not the client arriving — which is the half the question turns on. Telling
+  a roster mark from a seeded one is the one inference, and a narrow one
+  (`starts_at + 600` exactly, to the second, which nothing a person presses
+  lands on); the script prints how many it decided each way rather than
+  doing it quietly, the same rule the sheet reader follows. It is a script
+  rather than a `db.migrate()` step because `migrate()` only ever runs
+  against SQLite and this question is being asked of a database that may be
+  on Atlas. Counting is the default; `--write` applies; running it twice is
+  harmless, since it only touches rows where the column is still unset. The session
   page prints a bare time for `kiosk` and prefixes `marked` for anything
   else, with the tooltip naming which; `set_status` clears both the stamp and
   this when the mark goes back to absent, or an absent row would carry the
