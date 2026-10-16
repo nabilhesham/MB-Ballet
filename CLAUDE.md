@@ -2161,7 +2161,9 @@ emits *keystrokes* — punctuation gets remapped and corrupts the payload. Do no
 switch to base64, UUIDs, or JSON payloads.
 
 **One check-in per day.** A client who scans again on the same calendar day is
-refused with "Already checked in today at HH:MM" and **nothing is deducted**.
+refused with "Already checked in today for <class>", the kiosk appending
+"at HH:MM" from the epoch the refusal carries (see the one-renderer rule
+below), and **nothing is deducted**.
 The earlier rolling ten-minute window was wrong: someone returning after lunch
 would have been charged twice. The guard is at the top of `access._decide()`.
 
@@ -2189,6 +2191,43 @@ having invented a time, not as a mark made the night before; it was reported
 as a bug twice. `lib/format.js`'s `fmtWhen()` is the rule — bare time today,
 `fmtFull` otherwise — and today stays bare on purpose, since a date on every
 row is noise that hides the one row carrying a different day.
+
+**One instant, one renderer, and the second one was a real way to be an hour
+out with a perfectly correct clock.** The already-checked-in refusal used to
+build its own sentence with `time.strftime(…time.localtime(at))` — the
+*server's* timezone — while every screen in the app renders a stamp with the
+browser's `toLocaleTimeString`. Those are the same epoch read through two
+different offsets, so the kiosk's "Already checked in today at 14:14" and
+the session page's `03:14 PM` are one check-in printed twice, an hour apart,
+with nothing wrong with the clock at all. `time.time()` is identical under
+every `TZ`; only the rendering moves:
+
+```
+Africa/Cairo   epoch=1792173355  renders 20:55  offset=+0300
+Etc/GMT-2      epoch=1792173355  renders 19:55  offset=+0200
+```
+
+Egypt is `+03:00` from the last Friday of April to the last Thursday of
+October, so the app under WSL with no `TZ` (or stale tzdata) beside a
+browser on Windows that has the rule is exactly that shape — which is why
+"the CHECKED IN column is +1 of the actual time" kept being reported
+against a clock the skew check was happy with. `_deny()` therefore carries
+the epoch (`checked_in_at`) and `reception.html` renders it with its own
+`fmtTime`: **a time in a refusal travels as a number, never as text.** The
+remaining server-rendered times (`slot_taken_message`, the length cascade's
+`skipped`) are about a *session's* schedule rather than a stamp the app
+wrote, and name a weekday beside the hour; if either ever starts being
+compared against a screen, it needs the same treatment.
+
+**And the cell's tooltip carries the one reading no clock can distort.**
+`lib/format.js`'s `sinceStart()` is the difference between the stamp and the
+session's own `starts_at` — two epochs, so no offset survives it — rendered
+as "1 hour 2 minutes after the class started". An absolute time is only as
+true as the clock and the zone printing it, and three reports of this have
+had no way to tell a fast clock from a misread one from the screen; against
+a client who walked in two minutes late, that sentence has nothing left to
+interpret. It is a tooltip rather than a column because every ordinary row
+would carry it and the thing people scan is the time.
 
 **A refusal has two temperatures.** `_deny()` carries a `severity`: `"stop"`
 is the default and reads red, `"warn"` reads amber and is what the
@@ -2557,7 +2596,9 @@ session and nothing else.
 but the slot is already spent, which is the point: the card has just proved
 this person is a member who has been admitted to a class today. Somebody who
 steps out to a car and comes back scans again, gets the amber "Already
-checked in today at 15:22 — nothing was deducted", and used to stand at a
+checked in today for Ballet Level 8 at 15:22 — nothing was deducted" (the
+hour rendered by the kiosk from the epoch the refusal carries, never by the
+server — see the one-renderer rule above), and used to stand at a
 locked door while reception worked out that the only thing left was to get up
 and open it by hand. The code is the only thing `reception.html` branches on,
 exactly as with MANUAL CHECK-IN, and `tests/test_access.py` holds that the

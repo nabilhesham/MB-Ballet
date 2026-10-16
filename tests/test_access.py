@@ -6,6 +6,7 @@ changed is that the subjects are built by tests/fixtures.py rather than found
 by querying whichever term was last seeded.
 """
 
+import re
 from datetime import date, timedelta
 
 import access
@@ -89,6 +90,32 @@ def test_a_second_scan_carries_the_code_the_door_opens_on(academy):
 
     second = access.verify(repo, academy.dual_ballet_card)
     assert second["code"] == "already_checked_in", second
+
+
+def test_the_second_scan_sends_the_instant_not_a_rendered_time(academy):
+    """
+    One instant, one renderer.
+
+    This refusal used to format the time with the *server's* timezone
+    (`time.strftime`), while every screen in the app renders a stamp with the
+    browser's. A server process an hour off the browser -- the app under WSL
+    with no TZ while the browser carries Egypt's summer offset is exactly
+    that shape -- therefore printed one check-in as two different times on
+    two screens, with the clock perfectly correct, and it reads as the app
+    adding an hour when it saves.
+    """
+    repo = academy.repo
+    first = access.verify(repo, academy.dual_ballet_card)
+    access.check_in(repo, first["event_id"])
+
+    second = access.verify(repo, academy.dual_ballet_card)
+
+    # The epoch travels, and it is the one on the booking.
+    assert isinstance(second["checked_in_at"], int)
+    assert abs(second["checked_in_at"] - db.now()) < 120
+    # The sentence names no clock time at all -- the kiosk appends it.
+    assert not re.search(r"\d{1,2}:\d{2}", second["message"]), second["message"]
+    assert "Already checked in today" in second["message"]
 
 
 def test_another_refusal_does_not_carry_it(academy):

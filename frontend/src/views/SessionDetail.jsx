@@ -1,7 +1,7 @@
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtTime, fmtWhen, hrs } from '../lib/format';
+import { fmtFull, fmtTime, fmtWhen, hrs, sinceStart } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -221,8 +221,22 @@ export default function SessionDetail() {
               // whole of what three reports of "marked absent too early" had
               // no way to show. Blank on an absence marked by hand or born
               // with a back-dated plan — neither is the sweep's.
-              cell: r => (r.checked_in_at ? fmtWhen(r.checked_in_at)
-                : r.settled_at ? `absent ${fmtWhen(r.settled_at)}` : '—'),
+              //
+              // The tooltip carries the full stamp and how long after this
+              // session started it falls, which is the one reading a wrong
+              // timezone cannot change and a wrong clock cannot hide — see
+              // lib/format.js's sinceStart().
+              cell: (r) => {
+                const ts = r.checked_in_at || r.settled_at;
+                const text = r.checked_in_at ? fmtWhen(r.checked_in_at)
+                  : r.settled_at ? `absent ${fmtWhen(r.settled_at)}` : '—';
+                if (!ts) return text;
+                return (
+                  <span title={`${fmtFull(ts)} — ${sinceStart(ts, s.starts_at)}`}>
+                    {text}
+                  </span>
+                );
+              },
             },
             {
               /* The client's own note. Same column as the Clients list and
