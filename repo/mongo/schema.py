@@ -70,6 +70,14 @@ FIELDS = {
         "status": "booked", "checked_in_at": None, "checked_in_by": None,
         "settled_at": None, "created_at": None,
     },
+    "products": {
+        "name": None, "price": None, "stock": 0, "notes": None,
+        "photo_path": None, "active": 1, "created_at": None,
+    },
+    "product_sales": {
+        "product_id": None, "client_id": None, "qty": 1, "unit_price": None,
+        "paid_on": None, "notes": None, "created_at": None,
+    },
     "images": {
         "kind": None, "owner_id": None, "variant": "", "mime": None,
         "data": None, "updated_at": None,
@@ -112,6 +120,8 @@ INDEXES = {
                  (["class_id"], False), (["instructor_id"], False)],
     "subscriptions": [(["client_id", "class_id", "active"], False),
                       (["starts_on"], False), (["expires_on"], False)],
+    "product_sales": [(["client_id"], False), (["product_id"], False),
+                      (["paid_on"], False)],
     "bookings": [(["client_id", "session_id"], True), (["client_id"], False),
                  (["session_id"], False), (["subscription_id"], False),
                  # settle_absences() matches status first, then a session id

@@ -40,6 +40,7 @@ from api.access_routes import router as access_router
 from api.dashboard import router as dashboard_router
 from api.images import router as images_router
 from api.appointments import router as appointments_router
+from api.products import router as products_router
 
 # --------------------------------------------------------------------------
 # Paths.
@@ -173,6 +174,7 @@ app.include_router(access_router)
 app.include_router(dashboard_router)
 app.include_router(images_router)
 app.include_router(appointments_router)
+app.include_router(products_router)
 
 
 def _connect_or_explain():

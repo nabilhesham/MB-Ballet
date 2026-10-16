@@ -28,11 +28,13 @@ from . import ids, schema
 from .client import get_client
 from .filters import compile_filter, compile_sort, rename_id
 from .ports import (MongoAccess, MongoBookings, MongoClasses, MongoClients,
-                    MongoEvents, MongoInstructors, MongoPlans, MongoSessions)
+                    MongoEvents, MongoInstructors, MongoPlans, MongoSessions,
+                    MongoShop)
 
 
 class MongoRepo(MongoAccess, MongoSessions, MongoBookings, MongoClasses,
-                MongoClients, MongoInstructors, MongoPlans, MongoEvents, Repo):
+                MongoClients, MongoInstructors, MongoPlans, MongoEvents,
+                MongoShop, Repo):
 
     def __init__(self, uri: str, database: str):
         self.client = get_client(uri)

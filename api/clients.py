@@ -282,6 +282,15 @@ def get_client(cid: int):
                                "subscription_id", "session_id", "starts_at",
                                "class_name", "colour", "instructor_name")}
             for r in past[:HISTORY_LIMIT]]
+
+        # What they have bought from the shop. One round trip, and on the
+        # profile rather than anywhere else because the profile is where a
+        # sale is made from and where a wrong one is removed -- the same
+        # reason booking a session lives here and not on the session page.
+        c["purchases"] = repo.client_purchases(cid)
+        c["spent_on_products"] = round(
+            sum((s["qty"] or 0) * (s["unit_price"] or 0)
+                for s in c["purchases"]), 2)
         return c
     finally:
         repo.close()

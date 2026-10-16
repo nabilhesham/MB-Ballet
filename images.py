@@ -29,6 +29,7 @@ from PIL import Image
 
 CLIENT_PHOTO = "client_photo"
 INSTRUCTOR_PHOTO = "instructor_photo"
+PRODUCT_PHOTO = "product_photo"
 CARD = "card"
 
 # What a photo is stored at. The largest it is ever displayed is the kiosk's

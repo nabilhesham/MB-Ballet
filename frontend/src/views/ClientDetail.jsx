@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
 import { fetchAnyClassSessions } from '../lib/planSessions';
-import { fmtDate, fmtFull, fmtTime } from '../lib/format';
+import { fmtDate, fmtFull, fmtISO, fmtTime } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -20,6 +20,7 @@ import EditAttendance from '../modals/EditAttendance';
 import MoveBooking from '../modals/MoveBooking';
 import FreezePlan from '../modals/FreezePlan';
 import EditPlan from '../modals/EditPlan';
+import SellProduct from '../modals/SellProduct';
 
 export default function ClientDetail() {
   const { id } = useParams();
@@ -60,6 +61,30 @@ export default function ClientDetail() {
   };
 
   // The button refuses for the same reason the endpoint does, and says so
+  /* Removing a sale is a real delete, and the confirm says what moves:
+     the stock goes back on the shelf and the money leaves that day's
+     takings. A sale has no attendance behind it, which is what makes it
+     the appointments exception rather than a hole in the deletion policy —
+     see access.unsell_product(). */
+  const removePurchase = s => confirm({
+    title: 'Remove this purchase?',
+    message: (
+      <>
+        {s.qty} × <b>{s.product_name}</b> comes off {c.name_en}. The stock goes
+        back on the shelf and the money leaves
+        {s.paid_on
+          ? <> the takings for {fmtISO(s.paid_on)}</>
+          : ' nothing — it was unpaid'}.
+      </>
+    ),
+    label: 'Remove',
+    onConfirm: async () => {
+      await api(`/product-sales/${s.id}`, { method: 'DELETE' });
+      toast('Purchase removed');
+      reload();
+    },
+  });
+
   // without a round-trip — the profile already knows the count. The server
   // guard is still the authority; this only saves reception a click.
   const archive = () => {
@@ -410,6 +435,66 @@ export default function ClientDetail() {
       }) : (
         <div className="box"><Empty title="No active plan">Add one to book sessions and issue a card.</Empty></div>
       )}
+
+      {/* The shop. On the profile because this is where a sale is made from
+          and where a wrong one is removed -- the same reason booking a
+          session lives here and not on the session page. Removing a sale
+          puts the stock back and takes the money out of that day's till. */}
+      <div style={{ marginTop: 8 }}>
+        <div className="head" style={{ marginBottom: 6 }}>
+          <div>
+            <h2 style={{ margin: 0 }}>Products bought</h2>
+            <div className="sub">
+              {c.purchases.length
+                ? `${c.purchases.length} purchase${c.purchases.length === 1 ? '' : 's'}`
+                  + ` · ${c.spent_on_products.toLocaleString()} EGP`
+                : 'Nothing bought from the shop yet.'}
+            </div>
+          </div>
+          <button onClick={() => open(
+            <SellProduct client={c} onSaved={reload} />,
+          )}>
+            Buy a product
+          </button>
+        </div>
+        <div className="box pad0 dt-host">
+          <DataTable
+            rows={c.purchases} rowKey={r => r.id}
+            empty="Nothing bought from the shop yet."
+            columns={[
+              {
+                label: 'PRODUCT', sortValue: r => r.product_name || '',
+                cell: r => (
+                  <a href={`#/product/${r.product_id}`}>{r.product_name}</a>
+                ),
+              },
+              {
+                label: 'QTY', className: 'num', sortValue: r => r.qty,
+                cell: r => r.qty,
+              },
+              {
+                label: 'PAID', className: 'num mute', sortValue: r => r.unit_price ?? -1,
+                cell: r => (r.unit_price == null
+                  ? 'no price'
+                  : `${((r.qty || 0) * r.unit_price).toLocaleString()} EGP`),
+              },
+              {
+                label: 'ON', className: 'mute', hideSm: true,
+                sortValue: r => r.paid_on || '',
+                cell: r => (r.paid_on ? fmtISO(r.paid_on) : 'unpaid'),
+              },
+              {
+                label: '', sortable: false, className: 'right',
+                cell: r => (
+                  <button className="sm danger" onClick={() => removePurchase(r)}>
+                    Remove
+                  </button>
+                ),
+              },
+            ]}
+          />
+        </div>
+      </div>
 
       <div className="grid g2" style={{ marginTop: 8 }}>
         <div>

@@ -37,7 +37,8 @@ from datetime import date as _date
 import identity
 
 from ..ports import (AccessPort, BookingsPort, ClassesPort, ClientsPort,
-                     EventsPort, InstructorsPort, PlansPort, SessionsPort)
+                     EventsPort, InstructorsPort, PlansPort, SessionsPort,
+                     ShopPort)
 from . import schema
 from .filters import compile_filter, rename_id
 
@@ -218,9 +219,14 @@ class MongoClasses(ClassesPort, _Helpers):
 
     def _plan_ends(self, sessions=None, bookings=None, sub_ids=None):
         """
-        {subscription_id: the last day it covers}. The Python counterpart of
-        the SQLite _PLAN_END CTE; access.plan_end() is the same rule for a
-        single plan.
+        `({subscription_id: the last day it covers}, {subscription_id:
+        its class_id})`. The Python counterpart of the SQLite _PLAN_END CTE;
+        access.plan_end() is the same rule for a single plan.
+
+        The class travels with the end because both callers need it for the
+        same reason -- membership is the booking's *plan's* class, not the
+        session's (see ports.py's class_students()) -- and both branches
+        below already read the subscription, so it costs nothing.
 
         **Two ways in, because the two callers are in genuinely different
         positions, and both are one round trip.**
@@ -246,14 +252,15 @@ class MongoClasses(ClassesPort, _Helpers):
                     continue
                 if ts > last.get(sub, 0):
                     last[sub] = ts
-            return {s["id"]: self._plan_end(s.get("expires_on"), last.get(s["id"]))
-                    for s in self._projected("subscriptions", ["expires_on"])}
+            subs = self._projected("subscriptions", ["expires_on", "class_id"])
+            return ({s["id"]: self._plan_end(s.get("expires_on"), last.get(s["id"]))
+                     for s in subs},
+                    {s["id"]: s.get("class_id") for s in subs})
 
         ids = sorted({s for s in (sub_ids or ()) if s is not None})
         if not ids:
-            return {}
-        return {d["_id"]: self._plan_end(d.get("expires_on"), d.get("last_ts"))
-                for d in self._agg("subscriptions", [
+            return {}, {}
+        rows = list(self._agg("subscriptions", [
                     {"$match": {"_id": {"$in": ids}}},
                     {"$lookup": {
                         "from": "bookings", "localField": "_id",
@@ -264,9 +271,12 @@ class MongoClasses(ClassesPort, _Helpers):
                                          "foreignField": "_id", "as": "_s"}},
                             {"$project": {
                                 "starts_at": {"$first": "$_s.starts_at"}}}]}},
-                    {"$project": {"expires_on": 1,
+                    {"$project": {"expires_on": 1, "class_id": 1,
                                   "last_ts": {"$max": "$_b.starts_at"}}},
-                ])}
+                ]))
+        return ({d["_id"]: self._plan_end(d.get("expires_on"), d.get("last_ts"))
+                 for d in rows},
+                {d["_id"]: d.get("class_id") for d in rows})
 
     def _booking_end(self, booking, plan_ends, starts):
         """
@@ -303,11 +313,18 @@ class MongoClasses(ClassesPort, _Helpers):
             "bookings", ["client_id", "session_id", "subscription_id"])
         # Both collections are already in hand, so the last session per plan
         # is arithmetic rather than a query -- see _plan_ends().
-        plan_ends = self._plan_ends(sessions, bookings)
+        plan_ends, sub_class = self._plan_ends(sessions, bookings)
         latest = {}
         for b in bookings:
             cid = sess_class.get(b["session_id"])
             if cid is None:
+                continue
+            # The booking's plan's class, not the session's: a slot moved
+            # into this class to cover a missed one elsewhere is attendance,
+            # not membership. Same rule as class_students(), which it has to
+            # be -- see the cutoff note above.
+            sub = b.get("subscription_id")
+            if sub is not None and sub_class.get(sub) != cid:
                 continue
             k = (cid, b["client_id"])
             end = self._booking_end(b, plan_ends, starts)
@@ -340,8 +357,12 @@ class MongoClasses(ClassesPort, _Helpers):
         # The bookings first, so the plan ends can be asked for only the
         # plans that actually fund this class -- see _plan_ends().
         booked = self._rows("bookings", {"session_id": {"in": sorted(mine)}})
-        plan_ends = self._plan_ends(
+        plan_ends, sub_class = self._plan_ends(
             sub_ids=[b.get("subscription_id") for b in booked])
+        # Membership is the booking's *plan's* class -- see ports.py.
+        booked = [b for b in booked
+                  if b.get("subscription_id") is None
+                  or sub_class.get(b["subscription_id"]) == class_id]
         tally, latest = {}, {}
         for b in booked:
             t = tally.setdefault(b["client_id"], {"slots": 0, "attended": 0})
@@ -365,6 +386,119 @@ class MongoClasses(ClassesPort, _Helpers):
                 and latest.get(cid, "") >= lapsed_before]
         rows.sort(key=lambda r: (r["name_en"] or "", r["id"]))
         return rows
+
+
+class MongoShop(ShopPort, _Helpers):
+
+    # A sale's line total. `$multiply` over a null is null and `$sum`
+    # ignores it, which is exactly the treatment an unpriced line needs:
+    # out of the money, counted separately. COALESCE(SUM(..)) does the same
+    # on the other side.
+    _LINE = {"$multiply": ["$qty", "$unit_price"]}
+
+    # Every sale's own columns, shared by the three questions below. What
+    # differs is which *name* each one needs joined on, so the pipeline
+    # takes the extra projection rather than returning a superset: a field
+    # the SQLite side does not return must not arrive from this one either,
+    # since tests/test_parity.py compares the dicts and not the queries.
+    _BASE = {"id": "$_id", "_id": 0,
+             "qty": {"$ifNull": ["$qty", 1]},
+             "unit_price": {"$ifNull": ["$unit_price", None]},
+             "paid_on": {"$ifNull": ["$paid_on", None]},
+             "notes": {"$ifNull": ["$notes", None]}}
+
+    _CREATED = {"created_at": {"$ifNull": ["$created_at", None]}}
+
+    def _sales(self, match, extra, sort, active_only=False):
+        """
+        One sale list: match, join the product and the client by primary
+        key, project `_BASE` plus whatever this question also names.
+
+        `active_only` drops an archived client, which is what the SQLite
+        side's `c.active=1` does -- the two lists that are about money
+        carry it and the two that are about one row do not, because a
+        profile has to go on showing its own purchases.
+        """
+        stages = [
+            {"$match": match},
+            {"$lookup": {"from": "products", "localField": "product_id",
+                         "foreignField": "_id", "as": "_p"}},
+            {"$lookup": {"from": "clients", "localField": "client_id",
+                         "foreignField": "_id", "as": "_c"}},
+        ]
+        if active_only:
+            stages.append({"$match": {"_c.active": 1}})
+        stages += [{"$project": {**self._BASE, **extra}}, {"$sort": sort}]
+        return self._agg("product_sales", stages)
+
+    def shop_takings(self, day_from, day_to):
+        rows = self._agg("product_sales", [
+            {"$match": {"paid_on": {"$gte": day_from, "$lt": day_to,
+                                    "$ne": None}}},
+            {"$lookup": {"from": "clients", "localField": "client_id",
+                         "foreignField": "_id", "as": "_c"}},
+            {"$match": {"_c.active": 1}},
+            {"$group": {"_id": None,
+                        "paid": {"$sum": self._LINE},
+                        "items": {"$sum": "$qty"},
+                        "sales": {"$sum": 1},
+                        "unpriced": {"$sum": {"$cond": [
+                            {"$eq": [{"$ifNull": ["$unit_price", None]}, None]},
+                            1, 0]}}}},
+        ])
+        # `$group` over no rows is no group at all, where SQL's SUM is NULL.
+        # Both have to arrive as numbers -- see ports.py.
+        r = rows[0] if rows else {}
+        return {"paid": r.get("paid") or 0, "items": r.get("items") or 0,
+                "sales": r.get("sales") or 0,
+                "unpriced": r.get("unpriced") or 0}
+
+    def purchases_between(self, day_from, day_to):
+        return self._sales(
+            {"paid_on": {"$gte": day_from, "$lt": day_to, "$ne": None}},
+            {"product_id": "$product_id", "client_id": "$client_id",
+             "product_name": {"$ifNull": [{"$first": "$_p.name"}, None]},
+             "client_name": {"$ifNull": [{"$first": "$_c.name_en"}, None]}},
+            {"client_name": 1, "id": 1}, active_only=True)
+
+    def plans_paid_between(self, day_from, day_to):
+        return self._agg("subscriptions", [
+            {"$match": {"paid_on": {"$gte": day_from, "$lt": day_to,
+                                    "$ne": None}}},
+            {"$lookup": {"from": "clients", "localField": "client_id",
+                         "foreignField": "_id", "as": "_c"}},
+            {"$match": {"_c.active": 1}},
+            {"$lookup": {"from": "classes", "localField": "class_id",
+                         "foreignField": "_id", "as": "_k"}},
+            {"$project": {
+                "id": "$_id", "_id": 0,
+                "plan": {"$ifNull": ["$plan", None]},
+                "price": {"$ifNull": ["$price", None]},
+                "paid_on": {"$ifNull": ["$paid_on", None]},
+                "sessions_total": {"$ifNull": ["$sessions_total", 0]},
+                "client_id": "$client_id",
+                "client_name": {"$ifNull": [{"$first": "$_c.name_en"}, None]},
+                "class_name": {"$ifNull": [{"$first": "$_k.name"}, None]},
+                "colour": {"$ifNull": [{"$first": "$_k.colour"}, None]}}},
+            {"$sort": {"client_name": 1, "id": 1}},
+        ])
+
+    def client_purchases(self, client_id):
+        return self._sales(
+            {"client_id": client_id},
+            {**self._CREATED, "product_id": "$product_id",
+             "product_name": {"$ifNull": [{"$first": "$_p.name"}, None]},
+             "photo_path": {"$ifNull": [{"$first": "$_p.photo_path"}, None]}},
+            {"created_at": -1, "id": -1})
+
+    def product_buyers(self, product_id):
+        return self._sales(
+            {"product_id": product_id},
+            {**self._CREATED, "client_id": "$client_id",
+             "client_name": {"$ifNull": [{"$first": "$_c.name_en"}, None]},
+             "phone": {"$ifNull": [{"$first": "$_c.phone"}, None]},
+             "photo_path": {"$ifNull": [{"$first": "$_c.photo_path"}, None]}},
+            {"created_at": -1, "id": -1})
 
 
 class MongoBookings(BookingsPort, _Helpers):

@@ -4,7 +4,7 @@ import datetime
 import time
 from datetime import date
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 import access
 import db
@@ -51,6 +51,49 @@ def clock():
             "offset_minutes": int(off.total_seconds() // 60) if off else 0}
 
 
+@router.get("/api/dashboard/till")
+def till(on: str = None):
+    """
+    What is behind TAKEN TODAY: every plan paid on that day and every
+    product sold on it, named.
+
+    **A drill-down rather than part of the dashboard payload.** The card is
+    two numbers; the list behind it is two queries nobody needs until they
+    ask, and the landing page is the one reception opens most — the same
+    reasoning that moved the attention list off it (see CLAUDE.md). It is
+    fetched when the popup opens.
+
+    `on` defaults to today and is otherwise any ISO day, so the same popup
+    answers "what did we take last Thursday" without a second endpoint.
+    """
+    day = on or date.today().isoformat()
+    try:
+        date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(400, "Pick a day.")
+    repo = data.connect()
+    try:
+        tomorrow = access.next_day(day)
+        plans = repo.plans_paid_between(day, tomorrow)
+        products = repo.purchases_between(day, tomorrow)
+        # Summed here from the rows already in hand rather than asked for
+        # again: day_income() answers the same two figures for the card, and
+        # a second aggregate would be a round trip spent on arithmetic.
+        plan_paid = sum(p["price"] or 0 for p in plans)
+        shop_paid = sum((s["qty"] or 0) * (s["unit_price"] or 0)
+                        for s in products)
+        return {"on": day, "plans": plans, "products": products,
+                "plan_paid": round(plan_paid, 2),
+                "shop_paid": round(shop_paid, 2),
+                "paid": round(plan_paid + shop_paid, 2),
+                "plan_unpriced": sum(1 for p in plans if p["price"] is None),
+                "shop_unpriced": sum(1 for s in products
+                                     if s["unit_price"] is None),
+                "items": sum(s["qty"] or 0 for s in products)}
+    finally:
+        repo.close()
+
+
 @router.get("/api/dashboard")
 def dashboard(month_from: str = None, month_to: str = None):
     """
@@ -81,9 +124,17 @@ def dashboard(month_from: str = None, month_to: str = None):
         stats = {
             **{f"exp_{k}": v for k, v in exp.items()},
             **{f"mo_{k}": v for k, v in intake.items()},
+            # The till is plans *plus* the shop now, so the card shows the
+            # total and the two halves under it. Both come out of one
+            # day_income() call -- see access.day_income().
             "day_income": income["paid"],
             "day_plans": income["plans"],
             "day_unpriced": income["unpriced"],
+            "day_plan_paid": income["plan_paid"],
+            "day_shop_paid": income["shop_paid"],
+            "day_shop_sales": income["shop_sales"],
+            "day_shop_items": income["shop_items"],
+            "day_shop_unpriced": income["shop_unpriced"],
             "scans_today": events["scans"],
             "denied_today": events["denied"],
             "active_clients": repo.count("clients", {"active": 1}),

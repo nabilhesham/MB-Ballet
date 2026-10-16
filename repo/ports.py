@@ -94,7 +94,9 @@ class ClassesPort(ABC):
 
         `lapsed_before` applies the same cutoff class_students() does, and
         has to: a list saying 12 students beside a page showing 8 is worse
-        than either number on its own.
+        than either number on its own. The same goes for the plan's-class
+        rule that one documents — a cross-class visitor is left out of both
+        or neither.
         """
 
     @abstractmethod
@@ -118,7 +120,82 @@ class ClassesPort(ABC):
         attendance stay exactly where they are, which is what keeps this
         reversible and keeps the history intact. A client with a live or
         recently-ended plan in the class is unaffected.
+
+        **Membership is the booking's *plan's* class, not the session's.**
+        A slot may be pointed at any class's session once it is sold (see
+        the cross-class corrections in CLAUDE.md) -- that is how "she missed
+        Ballet on Tuesday and came to Flexibility on Wednesday instead" is
+        recorded without selling a second plan. The session she attended is
+        a Flexibility session, so counting bookings by the session's class
+        put her on the Flexibility roster as a student of a class she has
+        never bought: a visitor covering one missed hour, listed beside
+        twelve people who come every week. Nothing else about that slot
+        changes -- the deduction, the attendance mark, the plan it belongs
+        to and the session's own roster are all exactly as they were, and
+        her profile still shows she attended it. One filter, on one read.
+
+        A booking with **no** plan behind it (older rows, `subscription_id`
+        NULL) counts, because the session's class is the only answer there
+        is for it -- the same fallback the end date above makes.
         """
+
+
+class ShopPort(ABC):
+    """
+    The shop: what the academy sells over the counter, and who bought it.
+
+    Five named questions rather than one method with a filter, for the same
+    reason the three booking lists are three (see `_BOOKING_JOIN` in
+    repo/sqlite/ports.py): they share a join and not their columns, and a
+    caller asking "what did one client buy" wants different fields from one
+    asking "what did the till take today".
+
+    **A sale's `unit_price` is what it cost on the day**, copied from the
+    product when the sale was written down and never read back through it.
+    Re-pricing a leotard must not rewrite what last month's till took --
+    the opposite of instructor pay, which is `hours x rate` at read time
+    precisely so correcting a rate re-prices the month. Both are
+    deliberate, and the difference is whether the old number was a
+    *receipt* or an *estimate*.
+    """
+
+    @abstractmethod
+    def shop_takings(self, day_from: str, day_to: str) -> dict:
+        """
+        `{"paid", "sales", "items", "unpriced"}` over sales dated in
+        `[day_from, day_to)`, on `paid_on` — the same column and the same
+        half-open window `takings()` uses for plans, so one rule governs
+        the whole till. `paid` is the sum of `qty x unit_price`, `items` the
+        sum of `qty`, `sales` the number of lines, and `unpriced` the lines
+        whose product had no price written down: counted and reported, never
+        folded in as zero.
+
+        Aggregates are always numbers, never None.
+        """
+
+    @abstractmethod
+    def purchases_between(self, day_from: str, day_to: str) -> list:
+        """
+        Every sale dated in that window, with the buyer and the product
+        named — what the till's drill-down lists. Ordered by the client's
+        name then the sale's id.
+        """
+
+    @abstractmethod
+    def plans_paid_between(self, day_from: str, day_to: str) -> list:
+        """
+        Every plan whose `paid_on` falls in that window, with the client and
+        the class named. The other half of the same drill-down: the till is
+        plans plus the shop, so the list behind it has to be too.
+        """
+
+    @abstractmethod
+    def client_purchases(self, client_id: int) -> list:
+        """One client's sales, newest first, with the product named."""
+
+    @abstractmethod
+    def product_buyers(self, product_id: int) -> list:
+        """One product's sales, newest first, with the client named."""
 
 
 class BookingsPort(ABC):

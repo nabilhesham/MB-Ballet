@@ -4,8 +4,10 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useApi } from '../api';
 import { fmtTime, monthLabel, thisMonth } from '../lib/format';
 import DataTable from '../components/DataTable';
+import { useModal } from '../components/Modal';
 import { Pill } from '../components/Pill';
 import Empty from '../components/Empty';
+import TillDetail from '../modals/TillDetail';
 
 export default function Dashboard() {
   // The intake period, and only it: everything else on this page is about
@@ -21,6 +23,7 @@ export default function Dashboard() {
   const { data: d, loading, error } =
     useApi(`/dashboard?month_from=${period.from}&month_to=${period.to}`);
   const nav = useNavigate();
+  const { open } = useModal();
 
   const dirty = draft.from !== period.from || draft.to !== period.to;
   const onThisMonth = period.from === defaultFrom && period.to === defaultFrom;
@@ -78,17 +81,29 @@ export default function Dashboard() {
             Thursday's money appears here on Thursday. That is why it sits in
             this row, with the rest of today, and not beside the two
             period figures further down. */}
-        <div className="box kpi">
+        {/* The total is plans *plus* the shop, with the two halves and their
+            unit counts under it: those are different kinds of money and the
+            one figure used to be only half the answer. Clicking it opens the
+            list of who paid what — see TillDetail. */}
+        <div className="box kpi tap" onClick={() => open(<TillDetail on={d.today} />)}>
           <div className="k">TAKEN TODAY</div>
           <div className="v" style={{ fontSize: 22, paddingTop: 6, color: 'var(--brand-deep)' }}>
             {s.day_income.toLocaleString()}{' '}
             <span style={{ fontSize: 12, color: 'var(--mute)' }}>EGP</span>
           </div>
           <div className="n">
+            {s.day_plan_paid.toLocaleString()} EGP ·{' '}
             {s.day_plans
-              ? `${s.day_plans} plan${s.day_plans === 1 ? '' : 's'} paid today`
-              : 'nothing paid yet today'}
-            {s.day_unpriced ? ` · ${s.day_unpriced} with no amount` : ''}
+              ? `${s.day_plans} plan${s.day_plans === 1 ? '' : 's'}`
+              : 'no plans'}
+            {s.day_unpriced ? ` (${s.day_unpriced} with no amount)` : ''}
+          </div>
+          <div className="n">
+            {s.day_shop_paid.toLocaleString()} EGP ·{' '}
+            {s.day_shop_items
+              ? `${s.day_shop_items} item${s.day_shop_items === 1 ? '' : 's'}`
+              : 'nothing sold'}
+            {s.day_shop_unpriced ? ` (${s.day_shop_unpriced} with no price)` : ''}
           </div>
         </div>
       </div>
