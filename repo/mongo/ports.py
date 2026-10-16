@@ -440,8 +440,11 @@ class MongoBookings(BookingsPort, _Helpers):
         ], session=self.session)]
         if not due:
             return 0
+        # settled_at says this is what wrote the row off, and when -- see
+        # the SQLite side for why an absence needs a timestamp of its own.
         return self.db["bookings"].update_many(
-            {"_id": {"$in": due}}, {"$set": {"status": "absent"}},
+            {"_id": {"$in": due}},
+            {"$set": {"status": "absent", "settled_at": now}},
             session=self.session).modified_count
 
 
@@ -540,6 +543,7 @@ class MongoAccess(AccessPort, _Helpers):
         people = self._by_id("clients", [b["client_id"] for b in mine])
         rows = [{"booking_id": b["id"], "status": b["status"],
                  "checked_in_at": b["checked_in_at"],
+                 "settled_at": b["settled_at"],
                  "id": b["client_id"],
                  "name_en": people[b["client_id"]]["name_en"],
                  "phone": people[b["client_id"]]["phone"],

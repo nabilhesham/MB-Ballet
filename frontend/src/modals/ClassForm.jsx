@@ -27,9 +27,25 @@ export default function ClassForm({ existing, instructors = [], onSaved }) {
     try {
       if (existing) {
         const r = await api(`/classes/${existing.id}`, { method: 'PUT', body });
-        toast(r.cascaded_sessions
-          ? `Saved — ${r.cascaded_sessions} upcoming session${r.cascaded_sessions === 1 ? '' : 's'} now show this instructor`
-          : 'Saved');
+        // Both of the class's defaults cascade onto its upcoming sessions,
+        // and the length one has to be said out loud: it moves when each of
+        // those sessions ends, which is when the class closes itself and
+        // its no-shows become absent. A clash is named rather than failing
+        // the save, the same way repeating a term names a taken evening.
+        const clashes = r.length_clashes || [];
+        const did = [];
+        if (r.cascaded_sessions) {
+          did.push(`${r.cascaded_sessions} upcoming session${r.cascaded_sessions === 1 ? '' : 's'} now show this instructor`);
+        }
+        if (r.relengthened) {
+          did.push(`${r.relengthened} now run${r.relengthened === 1 ? 's' : ''} ${body.duration_hours}h`);
+        }
+        if (clashes.length) {
+          toast(`Saved${did.length ? ` — ${did.join(', ')}` : ''}. ${clashes.length} kept the old length — ${clashes[0]}`
+            + (clashes.length > 1 ? ` (and ${clashes.length - 1} more)` : ''), 'bad');
+        } else {
+          toast(did.length ? `Saved — ${did.join(', ')}` : 'Saved');
+        }
       } else {
         await api('/classes', { method: 'POST', body });
         toast('Class created');
@@ -42,14 +58,18 @@ export default function ClassForm({ existing, instructors = [], onSaved }) {
   return (
     <>
       <h3>{existing ? 'Edit class' : 'New class'}</h3>
-      {!existing && <div className="mh">Sessions are scheduled separately once the class exists.</div>}
+      {existing
+        ? <div className="mh">The length and the instructor also apply to every
+            upcoming session of this class — the length is what decides when each
+            one closes and its no-shows become absent.</div>
+        : <div className="mh">Sessions are scheduled separately once the class exists.</div>}
       <label>NAME</label>
       <input value={name} onChange={e => setName(e.target.value)} placeholder="Ballet" />
       <label>DESCRIPTION</label>
       <textarea value={description} onChange={e => setDescription(e.target.value)} />
       <div className="fieldrow">
         <div>
-          <label>DEFAULT LENGTH (HOURS)</label>
+          <label>LENGTH (HOURS)</label>
           <input type="number" step="0.25" min="0.25" value={duration}
                  onChange={e => setDuration(e.target.value)} />
         </div>

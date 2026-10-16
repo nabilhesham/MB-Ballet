@@ -217,6 +217,134 @@ def slot_taken_message(row) -> str:
             f"is already taken by {row['class_name']}")
 
 
+def relength_sessions(repo, class_id: int, duration_hours: float) -> dict:
+    """
+    Make this class's upcoming sessions as long as the class now says.
+
+    **The class's length is a cascade, not only a default for the next
+    session created.** It was only the second of those, and that is the bug
+    this exists for: a class seeded at 1 hour (seed.py gives the
+    flexibility sheet `duration_hours: 1.0`) and later corrected to 1.5 or 2
+    on the class page left every session already on the timetable one hour
+    long. `sessions.ends_at` is written from the *session's* own duration, so
+    those sessions went on ending at the old hour — which is
+    `complete_finished_sessions()` marking the class completed while it was
+    still running and `settle_absences()` marking a client who arrived at
+    1h05 absent in a room they were sitting in. Both were reported as bugs in
+    the sweep; the sweep was reading the length it was given.
+
+    `_repair_running_sessions()` cannot fix it, and in fact cements it: it
+    makes `ends_at` agree with the session's own `duration_hours`, which is
+    the number that is wrong. The repair is for a row that disagrees with
+    itself. This is for a row that disagrees with its class.
+
+    It follows the instructor cascade exactly (see api/classes.py), including
+    overwriting a session someone had set to a different, specific length:
+    two rules for one field is how the timetable and the class drift apart
+    again. Finished and cancelled sessions are never touched -- a finished
+    session's length is the record of how long it ran, and relengthening it
+    would rewrite who was absent at the end of it. A session running *now*
+    is not finished, and is the one this was reported from: see the window
+    below.
+
+    **A session that cannot be lengthened is named, never forced.** One
+    session at a time is academy-wide (`slot_conflict()`), so making a class
+    longer can run it into whatever is on next; that one keeps the length it
+    has and comes back in `skipped`, the same way repeating a term skips a
+    taken evening rather than failing the whole batch. The sessions being
+    changed are tested against each other too, in start order, or a class
+    whose own sessions sit back to back would be laid over itself.
+    """
+    # Everything of this class's that has not finished under the new length:
+    # `starts_at > now - new_length` is exactly "its new end is still ahead".
+    #
+    # **"Not finished" rather than "not started", and that is the point.** A
+    # class running right now is the case this was reported from -- a session
+    # an hour into a 1.5-hour class, already `completed`, with its latecomer
+    # already `absent`. Asking `starts_at > now` would skip the one session
+    # reception is standing in front of, and asking `status = 'scheduled'`
+    # (which is what the instructor cascade asks, correctly, an instructor
+    # not being changeable retroactively) would skip it a second time over,
+    # since the early end is what marked it completed.
+    # `_repair_running_sessions()` puts that status and those absences back
+    # on the next sweep, once this has given the row the right end.
+    #
+    # Shortening leaves a session the new length says is already over at the
+    # length it ran, by the same arithmetic: an edit must not write somebody
+    # off retroactively.
+    cutoff = db.now() - int(duration_hours * 3600)
+    rows = [r for r in repo.find("sessions",
+                                 {"class_id": class_id,
+                                  "status": {"ne": "cancelled"},
+                                  "starts_at": {"gt": cutoff}})
+            if r["duration_hours"] != duration_hours]
+    if not rows:
+        return {"relengthened": 0, "skipped": []}
+
+    span_from = min(r["starts_at"] for r in rows)
+    span_to = max(max(ends_at_of(r["starts_at"], duration_hours),
+                      ends_at_of(r["starts_at"], r["duration_hours"]))
+                  for r in rows)
+    # Everything that could overlap the span, academy-wide -- the same
+    # predicate repo.slot_conflict() uses, widened from one slot to the whole
+    # run of sessions, so this costs two reads rather than one per session.
+    mine = {r["id"] for r in rows}
+    occupied = [(x["starts_at"], ends_at_of(x["starts_at"], x["duration_hours"]),
+                 x["id"], x["class_id"])
+                for x in repo.find("sessions", {"status": {"ne": "cancelled"},
+                                                "starts_at": {"lt": span_to},
+                                                "ends_at": {"gt": span_from}})
+                if x["id"] not in mine]
+
+    done, skipped = [], []
+    for r in sorted(rows, key=lambda r: (r["starts_at"], r["id"])):
+        ts, end = r["starts_at"], ends_at_of(r["starts_at"], duration_hours)
+        # Half-open, matching repo.slot_conflict().
+        hits = [o for o in occupied if o[0] < end and o[1] > ts]
+        if hits:
+            clash = min(hits, key=lambda o: (o[0], o[2]))
+            skipped.append((r, clash))
+            # It keeps the length it has, and still occupies that.
+            occupied.append((ts, session_end(r), r["id"], class_id))
+            continue
+        occupied.append((ts, end, r["id"], class_id))
+        done.append(r)
+
+    # One write per session, because `ends_at` is `starts_at` plus the new
+    # length and so differs on every row -- the filter dialect carries no
+    # computed values on purpose (see repo/filters.py). It is charged to a
+    # class edit, against the handful of sessions that class has ahead of it.
+    for r in done:
+        repo.update("sessions", r["id"],
+                    {"duration_hours": duration_hours,
+                     "ends_at": ends_at_of(r["starts_at"], duration_hours)})
+
+    names = {}
+    if skipped:
+        # A clash is the (starts_at, ends_at, id, class_id) tuple the
+        # occupied list carries, not a row.
+        names = {c["id"]: c["name"] for c in repo.find(
+            "classes", {"id": {"in": sorted({c[3] for _, c in skipped})}})}
+    return {"relengthened": len(done),
+            "skipped": [_kept_length_message(r, c, names.get(c[3]))
+                        for r, c in skipped]}
+
+
+def _kept_length_message(row, clash, clash_name) -> str:
+    """Why one session was left at the length it had, in plain language."""
+    starts = time.localtime(row["starts_at"])
+    return (f"{time.strftime('%a %d %b', starts)} "
+            f"{time.strftime('%H:%M', starts)} stayed at "
+            f"{_hours_said(row['duration_hours'])} — a longer one would run "
+            f"into {clash_name or 'another class'} at "
+            f"{time.strftime('%H:%M', time.localtime(clash[0]))}")
+
+
+def _hours_said(h: float) -> str:
+    """1.5 as "1.5h", 2.0 as "2h" -- the length as somebody would say it."""
+    return f"{h:g}h"
+
+
 # ---------------------------------------------------------------- plans
 def _iso_day(ts: int) -> str:
     """The local calendar day a unix timestamp falls on."""
@@ -696,7 +824,7 @@ def _repair_running_sessions(repo, now: int) -> int:
     if reopened:
         repo.update_where("bookings",
                           {"session_id": {"in": reopened}, "status": "absent"},
-                          {"status": "booked"})
+                          {"status": "booked", "settled_at": None})
     return len(reopened)
 
 
@@ -1132,7 +1260,12 @@ def set_status(repo, session_id: int, client_id: int, status: str) -> dict:
             return {"ok": False, "error": "this client is not booked into this session"}
         repo.update("bookings", b["id"], {
             "status": status,
-            "checked_in_at": db.now() if status == "present" else None})
+            "checked_in_at": db.now() if status == "present" else None,
+            # An absence marked by hand is reception's, not the sweep's, so
+            # the stamp saying "the sweep wrote this off" comes off the row
+            # either way -- otherwise a client marked present keeps the time
+            # they were written off beside their check-in.
+            "settled_at": None})
         return {"ok": True, "status": status}
 
 

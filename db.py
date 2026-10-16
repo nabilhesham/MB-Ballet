@@ -147,6 +147,14 @@ CREATE TABLE IF NOT EXISTS bookings (
     subscription_id INTEGER REFERENCES subscriptions(id),
     status          TEXT NOT NULL DEFAULT 'booked',
     checked_in_at   INTEGER,
+    -- When the absent sweep wrote this row off, and nothing else: NULL on a
+    -- booking it has never touched, including one entered absent by hand or
+    -- born absent with a back-dated plan. "The session ended and they had
+    -- not checked in" was the one fact about an absence with no record of
+    -- when it was decided, which is exactly what made three reports of
+    -- "marked absent too early" impossible to settle from the data -- the
+    -- stamp beside the session's own end is the whole answer.
+    settled_at      INTEGER,
     created_at      INTEGER NOT NULL,
     UNIQUE(client_id, session_id)
 );
@@ -443,6 +451,7 @@ def migrate(conn) -> None:
         "sessions": [("ends_at", "INTEGER")],
         "credentials": [("class_id", "INTEGER")],
         "appointments": [("on_time", "TEXT")],
+        "bookings": [("settled_at", "INTEGER")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
                           ("class_id", "INTEGER"),

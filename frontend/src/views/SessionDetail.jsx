@@ -208,12 +208,21 @@ export default function SessionDetail() {
             },
             { label: 'STATUS', sortValue: r => r.status, cell: r => <StatusPill status={r.status} /> },
             {
-              label: 'CHECKED IN', className: 'num mute', hideSm: true, sortValue: r => r.checked_in_at || 0,
+              label: 'CHECKED IN', className: 'num mute', hideSm: true,
+              sortValue: r => r.checked_in_at || r.settled_at || 0,
               // fmtWhen, not fmtTime: this stamp is when somebody pressed
               // Present, which for a roster marked in advance is another day
               // altogether. A bare "08:11 PM" beside a 3:30 class reads as a
               // fault in the app rather than as a mark made last night.
-              cell: r => (r.checked_in_at ? fmtWhen(r.checked_in_at) : '—'),
+              //
+              // An absence the sweep wrote carries its own stamp, and it
+              // belongs here beside the session's end time in the header:
+              // "absent 03:20 PM" against a class running to 05:00 PM is the
+              // whole of what three reports of "marked absent too early" had
+              // no way to show. Blank on an absence marked by hand or born
+              // with a back-dated plan — neither is the sweep's.
+              cell: r => (r.checked_in_at ? fmtWhen(r.checked_in_at)
+                : r.settled_at ? `absent ${fmtWhen(r.settled_at)}` : '—'),
             },
             {
               /* The client's own note. Same column as the Clients list and
