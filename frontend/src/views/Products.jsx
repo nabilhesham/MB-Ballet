@@ -6,6 +6,7 @@ import { useModal } from '../components/Modal';
 import { Pill } from '../components/Pill';
 import Empty from '../components/Empty';
 import ProductForm from '../modals/ProductForm';
+import { fmtSize } from '../lib/format';
 
 /** Price as a figure, or the fact that nobody wrote one down. */
 export const money = v =>
@@ -104,8 +105,18 @@ export default function Products() {
                   </div>
                 </div>
               </div>
-              <div className="row" style={{ marginTop: 12 }}>
+              <div className="row" style={{ marginTop: 12, flexWrap: 'wrap' }}>
                 <StockPill n={p.stock} />
+                {/* The breakdown, when there is one: the figure beside it is
+                    the sum of these, and "6 in stock" across three sizes
+                    answers a different question from "6 in a 36". A product
+                    with no sizes has one shelf row and nothing to break
+                    down, so nothing is shown for it. */}
+                {(p.sizes || []).filter(z => z.size != null).map(z => (
+                  <Pill key={z.size} kind={z.qty ? 'grey' : 'bad'}>
+                    {fmtSize(z.size)} · {z.qty}
+                  </Pill>
+                ))}
               </div>
               {p.notes && (
                 <div className="sub" style={{ marginTop: 10 }}>{p.notes}</div>

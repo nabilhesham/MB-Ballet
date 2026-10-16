@@ -2603,10 +2603,209 @@ def day_income(repo, day: str) -> dict:
 # nobody wrote a price for must not be reported as zero, and a figure that
 # counts the unpriced separately rather than folding them in.
 
+# ---- sizes ----------------------------------------------------------
+#
+# A leotard comes in sizes and a hairnet does not, so sizes are per product
+# rather than a thing every product has. They are represented uniformly all
+# the same: a product with no sizes has exactly **one** `product_stock` row
+# whose `size` is NULL. That is what keeps one code path -- a sale always
+# names a size (possibly NULL), the shelf count is always the sum of the
+# rows, and there is no sizeless branch to drift from the sized one.
+#
+# Sizes are numeric because the academy's are: 34, 36, 38, and the halves in
+# between for shoes. REAL rather than INTEGER for the same reason
+# `clients.age` is -- 34.5 rounded to 34 is the distinction the fitting was
+# made on.
+
+
+def stock_rows(repo, product_id: int) -> list:
+    """
+    This product's shelf, one row per size, no sizes first then ascending.
+
+    The order is what every screen shows, so it is decided once here rather
+    than in each of them: NULL ("no size") is not a number and cannot sort
+    among the numbers, and putting it first is what makes a sizeless
+    product read as a single quantity instead of a stray row under the
+    list.
+    """
+    rows = repo.find("product_stock", {"product_id": product_id})
+    return sorted(rows, key=lambda r: (r["size"] is not None,
+                                       r["size"] if r["size"] is not None else 0,
+                                       r["id"]))
+
+
+def _sync_stock(repo, product_id: int, rows=None) -> int:
+    """
+    **The one writer of `products.stock`**, which is the sum of the rows.
+
+    Stored rather than derived because the shop list is one round trip and
+    the figure on every card is the answer to "have we got any left"; one
+    writer because two is how `sessions_used` became a column nothing could
+    trust. Every path that changes a quantity ends here -- selling,
+    unselling, and rewriting the sizes -- so there is nowhere for the total
+    and the rows to disagree.
+
+    Always called inside the caller's transaction; it does not open one.
+    """
+    rows = stock_rows(repo, product_id) if rows is None else rows
+    total = sum(int(r["qty"] or 0) for r in rows)
+    repo.update("products", product_id, {"stock": total})
+    return total
+
+
+def _size_key(v):
+    """
+    A size as it is stored and compared: a float, or None for "no size".
+
+    `""` and `None` both mean no size -- a form sends the empty string and
+    an API caller sends neither -- and 36 and "36" are the same shelf, which
+    is the comparison that matters when a sale has to find the row it came
+    off.
+    """
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    return float(v)
+
+
+def set_product_sizes(repo, product_id: int, sizes) -> dict:
+    """
+    Rewrite which sizes a product comes in and how many of each.
+
+    `sizes` is a list of `{"size": <number or None>, "qty": n}`. An empty
+    list, or one entry with no size, both mean "this product has no sizes":
+    the result either way is the single NULL row described above, so a
+    product can gain sizes and lose them again without the rest of the app
+    knowing which it ever was.
+
+    **A size with sales behind it may not simply vanish.** Its quantity can
+    go to zero -- that is "none left", a real answer and the normal end of a
+    run -- but removing the row would leave a sale pointing at a shelf that
+    does not exist, and `unsell_product()` would then have nowhere to put the
+    thing back. Such a size is kept at zero and **named** in `kept`, the same
+    treatment `relength_sessions()` gives a session it cannot lengthen: the
+    screen says what it did instead of the edit silently doing less than it
+    said.
+
+    A quantity below what has already been sold is not refused. Stock is what
+    is on the shelf *now*, and a sale is a receipt for something that left
+    it; the two are different questions, and reception counting four in the
+    box after selling six is a fact rather than a contradiction.
+    """
+    with repo.begin():
+        p = repo.get("products", product_id)
+        if p is None:
+            return {"ok": False, "error": "no such product"}
+
+        wanted = {}
+        for entry in (sizes or []):
+            try:
+                key = _size_key(entry.get("size"))
+                qty = int(entry.get("qty") or 0)
+            except (TypeError, ValueError, AttributeError):
+                return {"ok": False,
+                        "error": "a size needs a number and an amount"}
+            if qty < 0:
+                return {"ok": False,
+                        "error": "an amount cannot be negative. Zero is "
+                                 "'none left', which is a real answer."}
+            if key is not None and key <= 0:
+                return {"ok": False, "error": "a size is a number above zero"}
+            if key in wanted:
+                said = "no size" if key is None else f"{key:g}"
+                return {"ok": False,
+                        "error": f"{said} is listed twice — one row per size"}
+            wanted[key] = qty
+        if not wanted:
+            wanted = {None: 0}
+        if len(wanted) > 1 and None in wanted:
+            return {"ok": False,
+                    "error": "a product either comes in sizes or it does "
+                             "not — remove the sizeless row, or the sizes"}
+
+        have = {_size_key(r["size"]): r for r in stock_rows(repo, product_id)}
+        sold = _sold_by_size(repo, product_id)
+
+        kept = []
+        for key, row in have.items():
+            if key in wanted:
+                if int(row["qty"] or 0) != wanted[key]:
+                    repo.update("product_stock", row["id"], {"qty": wanted[key]})
+                continue
+            if sold.get(key):
+                n = sold[key]
+                said = "no size" if key is None else f"size {key:g}"
+                kept.append(f"{said} is kept at 0 — {n} already sold, and a "
+                            f"sale has to be able to go back on the shelf")
+                if int(row["qty"] or 0):
+                    repo.update("product_stock", row["id"], {"qty": 0})
+                continue
+            repo.delete("product_stock", row["id"])
+
+        for key, qty in wanted.items():
+            if key not in have:
+                repo.insert("product_stock", {"product_id": product_id,
+                                              "size": key, "qty": qty})
+
+        rows = stock_rows(repo, product_id)
+        return {"ok": True, "stock": _sync_stock(repo, product_id, rows),
+                "sizes": rows, "kept": kept}
+
+
+def _sold_by_size(repo, product_id: int) -> dict:
+    """How many of each size have been sold. One read."""
+    out = {}
+    for sale in repo.find("product_sales", {"product_id": product_id}):
+        key = _size_key(sale["size"])
+        out[key] = out.get(key, 0) + int(sale["qty"] or 0)
+    return out
+
+
+def ensure_stock_rows(repo) -> int:
+    """
+    Give every product that has no shelf rows the one NULL row that means
+    "no sizes", carrying whatever `products.stock` already said.
+
+    **A startup step rather than a `db.migrate()` one**, and for the reason
+    written down beside `backfill_checkin_source.py`: `migrate()` only ever
+    runs against SQLite, and the academy's own database may be on Atlas. It
+    goes through `repo`, so it works on whichever backend is configured.
+
+    **Idempotent by construction** -- a product is touched only when it has
+    no rows at all -- which is the same shape `images.import_legacy_files()`
+    has, and the reason this is safe to do on every start. The standing cost
+    is one read of a small collection; the alternative was a script somebody
+    has to remember to run, on an app where a product with no rows cannot be
+    sold at all.
+
+    Returns how many products it filled in, for the startup banner.
+    """
+    have = {r["product_id"] for r in repo.find("product_stock",
+                                               fields=["product_id"])}
+    missing = [p for p in repo.find("products", fields=["id", "stock"])
+               if p["id"] not in have]
+    if not missing:
+        return 0
+    with repo.begin():
+        repo.insert_many("product_stock",
+                         [{"product_id": p["id"], "size": None,
+                           "qty": int(p["stock"] or 0)} for p in missing])
+    return len(missing)
+
+
 def sell_product(repo, product_id: int, client_id: int, qty=1,
-                 paid_on: str = None, notes: str = None) -> dict:
+                 paid_on: str = None, notes: str = None, size=None) -> dict:
     """
     Sell `qty` of a product to a client, and take it off the shelf.
+
+    **The sale names a size, and the size is a shelf rather than a label.**
+    `size=None` is "no size", which is the only thing a sizeless product has
+    and therefore what it is always sold as; a product that *does* come in
+    sizes refuses a sale that does not say which, because the stock figure
+    the sale decrements belongs to one of them and guessing would take it
+    off the wrong shelf. The number is recorded on the sale as well, so
+    removing the sale puts the thing back where it came from -- and so that
+    changing a product's sizes next term cannot rewrite what was handed over
+    last month, exactly as `unit_price` protects what was charged for it.
 
     **The price is copied, not referenced.** `unit_price` is whatever the
     product cost at this moment; re-pricing it next term must not rewrite
@@ -2639,19 +2838,52 @@ def sell_product(repo, product_id: int, client_id: int, qty=1,
             qty = 0
         if qty < 1:
             return {"ok": False, "error": "how many? one or more"}
-        if qty > (p["stock"] or 0):
-            left = p["stock"] or 0
+
+        try:
+            key = _size_key(size)
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "a size is a number"}
+        rows = stock_rows(repo, product_id)
+        shelves = {_size_key(r["size"]): r for r in rows}
+        sized = sorted(k for k in shelves if k is not None)
+        if not rows:
+            # Every product has a shelf: create_product() makes one and
+            # ensure_stock_rows() fills in any that predate sizes, so this
+            # is a product written straight into the table by something that
+            # did neither. Named rather than guessed at, since inventing one
+            # from `products.stock` is the second code path the single NULL
+            # row exists to avoid.
             return {"ok": False,
-                    "error": f"only {left} {p['name']} left in stock — "
+                    "error": f"{p['name']} has no stock recorded at all — "
+                             f"set how many there are first"}
+        if key is None and sized:
+            said = ", ".join(f"{k:g}" for k in sized)
+            return {"ok": False,
+                    "error": f"which size? {p['name']} comes in {said}"}
+        if key not in shelves:
+            said = ", ".join(f"{k:g}" for k in sized) or "no sizes"
+            return {"ok": False,
+                    "error": f"{p['name']} does not come in size {key:g} — "
+                             f"it comes in {said}"}
+
+        shelf = shelves[key]
+        left = int(shelf["qty"] or 0)
+        if qty > left:
+            of_it = p["name"] if key is None else f"{p['name']} in {key:g}"
+            return {"ok": False,
+                    "error": f"only {left} {of_it} left in stock — "
                              f"add stock first, or sell {left or 'none'}"}
+
         day = _iso_day(db.now()) if paid_on is None else (paid_on or None)
         sale_id = repo.insert("product_sales", {
             "product_id": product_id, "client_id": client_id, "qty": qty,
-            "unit_price": p["price"], "paid_on": day, "notes": notes,
-            "created_at": db.now()})
-        repo.update("products", product_id, {"stock": (p["stock"] or 0) - qty})
-        return {"ok": True, "sale_id": sale_id,
-                "stock": (p["stock"] or 0) - qty,
+            "unit_price": p["price"], "size": key, "paid_on": day,
+            "notes": notes, "created_at": db.now()})
+        repo.update("product_stock", shelf["id"], {"qty": left - qty})
+        shelf["qty"] = left - qty
+        return {"ok": True, "sale_id": sale_id, "size": key,
+                "size_left": left - qty,
+                "stock": _sync_stock(repo, product_id, rows),
                 "paid": None if p["price"] is None else round(p["price"] * qty, 2)}
 
 
@@ -2667,18 +2899,34 @@ def unsell_product(repo, sale_id: int) -> dict:
     and a greyed-out row that still had to be subtracted somewhere would be
     worse at the only job the figure has. The stock is given back for the
     same reason the money is: the thing is still in the box.
+
+    **It goes back on the shelf it came off**, which is why the sale records
+    its size at all. A size whose row has since been removed is put back as
+    a row of its own rather than added to another one -- `set_product_sizes()`
+    keeps any size with sales behind it for exactly this reason, so arriving
+    here means the shelf was removed before that rule existed, and inventing
+    the number onto a different size would be worse than a size nobody
+    stocks any more showing one in it.
     """
     with repo.begin():
         s = repo.get("product_sales", sale_id)
         if s is None:
             return {"ok": False, "error": "no such sale"}
-        p = repo.get("products", s["product_id"])
+        pid, qty = s["product_id"], int(s["qty"] or 0)
+        key = _size_key(s["size"])
         repo.delete("product_sales", sale_id)
-        if p is not None:
-            repo.update("products", s["product_id"],
-                        {"stock": (p["stock"] or 0) + (s["qty"] or 0)})
-        return {"ok": True, "product_id": s["product_id"],
-                "qty": s["qty"], "paid_on": s["paid_on"]}
+        if repo.get("products", pid) is not None:
+            shelf = next((r for r in stock_rows(repo, pid)
+                          if _size_key(r["size"]) == key), None)
+            if shelf is None:
+                repo.insert("product_stock", {"product_id": pid,
+                                              "size": key, "qty": qty})
+            else:
+                repo.update("product_stock", shelf["id"],
+                            {"qty": int(shelf["qty"] or 0) + qty})
+            _sync_stock(repo, pid)
+        return {"ok": True, "product_id": pid, "qty": qty, "size": key,
+                "paid_on": s["paid_on"]}
 
 
 def archive_product(repo, product_id: int, hard: bool = False) -> dict:
@@ -2703,6 +2951,9 @@ def archive_product(repo, product_id: int, hard: bool = False) -> dict:
                                  f"this product — archive it instead, so the "
                                  f"clients who bought it still show what they "
                                  f"bought"}
+            # The shelf rows go with it -- they are not history, they are
+            # how many of a thing that no longer exists are in a box.
+            repo.delete_where("product_stock", {"product_id": product_id})
             repo.delete("products", product_id)
             return {"ok": True, "deleted": True}
         repo.update("products", product_id, {"active": 0})

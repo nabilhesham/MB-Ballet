@@ -1,7 +1,7 @@
 """
 Load MB Ballet Academy from the academy's own spreadsheets.
 
-    ENTRY_SECRET=... python seed.py --force
+    ENTRY_SECRET=... python scripts/seed.py --force
 
 Wipes academy.db and rebuilds it from the workbooks listed in SHEETS below.
 Never run this once the database has moved ahead of the sheets.
@@ -10,13 +10,20 @@ Add a new term's workbook by adding a line to SHEETS. Nothing else needs
 changing: the readers in sheets.py work from the header rows, so a block that
 gains a column or drops one still imports.
 
-    python seed.py --force --dry-run     parse and report, write nothing
-    python seed.py --force --no-cards    skip the card PNGs (much faster)
+    python scripts/seed.py --force --dry-run     parse and report, write nothing
+    python scripts/seed.py --force --no-cards    skip the card PNGs (much faster)
 """
 
 import os
+import pathlib
 import sys
 from datetime import date, datetime, time, timedelta
+
+# This script lives in scripts/ -- apart from the app itself, so nobody has to
+# work out which files are the app and which are run by hand. The app's own
+# modules are therefore one directory up, and the path has to say so before
+# the first of them is imported.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 # Before `import db` and before anything reads an environment variable.
 # start.sh deliberately does not export .env into the shell -- a Mongo URI's

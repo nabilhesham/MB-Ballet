@@ -489,10 +489,13 @@ const beepWarn=()=>beep(520,150);
    ================================================================ */
 const locked = () => current !== null;
 let keysBase = 'Esc to clear', nudgeTimer = null;
-function nudge(){
+/* One amber line and one soft beep, for everything that means "that card
+   did nothing, and here is why". A scanner that silently does nothing reads
+   as broken hardware, which is the one thing this screen must never do. */
+function nudge(msg){
   beepWarn();
   const k = $('keys');
-  k.textContent = 'Press Esc to clear this before the next card';
+  k.textContent = msg || 'Press Esc to clear this before the next card';
   k.classList.add('nudge');
   clearTimeout(nudgeTimer);
   nudgeTimer = setTimeout(() => {
@@ -690,9 +693,83 @@ function setLed(){
   else{ led.className='led wait'; t.textContent='listening for scanner'; }
 }
 
-/* ---------------------------------------------------------------- scanner */
-const GAP_MS = 80;              // tune with static/scanner-test.html once hardware arrives
-let buf="", lastKey=0;
+/* ---------------------------------------------------------------- scanner
+
+   Four layers separate a scan from typing (see CLAUDE.md), and three of
+   them used to be all-or-nothing: when one said no, the card vanished with
+   nothing on screen. "The scanner is connected and sometimes a card does
+   nothing" was every one of these, and they are all here:
+
+   - **Focus.** Ignoring every keystroke while focus was in an input, a
+     textarea, a select *or a button* meant that pressing OK on the door
+     panel, or the sidebar's Open door, left the keyboard on that button --
+     and the next card was swallowed in silence, while the indicator went on
+     reading "scanner connected", because that indicator is sticky by
+     design and the swallowing is invisible. A button holds no text, so a
+     keystroke has nowhere to go and there is nothing to protect: it is
+     blurred and the scan is read. A field does hold text, so it keeps the
+     keyboard until a burst proves a scanner is talking -- a person cannot
+     type ten base32 characters at under 80ms each -- and then it is blurred
+     too, with whatever the scanner had already typed into it put back.
+   - **One number doing two jobs.** GAP_MS was both "is this a scanner" and
+     "how long may a half-read token sit", so a single slow character -- a
+     repaint, a fetch resolving, the camera's own pass -- threw away
+     everything read so far and left the Enter at the end with nothing to
+     send. They are two numbers now: GAP_MS still decides what a scanner
+     sounds like, and only a pause longer than HOLD_MS abandons a token
+     that has already been recognised as one.
+   - **Silence.** A buffer that ended up too short or too slow was dropped
+     without a word. A cut-short scan says so now, in the same amber line
+     and soft beep a scan arriving over a verdict already gets.
+
+   What has not changed is which of these is the backstop: none of them.
+   The signature check on the server is, and these only decide what is worth
+   sending it. */
+const GAP_MS = 80;    // tune with static/scanner-test.html once hardware arrives
+const HOLD_MS = 600;  // a recognised scan survives a hiccup this long, not longer
+const MIN_LEN = 10;   // shortest thing worth sending (a real token is 40)
+const BURST = 2;      // consecutive scanner-speed gaps that prove it is one
+/* Layer three, the shape, finally written down: a token is base32 and
+   nothing else (tokens.py -- A-Z and 2-7, no punctuation, because an HID
+   scanner emits keystrokes and an Arabic keyboard layout remaps anything
+   else). Lowercase is allowed because parse() accepts it. It is what keeps
+   a member number typed quickly on the number pad from being sent as a
+   card: almost every one of them contains a 0, 1, 8 or 9. */
+const TOKEN_SHAPE = /^[A-Za-z2-7]+$/;
+
+let buf = "", lastKey = 0, fast = 0, stolen = null;
+
+/* Where the keyboard was when a possible burst began, so it can be given
+   back untouched.
+
+   Taken only at the keystroke that *starts* a buffer, which is the one
+   moment the field still holds exactly what the receptionist typed: keydown
+   runs before the character lands, so this is the value from before the
+   scanner said anything. Re-taking it on every key instead put the first
+   two characters of the token into the snapshot and handed them back with
+   it. */
+function rememberFocus(el){
+  stolen = (el && el.matches && el.matches('input,textarea'))
+    ? { el, value: el.value } : null;
+}
+
+/* A burst is talking, so take the keyboard off whatever had it and put that
+   field back the way the receptionist left it. The characters already typed
+   into it are in `buf` as well, which is why the buffer is trimmed to the
+   burst itself below rather than kept whole. */
+function takeKeyboard(){
+  if(!stolen) return;
+  const { el, value } = stolen;
+  stolen = null;
+  el.value = value;
+  el.blur();
+  /* The name search reads its own box, so it has to be told the box moved
+     back -- otherwise it keeps a list of matches for text nobody can see. */
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function endBuffer(){ buf = ""; fast = 0; stolen = null; }
+
 window.addEventListener('keydown', e=>{
   /* Escape comes first, before every other guard: it is the only way a
      result leaves the screen now, so it has to work from the manual-entry
@@ -702,23 +779,102 @@ window.addEventListener('keydown', e=>{
        belongs to that client's check-in, and making it a second press would
        add a gesture to every single visit. With nothing behind it (the
        sidebar's Open door button) it is the only thing to clear. */
+    endBuffer();
     if(doorPopOpen() && !current){ doorPopClose(); return; }
     reset(); return;
   }
-  if(e.target.matches('input,textarea,select,button')) return;
-  if(mode === 'manual' || mode === 'name') return;   // typing is not a scan
-  const now=performance.now(), gap=now-lastKey; lastKey=now;
+
+  /* Space and Enter are how a focused button is pressed, and neither can be
+     part of a token, so they are left alone. Anything else arriving at a
+     button is not somebody using it -- a button is not somewhere text goes
+     -- and this is the one that was actually losing cards: every panel on
+     this screen is dismissed with a button, and the keyboard stays on it. */
+  const payload = e.key.length === 1 && e.key !== ' ';
+  if(payload && e.target.matches('button')) e.target.blur();
+
+  const typing = e.target.matches('input,textarea,select');
+  /* Number and name entry are typing by definition, and a person typing is
+     never a burst -- so the buffer still runs underneath, and only a proven
+     scanner is allowed to interrupt. */
+  const human = typing || mode === 'manual' || mode === 'name';
+
+  const now = performance.now(), gap = now - lastKey; lastKey = now;
 
   if(e.key==='Enter'){
-    e.preventDefault();
-    if(buf.length>=10 && gap<GAP_MS*3){
+    /* On the bare page two scanner-speed gaps are proof enough -- there is
+       nothing else a burst of base32 ending in Enter could be. Over a field
+       or in Number/Name mode the bar is the whole token: all but two of its
+       gaps have to be scanner-speed, because the alternative there is a
+       receptionist typing, and taking her keyboard away mid-word would be a
+       worse failure than the one this fixes. Nobody types ten base32
+       characters at under 80ms each. */
+    const proof = human ? Math.max(BURST, buf.length - 3) : BURST;
+    const ready = buf.length >= MIN_LEN && fast >= proof && gap < HOLD_MS
+                  && TOKEN_SHAPE.test(buf);
+    if(ready){
+      e.preventDefault();
+      e.stopPropagation();
+      takeKeyboard();
       if(!scannerSeen){ scannerSeen=true; setLed(); updateIdle(); }
-      const t=buf; buf=""; scan(t);
-    } else if(!buf.length && current && current.granted) doCheckIn();
-    buf=""; return;
+      const t = buf; endBuffer(); scan(t);
+      return;
+    }
+    /* Something came in fast enough to be a scanner and did not come out as
+       a card. Say which: a card read as four characters, a card read as
+       punctuation, and a card not read at all are three different problems
+       and look identical from the far side of the counter.
+
+       The second one is the keyboard layout, which this screen has always
+       been built around -- reception runs Windows with Arabic available, an
+       HID scanner emits keystrokes, and a layout that is not English turns
+       a perfectly good card into characters no token contains. Nothing here
+       can switch it; naming it is the whole of what this can do. */
+    if(!human && fast >= BURST && buf.length){
+      e.preventDefault();
+      nudge(TOKEN_SHAPE.test(buf)
+        ? 'That scan came through incomplete — hold the card steady and scan again'
+        : 'That card did not read as a card — check the keyboard is set to English');
+    } else if(!human && !buf.length && current && current.granted){
+      e.preventDefault();
+      doCheckIn();
+    }
+    endBuffer(); return;
   }
-  if(e.key.length===1){ if(gap>GAP_MS) buf=""; buf+=e.key; }
-});
+
+  if(!payload) return;   // Shift, Ctrl, Space and friends carry no payload
+
+  /* Already proven: only a real pause ends it, never one slow character.
+     That separation is the second of the three bugs above -- a repaint
+     between two characters used to throw the whole token away. */
+  if(fast >= BURST){
+    if(gap > HOLD_MS) endBuffer();
+    else { buf += e.key; if(gap < GAP_MS) fast++; return; }
+  }
+  if(gap > GAP_MS){ rememberFocus(e.target); buf = e.key; fast = 0; return; }
+  buf += e.key;
+  if(++fast >= BURST){
+    /* Confirmed, so the buffer is cut back to the burst itself: anything in
+       front of it was somebody's fingers, and a stray character on the front
+       of a token is a signature failure rather than a scan. It is also what
+       lets the stricter bar above be measured against the token rather than
+       against whatever was half-typed when the client walked up. */
+    buf = buf.slice(-(BURST + 1));
+    /* The keyboard itself is only taken here, where nothing was being typed
+       into anything. Over a field it waits for the Enter that proves the
+       whole token: pulling the caret out of a half-typed name on two fast
+       keystrokes would be a worse failure than the one this fixes. */
+    if(!human) takeKeyboard();
+  }
+},
+/* **Capture, not bubble**, and that is the difference between a scan and
+   the wrong client being checked in. The number box and the name box both
+   stopPropagation() on Enter -- each has its own job for that key -- so a
+   listener on the window in the bubble phase never saw it: a card scanned
+   while a half-typed name was still in the box was swallowed by the name
+   search, which pressed its first match. Not a lost scan but a *different*
+   client's check-in, which is the worse of the two. Running first is what
+   lets a proven token stop the event before either of them. */
+true);
 
 /* ---------------------------------------------------------------- camera */
 let camStream=null, detector=null, camRunning=false;

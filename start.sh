@@ -215,7 +215,7 @@ for arg in "$@"; do
   case "$arg" in
     --seed)
       step "Rebuilding the database from sheets/…"
-      "$VPY" seed.py --force
+      "$VPY" scripts/seed.py --force
       ;;
   esac
 done
@@ -250,7 +250,7 @@ try:
     r.init_schema(); print('  Empty database created.')
 finally:
     r.close()" ;;
-    *)     "$VPY" seed.py --force ;;
+    *)     "$VPY" scripts/seed.py --force ;;
   esac
 fi
 ok "Database ready"

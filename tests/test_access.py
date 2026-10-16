@@ -429,10 +429,22 @@ def test_a_quiet_timetable_still_gets_the_hourly_pass(academy):
     freeze boundary — and the loop still wakes hourly as a heartbeat for what
     a deadline cannot see: a suspended laptop, a clock jump, a write made
     while it was already asleep.
+
+    **The hour is a ceiling, not the answer**, which is why this compares
+    against the midnight too: run inside the last hour of the day and the
+    deadline is nearer than the cap, so asserting the flat hour made the
+    suite pass or fail by the clock it was started at — the same hazard the
+    fixture guards for recurring sessions.
     """
+    import time as _time
+    from datetime import date, datetime, time as _t, timedelta
+
     repo = academy.repo
     repo.update_where("sessions", {}, {"status": "cancelled"})
     access.sweep_invalidate()
     access.settle_past_sessions(repo)
 
-    assert access.seconds_to_next_sweep() == access.SWEEP_WAIT_MAX
+    midnight = datetime.combine(date.today() + timedelta(days=1), _t.min).timestamp()
+    expected = min(access.SWEEP_WAIT_MAX, midnight - _time.time())
+
+    assert abs(access.seconds_to_next_sweep() - expected) <= 1

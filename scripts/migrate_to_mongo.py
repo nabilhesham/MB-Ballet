@@ -1,8 +1,8 @@
 """
 Copy an existing academy.db into MongoDB, ids and all.
 
-    python migrate_to_mongo.py --dry-run     count what would move
-    python migrate_to_mongo.py               move it
+    python scripts/migrate_to_mongo.py --dry-run     count what would move
+    python scripts/migrate_to_mongo.py               move it
 
 Without this, "the backend is a configuration choice" is only true for a
 database that starts empty, which is not the situation anyone is actually in.
@@ -19,7 +19,14 @@ Reads from MB_SQLITE_PATH, writes to MB_MONGO_URI / MB_MONGO_DB. It refuses a
 target that already holds data unless --force.
 """
 
+import pathlib
 import sys
+
+# This script lives in scripts/ -- apart from the app itself, so nobody has to
+# work out which files are the app and which are run by hand. The app's own
+# modules are therefore one directory up, and the path has to say so before
+# the first of them is imported.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import config
 
@@ -46,7 +53,7 @@ from repo.sqlite import SqliteRepo           # noqa: E402
 ORDER = ("instructors", "classes", "sessions", "clients",
          "subscriptions", "freezes", "bookings", "credentials",
          "instructor_hours", "instructor_hour_adjustments", "access_events",
-         "appointments", "products", "product_sales",
+         "appointments", "products", "product_stock", "product_sales",
          # Last: the photos and cards are the bulkiest rows and the only ones
          # nothing else points at, so an interrupted run leaves a database
          # that is whole apart from its pictures.

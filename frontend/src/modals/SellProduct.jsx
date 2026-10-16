@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { useModal } from '../components/Modal';
 import { useToast } from '../components/Toast';
-import { todayISO } from '../lib/format';
+import { fmtSize, todayISO, withSize } from '../lib/format';
 import { money } from '../views/Products';
 
 /**
@@ -20,6 +20,15 @@ import { money } from '../views/Products';
  * Clients page would — a second search with its own idea of a match would
  * drift from it. The product list arrives whole and is filtered here,
  * because there are a dozen of them (see Products.jsx).
+ *
+ * **A sale names a size**, because the stock it comes off belongs to one of
+ * them: the sizes arrive with the product rather than being fetched when
+ * one is picked (`/api/products` carries them, one read for the whole
+ * list), and a product with no sizes has exactly one with none — which is
+ * what makes this a picker that quietly disappears rather than a second
+ * form for a hairnet. The amount shown beside HOW MANY is that size's own,
+ * never the product's total: selling against the total would take a 34 out
+ * of the 36 pile.
  */
 export default function SellProduct({ product, client, onSaved }) {
   const { close } = useModal();
@@ -31,6 +40,11 @@ export default function SellProduct({ product, client, onSaved }) {
   const [q, setQ] = useState('');
   const [found, setFound] = useState([]);
   const [qty, setQty] = useState('1');
+  // Which shelf. `null` is "no size", which is the only thing a sizeless
+  // product has and therefore chosen for it automatically below;
+  // `undefined` is "nothing picked yet", which is what holds Sell disabled
+  // on a product that does come in sizes.
+  const [size, setSize] = useState(undefined);
   // Defaults to today because a sale over the counter is paid as it
   // happens. Cleared, it saves unpaid and falls out of every day's till,
   // exactly as an unpaid plan does.
@@ -68,12 +82,27 @@ export default function SellProduct({ product, client, onSaved }) {
       : products).slice(0, 8);
   })();
 
+  // The shelf. A product that has none at all (written straight into the
+  // table by something that made neither) is told so rather than guessed
+  // at — the same answer the endpoint gives.
+  const shelf = pickedProduct?.sizes || [];
+  const sizes = shelf.filter(s => s.size != null);
+  const sizeless = shelf.length > 0 && sizes.length === 0;
+
+  // A sizeless product has one choice, so it is made rather than offered.
+  useEffect(() => {
+    setSize(sizeless ? null : undefined);
+  }, [pickedProduct?.id, sizeless]);
+
   const n = Number(qty);
-  const stock = pickedProduct ? pickedProduct.stock : 0;
+  const row = shelf.find(s => (s.size ?? null) === (size ?? null));
+  // The amount on *this* size, which is what a sale can spend. The
+  // product's own total is on the card and is the sum of every size.
+  const stock = row ? row.qty : 0;
   const total = pickedProduct && pickedProduct.price != null
     ? pickedProduct.price * (Number.isFinite(n) ? n : 0) : null;
-  const ready = pickedProduct && pickedClient && Number.isInteger(n) && n >= 1
-    && n <= stock;
+  const ready = pickedProduct && pickedClient && !!row
+    && Number.isInteger(n) && n >= 1 && n <= stock;
 
   const save = async () => {
     if (!ready || saving) return;
@@ -81,9 +110,11 @@ export default function SellProduct({ product, client, onSaved }) {
     try {
       await api(`/products/${pickedProduct.id}/sell`, {
         method: 'POST',
-        body: { client_id: pickedClient.id, qty: n, paid_on: paidOn },
+        body: { client_id: pickedClient.id, qty: n, paid_on: paidOn,
+                size: size ?? null },
       });
-      toast(`${n} × ${pickedProduct.name} sold to ${pickedClient.name_en}`);
+      toast(`${n} × ${withSize(pickedProduct.name, size)} sold to `
+            + `${pickedClient.name_en}`);
       close();
       onSaved();
     } catch (e) {
@@ -212,6 +243,29 @@ export default function SellProduct({ product, client, onSaved }) {
           </>
         )}
 
+      {/* Only when there is a choice to make. A sizeless product has one
+          shelf and it is already chosen, so offering it a picker reading
+          "one size" would be a question with one answer. */}
+      {sizes.length > 0 && (
+        <>
+          <label>SIZE</label>
+          <div className="row" style={{ flexWrap: 'wrap', gap: 6 }}>
+            {sizes.map(sz => (
+              <button
+                key={sz.size}
+                className={'sm' + (size === sz.size ? ' pri' : '')}
+                disabled={!sz.qty}
+                title={sz.qty ? `${sz.qty} on the shelf` : 'none left in this size'}
+                onClick={() => { setSize(sz.size); setQty('1'); }}
+              >
+                {fmtSize(sz.size)}
+                <span className="sub" style={{ marginLeft: 6 }}>{sz.qty}</span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
       <div className="fieldrow">
         <div>
           <label>HOW MANY</label>
@@ -229,14 +283,24 @@ export default function SellProduct({ product, client, onSaved }) {
       <div className="mh">
         {!pickedProduct ? 'Pick a product.'
           : !pickedClient ? 'Pick a student.'
-            : !stock ? `${pickedProduct.name} is out of stock — add stock first.`
-              : !Number.isInteger(n) || n < 1 ? 'How many? One or more.'
-                : n > stock ? `Only ${stock} in stock.`
-                  : total == null
-                    ? `${n} × ${pickedProduct.name} — no price written down, so `
-                      + 'it is counted but adds nothing to the day’s money.'
-                    : `${n} × ${pickedProduct.name} — ${total.toLocaleString()} EGP`
-                      + (paidOn ? '' : ', unpaid')}
+            : !shelf.length
+              ? `${pickedProduct.name} has no stock recorded at all — set how `
+                + 'many there are on its own page first.'
+              : size === undefined ? 'Which size?'
+                : !stock
+                  ? `No ${withSize(pickedProduct.name, size)} left — `
+                    + 'add stock first.'
+                  : !Number.isInteger(n) || n < 1 ? 'How many? One or more.'
+                    : n > stock
+                      ? `Only ${stock} of ${withSize(pickedProduct.name, size)}`
+                        + ' on the shelf.'
+                      : total == null
+                        ? `${n} × ${withSize(pickedProduct.name, size)} — no price `
+                          + 'written down, so it is counted but adds nothing to '
+                          + 'the day’s money.'
+                        : `${n} × ${withSize(pickedProduct.name, size)} — `
+                          + `${total.toLocaleString()} EGP`
+                          + (paidOn ? '' : ', unpaid')}
       </div>
 
       <div className="mact">

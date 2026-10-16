@@ -273,10 +273,18 @@ CREATE TABLE IF NOT EXISTS products (
     -- nobody has written down must not be reported as zero revenue. A sale
     -- copies this at the moment it happens -- see product_sales.unit_price.
     price       REAL,
-    -- What is on the shelf. Deliberately a plain count rather than a ledger
-    -- of movements: the academy counts the box, and a stock history nobody
-    -- queries is schema churn. A sale takes one off and removing that sale
-    -- puts it back, which is the only arithmetic there is.
+    -- What is on the shelf, in total. Deliberately a plain count rather than
+    -- a ledger of movements: the academy counts the box, and a stock history
+    -- nobody queries is schema churn. A sale takes one off and removing that
+    -- sale puts it back, which is the only arithmetic there is.
+    --
+    -- Since sizes it is the **sum of this product's product_stock rows**,
+    -- stored rather than derived, with exactly one writer
+    -- (access._sync_stock, through which every change to a size's quantity
+    -- goes). Stored because the shop list is one round trip and the number
+    -- on every card is the answer to "have we any left"; one writer because
+    -- a second one is how `sessions_used` ended up dead weight that could
+    -- not be trusted. Never set this from anywhere else.
     stock       INTEGER NOT NULL DEFAULT 0,
     notes       TEXT,
     -- The picture, as a URL this app answers -- the same column every other
@@ -284,6 +292,28 @@ CREATE TABLE IF NOT EXISTS products (
     photo_path  TEXT,
     active      INTEGER NOT NULL DEFAULT 1,
     created_at  INTEGER NOT NULL
+);
+
+-- How many of a product are on the shelf, broken down by size.
+--
+-- **A product with no sizes has exactly one row, with `size` NULL** -- not
+-- no rows at all. A hairnet is a real product and "one size" is a real
+-- answer, and that uniformity is the whole design: a sale always names a
+-- size, the shelf count is always the sum of these rows, and there is no
+-- separate sizeless path to drift from the sized one. access.stock_rows()
+-- is the only thing that reads them and access.set_product_sizes() the only
+-- thing that rewrites the set; an existing product gets its one NULL row
+-- from access.ensure_stock_rows(), at startup, idempotently -- see there
+-- for why that is not a db.migrate() step.
+CREATE TABLE IF NOT EXISTS product_stock (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id  INTEGER NOT NULL REFERENCES products(id),
+    -- REAL, not INTEGER, for the same reason clients.age is: shoe and
+    -- leotard sizes come in halves, and 34.5 rounded to 34 is the
+    -- distinction the fitting was made on. NULL is "this product has no
+    -- sizes", and there is at most one such row per product.
+    size        REAL,
+    qty         INTEGER NOT NULL DEFAULT 0
 );
 
 -- One sale: this client bought this many of this product. It is the shop's
@@ -294,6 +324,12 @@ CREATE TABLE IF NOT EXISTS product_sales (
     product_id  INTEGER NOT NULL REFERENCES products(id),
     client_id   INTEGER NOT NULL REFERENCES clients(id),
     qty         INTEGER NOT NULL DEFAULT 1,
+    -- Which size left the shelf, so removing the sale puts it back on the
+    -- right one. NULL means the product has no sizes -- the same NULL
+    -- product_stock.size carries, and read the same way. Like unit_price it
+    -- is a receipt: changing a product's sizes next term must not rewrite
+    -- what was handed over last month.
+    size        REAL,
     -- **Copied from the product at the moment of sale, never read back
     -- through it.** Re-pricing a leotard must not rewrite what last month's
     -- till took -- the same reason instructor pay is `hours x rate` at read
@@ -364,6 +400,7 @@ CREATE INDEX IF NOT EXISTS ix_appt_date  ON appointments(on_date);
 CREATE INDEX IF NOT EXISTS ix_psale_client  ON product_sales(client_id);
 CREATE INDEX IF NOT EXISTS ix_psale_product ON product_sales(product_id);
 CREATE INDEX IF NOT EXISTS ix_psale_paid    ON product_sales(paid_on);
+CREATE INDEX IF NOT EXISTS ix_pstock_product ON product_stock(product_id);
 
 -- Added for the joins that already existed but had nothing to stand on. Each
 -- one backs a query in repo/sqlite/ports.py that was scanning without it;
@@ -514,6 +551,7 @@ def migrate(conn) -> None:
         "appointments": [("on_time", "TEXT")],
         "bookings": [("settled_at", "INTEGER"),
                      ("checked_in_by", "TEXT")],
+        "product_sales": [("size", "REAL")],
         "subscriptions": [("frozen_on", "TEXT"), ("frozen_until", "TEXT"),
                           ("frozen_days", "INTEGER NOT NULL DEFAULT 0"),
                           ("class_id", "INTEGER"),

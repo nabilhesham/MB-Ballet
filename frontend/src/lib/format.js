@@ -168,3 +168,17 @@ export const fmtISO = d =>
     ? new Date(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10))
         .toLocaleDateString([], { day: 'numeric', month: 'short' })
     : '—';
+
+/* A product's size as it reads on a screen.
+   NULL is not a missing size — it is the one row a product with no sizes
+   has (see product_stock in db.py), so it reads "one size" rather than a
+   dash: a dash is what an unanswered question looks like everywhere else in
+   this app, and this one is answered. A half survives, because a 34.5 shoe
+   rounded to 34 is the distinction the fitting was made on. */
+export const fmtSize = size => (size == null ? 'one size' : String(size));
+
+/* The same thing inside a sentence about one item: "Leotard in 36", and
+   just "Leotard" when it has no sizes — naming "one size" there reads as a
+   size somebody chose. */
+export const withSize = (name, size) =>
+  (size == null ? name : `${name} in ${size}`);

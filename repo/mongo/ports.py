@@ -404,6 +404,9 @@ class MongoShop(ShopPort, _Helpers):
     _BASE = {"id": "$_id", "_id": 0,
              "qty": {"$ifNull": ["$qty", 1]},
              "unit_price": {"$ifNull": ["$unit_price", None]},
+             # Which shelf it came off. All three questions carry it, so it
+             # belongs here rather than in each one's `extra`.
+             "size": {"$ifNull": ["$size", None]},
              "paid_on": {"$ifNull": ["$paid_on", None]},
              "notes": {"$ifNull": ["$notes", None]}}
 

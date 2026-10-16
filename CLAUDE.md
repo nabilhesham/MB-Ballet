@@ -164,6 +164,15 @@ page reception opens most — the same reasoning that moved the attention
 list off it. `on=` defaults to today and takes any ISO day, so the same
 popup answers "what did we take last Thursday" without a second endpoint.
 
+**Each of its two lists scrolls on its own** (`.listcap`), rather than
+letting the veil scroll the whole modal. Two unbounded lists in one popup
+means reaching the second scrolls the first past, and the totals at the top
+and the Close button at the bottom go with it — on a day with thirty sales
+there was no way to see the figure the popup was opened for and the sale
+being questioned at the same time. The cap is kept on narrow screens, the
+rule `.dt-scroll.capped` already follows, and dropped only for print, where
+there is no scrolling to do and a cut-off list is a lost one.
+
 **Cards & renewals asks two questions about one day**
 (`access.day_attention()`), and the day is passed in rather than read off
 the clock — the screen opens on today and reception can set it to any date:
@@ -307,7 +316,7 @@ reintroduce either.
 
 ## Files
 
-Run `./cleanup.sh` if the folder has accumulated files from earlier versions
+Run `scripts/cleanup.sh` if the folder has accumulated files from earlier versions
 (`entry.db`, `run.bat`, `run.sh`, `issue_card.py`, `reissue.py`, `test_flow.py`,
 `MB Ballet Academy.spec`, `__pycache__`, a shared `.venv`). It lists before it
 deletes and never touches data.
@@ -360,9 +369,6 @@ api/              One router module per resource, wired into server.py with
                   classes.py, instructors.py, sessions.py, access_routes.py,
                   dashboard.py, images.py, appointments.py, products.py).
 sheets.py         Readers for the academy's Excel workbooks. Parsing only, no I/O.
-seed.py           Wipes academy.db and rebuilds it from sheets/. --force
-                  required. Always SQLite, whatever MB_DB_BACKEND says —
-                  migrate_to_mongo.py is what moves it to Mongo.
 frontend/         React admin source (Vite, plain JS + .jsx). See Stack above
                   for the build-once-commit-the-output model.
   src/views/       One file per route: Dashboard, Calendar, Classes,
@@ -435,16 +441,25 @@ academy.spec      PyInstaller build definition, shared by all three build
                   the step that bakes this folder's .env into the
                   binary -- it refuses to build without one.
 run_app.py        Entry point for the packaged build.
-migrate_to_mongo.py  Copies an existing academy.db into MongoDB, preserving
-                  every integer id. --dry-run counts first.
-backfill_checkin_source.py  Fills in bookings.checked_in_by on rows written
-                  before that column existed, from the scan log. Counts by
-                  default; --write applies. Goes through repo, so it works
-                  on whichever backend is configured -- which is why it is
-                  a script and not a db.migrate() step. See the bookings
-                  bullet in the data model.
-cleanup.sh        Removes leftovers from earlier versions.
-                  (no settings page: the no-show rules it configured are gone)
+scripts/          Run by hand, never imported by the app -- see the rule
+                  under this tree.
+  seed.py          Wipes academy.db and rebuilds it from sheets/. --force
+                   required. Always SQLite, whatever MB_DB_BACKEND says —
+                   migrate_to_mongo.py is what moves it to Mongo.
+  migrate_to_mongo.py  Copies an existing academy.db into MongoDB,
+                   preserving every integer id. --dry-run counts first.
+  backfill_checkin_source.py  Fills in bookings.checked_in_by on rows
+                   written before that column existed, from the scan log.
+                   Counts by default; --write applies. Goes through repo, so
+                   it works on whichever backend is configured -- which is
+                   why it is a script and not a db.migrate() step. See the
+                   bookings bullet in the data model.
+  class_visitors.py  Reports which clients are on a class's roster only as
+                   cross-class visitors. A report and not a migration --
+                   see the note under it.
+  cleanup.sh       Removes leftovers from earlier versions.
+                   (no settings page: the no-show rules it configured are
+                   gone)
 sheets/           The academy's own workbooks — the seed reads these.
                   Real names and numbers, so not in git. See sheets/README.md.
 static/scanner-test.html   Scanner timing diagnostic, for tuning GAP_MS.
@@ -469,6 +484,20 @@ academy.db        The database, pictures included. Not in git. This IS the
                   rather than the app growing a second copy beside
                   the exe. See Configuration below.
 ```
+
+**Nothing in `scripts/` is imported by the app, and nothing in the app
+imports it.** That is the whole line: a file at the root is something the
+running app loads, a file in `scripts/` is something a person types. Four
+things were sitting at the root beside `server.py` and `access.py` looking
+exactly like part of the app — one of which wipes the database — so
+telling them apart meant reading each one.
+
+The cost, and it is the only one: a script is a directory further from the
+modules it imports, so each puts the repo root on `sys.path` as its first
+act, above `import config`, and `tests/conftest.py` adds `scripts/` for the
+tests that drive them. `scripts/` is deliberately **not** a package — there
+is no `__init__.py` and nothing is ever `scripts.seed` — because that would
+make it importable, which is the thing this split exists to prevent.
 
 `static/reception.html` and `static/scanner-test.html` are deliberately
 untouched by the React rewrite: the kiosk is the one latency-sensitive
@@ -1062,8 +1091,8 @@ Manual, when working on the code:
 
 ```bash
 set -a; source .env; set +a   # Windows: $env:ENTRY_SECRET="..."
-python seed.py --force        # rebuild from sheets/ — WIPES the database
-python seed.py --force --dry-run   # parse and report, write nothing
+python scripts/seed.py --force      # rebuild from sheets/ — WIPES the database
+python scripts/seed.py --force --dry-run   # parse and report, write nothing
 python server.py
 ```
 
@@ -1311,7 +1340,7 @@ system and everything else follows from it:
   |---|---|
   | `price` | nullable, like a plan's — a thing nobody wrote a price for must not be reported as zero revenue, and the unpriced are counted as their own figure |
   | `paid_on` | the day the money is dated, the same column and the same rule TAKEN TODAY reads for plans. NULL is unpaid and falls out of every day rather than counting as zero in one. Left out of a sale it defaults to **today**: a sale over the counter is paid as it happens, and that is not something reception should have to type |
-  | `stock` | a plain count, not a ledger of movements. The academy counts the box; a stock history nobody queries is schema churn. A sale takes some off and removing the sale puts it back, which is the whole of the arithmetic |
+  | `stock` | a plain count, not a ledger of movements. The academy counts the box; a stock history nobody queries is schema churn. A sale takes some off and removing the sale puts it back, which is the whole of the arithmetic. Since sizes it is the **sum of the product's `product_stock` rows**, stored with exactly one writer — see below |
 
   **`product_sales.unit_price` is copied at the moment of sale and never
   read back through the product.** Re-pricing a leotard next term must not
@@ -1326,6 +1355,65 @@ system and everything else follows from it:
   end — one `SellProduct` modal serves both, since two copies of the
   quantity/price/date logic is how the two would drift). That is the same
   reason booking a session lives on the profile and not on the session page.
+
+  **`product_stock` is sizes, and a product with no sizes has one row with
+  `size` NULL rather than no rows at all.** A leotard comes in 34, 36 and 38
+  and a hairnet comes in none, so sizes are per product — but representing
+  the sizeless case as the *absence* of a shelf would be a second code path
+  for every question the shop asks, and the two would drift the way two
+  rules for one field always do. One NULL row instead: a sale always names a
+  size, the shelf count is always the sum of the rows, and a product can
+  gain sizes and lose them again without anything else knowing which it ever
+  was. `access.set_product_sizes()` is the only thing that rewrites the set
+  and `access.stock_rows()` the only thing that reads it in order.
+
+  The size is **REAL, not INTEGER**, for exactly the reason `clients.age` is:
+  shoe and leotard sizes come in halves, and 34.5 rounded to 34 is the
+  distinction the fitting was made on.
+
+  **`products.stock` is the sum of those rows, stored, with one writer.**
+  `access._sync_stock()` is it, and every path that changes a quantity ends
+  there — selling, unselling, rewriting the sizes. Stored rather than derived
+  because the shop list is one round trip and the figure on every card is
+  the answer to "have we got any left"; **one** writer because two is how
+  `sessions_used` became a column nothing could trust. Never set it from
+  anywhere else.
+
+  **A sale records its size the way it records its price**, and for the same
+  reason: both are receipts. `unsell_product()` puts the thing back on the
+  shelf it came off, and changing which sizes a product comes in next term
+  cannot rewrite what was handed over last month. A size whose row has since
+  gone comes back as a row of its own rather than being added to a different
+  one — inventing the number onto another size is worse than a size nobody
+  stocks showing one in it.
+
+  **A size with sales behind it is kept at zero, never removed.** Zero is
+  "none left", a real answer and the normal end of a run; removing the row
+  would leave a sale pointing at a shelf that is not there and unselling
+  with nowhere to put the thing. `set_product_sizes()` keeps it and **names**
+  it in `kept`, the same treatment `relength_sessions()` gives a session it
+  cannot lengthen — the screen says what it did instead of the save quietly
+  doing less than it said. A quantity *below* what has been sold is allowed:
+  stock is what is in the box now and a sale is a receipt for something that
+  left it, so four in the box after selling six is a fact rather than a
+  contradiction.
+
+  **Selling a sized product without naming a size is refused, with the sizes
+  in the refusal.** The stock the sale decrements belongs to one shelf, and
+  guessing takes a 34 out of the 36 pile — invisibly, since the total is
+  right either way. The kiosk never meets this; the sell modal picks the
+  size from what arrives with the product list, so it is a choice rather
+  than a fetch.
+
+  **An existing product gets its one NULL row at startup, not from
+  `db.migrate()`.** `access.ensure_stock_rows()` runs in `server.py`'s
+  lifespan, fills in any product with no rows at all, and is idempotent by
+  construction — the same shape `images.import_legacy_files()` has, and for
+  the same reason it is not a migration: `migrate()` only ever runs against
+  SQLite and the academy's database may be on Atlas. The standing cost is
+  one read of a small collection per start. The alternative was a script
+  somebody has to remember to run, on an app where a product with no rows
+  cannot be sold at all.
 
 **The class is the spine.** A plan is bought for one class, may only be
 assigned to that class's sessions, and is proved by that class's card:
@@ -1371,6 +1459,19 @@ list saying 12 students beside a page showing 11 is worse than either
 number on its own. A booking with **no** plan behind it (older rows,
 `subscription_id` NULL) still counts, because the session's class is the
 only answer there is for it — the same fallback the lapsed cutoff makes.
+
+**There is no data migration for this, and that is the finding rather than
+an omission.** Being a filter on two reads, it leaves every booking, plan
+and attendance mark where it was — so there is no column to backfill and
+nothing to rewrite, and a script that wrote anything here would be undoing
+the correction rather than applying it. What was missing was the list,
+because until the rule existed nobody could see who was on a roster for
+this reason: `scripts/class_visitors.py` names them, which class's plan paid
+for each visit, and therefore which rosters and counts have just got
+shorter. Run before and after an upgrade it reports the same thing, which
+*is* the evidence nothing moved. A client who also holds a plan in the class
+she visited is listed apart, since she is a student of it either way and her
+visit changed no count.
 
 **The roster carries each student's balance for this class** — a LEFT column
 beside SLOTS and ATTENDED, reading `expired`, `0 left`, `n left`, `n
@@ -2416,13 +2517,64 @@ The scanner is a USB HID device — it *is* a keyboard to the OS. No driver, no
 serial port, no SDK.
 
 `reception.html` separates scans from typing with four stacked layers:
-1. Ignore keystrokes when focus is in an input/textarea/select
-2. Timing: `GAP_MS = 80`, characters further apart reset the buffer
-3. Shape: minimum 10 chars, terminated by Enter
-4. Signature check server-side — the real backstop
+1. **Focus** — a field keeps the keyboard until a burst proves a scanner is
+   talking; a button never does, because a button is not somewhere text goes
+2. **Timing** — `GAP_MS = 80` says what a scanner sounds like, `HOLD_MS =
+   600` says how long a recognised token may sit half-read
+3. **Shape** — `MIN_LEN = 10` characters of base32 (`TOKEN_SHAPE`),
+   terminated by Enter
+4. **Signature check server-side** — the real backstop
 
 **Tune `GAP_MS` once hardware arrives:** open `static/scanner-test.html` in the browser, note the max
 gap, set it to roughly 3x that.
+
+**"The scanner is connected and sometimes a card does nothing" was four
+bugs, and they shared a shape: every layer was all-or-nothing, so when one
+said no the card vanished with nothing on the screen.** The indicator went
+on reading `scanner connected` throughout, because it is deliberately
+sticky — it says a scanner has been heard, not that this card was.
+
+- **A focused button swallowed everything.** Layer one ignored a keystroke
+  whose target was an `input`, a `textarea`, a `select` *or a button* — and
+  every panel on this screen is dismissed with a button, so pressing OK on
+  the door popup, or the sidebar's **Open door**, left the keyboard sitting
+  on it. The next client's card went nowhere at all. A button holds no text,
+  so there is nothing for a keystroke to go into and nothing to protect: it
+  is blurred and the scan is read. Space and Enter are left alone, since
+  those are how a focused button is pressed and neither can be part of a
+  token.
+- **One number did two jobs.** `GAP_MS` was both "is this a scanner" and
+  "how long may a half-read token sit", so a single slow character — a
+  repaint, a fetch resolving, the camera's own pass — threw away everything
+  read so far and left the terminating Enter with nothing to send. They are
+  two numbers now. Until two scanner-speed gaps have proved a burst, a slow
+  character still starts the buffer over; after that, only a pause longer
+  than `HOLD_MS` abandons it.
+- **The listener was on the bubble phase, and that one checked in the wrong
+  client.** `#manualId` and `#nameQ` both `stopPropagation()` on Enter —
+  each has its own job for that key — so the window's listener never saw
+  it. A card scanned while a half-typed name was still in the box was
+  swallowed by the name search, which pressed its first match: not a lost
+  scan but *somebody else's* check-in. It runs in the capture phase now, so
+  a proven token stops the event before either of them, and the box is put
+  back exactly as it was typed (the snapshot is taken at the keystroke that
+  *starts* a buffer, which is the one moment the field still holds only what
+  the receptionist typed).
+- **And a scan that did not survive the layers said nothing.** It now gets
+  the same amber line and soft beep a scan arriving over a verdict gets —
+  the rule this screen already had, applied to the case that needed it most.
+  Two sentences, because they are two problems: a token cut short says to
+  scan again, and a burst that is not base32 says to check the keyboard is
+  set to English, which is the layout trap this whole design is built around
+  and the one thing nothing here can fix by itself.
+
+The shape layer is what keeps the first two changes safe. A member number
+typed quickly into the Number box is not a card: it contains a 0, 1, 8 or 9,
+and `TOKEN_SHAPE` is `A–Z` and `2–7` only, exactly the alphabet `tokens.py`
+mints. Over a field or in Number/Name mode the timing bar is the whole token
+as well — all but two of its gaps have to be scanner-speed — because the
+alternative there is a receptionist typing, and taking her keyboard away
+mid-word would be a worse failure than the one this fixes.
 
 **Planned, not built:** configure the scanner to emit a prefix character (`~`)
 and gate capture on it. Makes detection deterministic rather than heuristic and
@@ -3670,8 +3822,8 @@ that would be a wipe of the live hosted record with nothing to undo it from,
 triggered by an environment variable set for a different reason. So it builds
 its own `SqliteRepo` over `config.sqlite_path()` (`seed.py`'s `sqlite_repo()`),
 and `migrate_to_mongo.py` is the one thing that writes to Mongo — reading
-exactly what the seed produced. The two steps are `python seed.py --force`
-then `python migrate_to_mongo.py`.
+exactly what the seed produced. The two steps are `python scripts/seed.py
+--force` then `python scripts/migrate_to_mongo.py`.
 
 It calls `config.load_env()` as its first statement, above `import db`, like
 every other entry point. `start.sh` deliberately does not export `.env` into
@@ -3699,8 +3851,8 @@ and `--dry-run` reports what it would take in without touching the disk. So
 the whole thing is one command:
 
 ```bash
-python migrate_to_mongo.py --dry-run          # counts, writes nothing to Mongo
-MB_DB_BACKEND=mongo python migrate_to_mongo.py
+python scripts/migrate_to_mongo.py --dry-run   # counts, writes nothing to Mongo
+MB_DB_BACKEND=mongo python scripts/migrate_to_mongo.py
 ```
 
 **It copies by id, replacing, and never deletes.** `insert_many()` would mint
