@@ -259,3 +259,58 @@ def test_the_roster_carries_it(academy):
 
     row = repo.session_roster(sid)[0]
     assert row["settled_at"] is not None
+
+
+# --------------------------------------------------- which screen wrote the stamp
+
+def test_a_desk_check_in_and_a_roster_mark_are_told_apart(academy):
+    """
+    `checked_in_at` had two writers and one label, and that is the whole of
+    "the CHECKED IN column is +1 of the actual time": `check_in_booking()`
+    stamps the instant the client was at the door, while the session page's
+    Present stamps the instant somebody took the roster -- an hour or more
+    later for a class marked up at the end. With no scanner on the desk yet,
+    almost every mark in the academy's database is the second kind.
+    """
+    repo = academy.repo
+    sid = academy.today_ballet
+
+    # The roster, taken from the session page.
+    access.set_status(repo, sid, academy.dual, "present")
+    b = repo.find_one("bookings", {"session_id": sid, "client_id": academy.dual})
+    assert b["checked_in_by"] == "roster"
+    assert b["checked_in_at"] is not None
+
+    # And a check-in at the desk, through the one path a scan and a
+    # number/name lookup share.
+    assert repo.check_in_booking(b["id"], db.now()) is False  # already present
+    other = repo.insert("bookings", {
+        "client_id": academy.planless, "session_id": sid,
+        "subscription_id": None, "status": "booked", "created_at": db.now()})
+    assert repo.check_in_booking(other, db.now()) is True
+    assert repo.get("bookings", other)["checked_in_by"] == "kiosk"
+
+
+def test_marking_them_absent_clears_the_source_too(academy):
+    """The stamp goes, so what wrote it has to go with it -- otherwise an
+    absent row carries the screen that marked it present an hour ago."""
+    repo = academy.repo
+    sid = academy.today_ballet
+    access.set_status(repo, sid, academy.dual, "present")
+
+    access.set_status(repo, sid, academy.dual, "absent")
+
+    b = repo.find_one("bookings", {"session_id": sid, "client_id": academy.dual})
+    assert b["checked_in_at"] is None
+    assert b["checked_in_by"] is None
+
+
+def test_the_roster_carries_the_source(academy):
+    """The session page is where this was reported from, so it is where the
+    distinction has to be readable."""
+    repo = academy.repo
+    sid = academy.today_ballet
+    access.set_status(repo, sid, academy.dual, "present")
+
+    row = [r for r in repo.session_roster(sid) if r["id"] == academy.dual][0]
+    assert row["checked_in_by"] == "roster"

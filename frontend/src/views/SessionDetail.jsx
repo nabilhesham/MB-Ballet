@@ -1,7 +1,7 @@
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { api, useApi } from '../api';
-import { fmtFull, fmtTime, fmtWhen, hrs, sinceStart } from '../lib/format';
+import { checkinSource, fmtFull, fmtTime, fmtWhen, hrs, sinceStart } from '../lib/format';
 import { useModal } from '../components/Modal';
 import { useConfirm } from '../components/ConfirmModal';
 import { useToast } from '../components/Toast';
@@ -228,11 +228,18 @@ export default function SessionDetail() {
               // lib/format.js's sinceStart().
               cell: (r) => {
                 const ts = r.checked_in_at || r.settled_at;
-                const text = r.checked_in_at ? fmtWhen(r.checked_in_at)
-                  : r.settled_at ? `absent ${fmtWhen(r.settled_at)}` : '—';
-                if (!ts) return text;
+                if (!ts) return '—';
+                // A present-mark reads as what it is. "marked 05:10 PM" is
+                // the roster being taken; a bare time is the client at the
+                // desk. Same column, two different events — see
+                // lib/format.js's CHECKIN_SOURCE.
+                const src = r.checked_in_at ? checkinSource(r.checked_in_by) : null;
+                const text = r.checked_in_at
+                  ? `${src.prefix}${fmtWhen(r.checked_in_at)}`
+                  : `absent ${fmtWhen(r.settled_at)}`;
+                const what = src ? src.said : 'written off by the absent sweep';
                 return (
-                  <span title={`${fmtFull(ts)} — ${sinceStart(ts, s.starts_at)}`}>
+                  <span title={`${fmtFull(ts)} — ${what}; ${sinceStart(ts, s.starts_at)}`}>
                     {text}
                   </span>
                 );

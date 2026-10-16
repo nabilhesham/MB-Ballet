@@ -409,7 +409,11 @@ class MongoBookings(BookingsPort, _Helpers):
         # got there first, so nothing is deducted.
         res = self.db["bookings"].update_one(
             {"_id": booking_id, "status": {"$ne": "present"}},
-            {"$set": {"status": "present", "checked_in_at": at}},
+            {"$set": {"status": "present", "checked_in_at": at,
+                      # Which screen wrote the stamp -- see db.py. A kiosk
+                      # check-in is the client at the door; the session
+                      # page's Present is whenever somebody took the roster.
+                      "checked_in_by": "kiosk"}},
             session=self.session)
         return res.matched_count > 0
 
@@ -543,6 +547,7 @@ class MongoAccess(AccessPort, _Helpers):
         people = self._by_id("clients", [b["client_id"] for b in mine])
         rows = [{"booking_id": b["id"], "status": b["status"],
                  "checked_in_at": b["checked_in_at"],
+                 "checked_in_by": b["checked_in_by"],
                  "settled_at": b["settled_at"],
                  "id": b["client_id"],
                  "name_en": people[b["client_id"]]["name_en"],

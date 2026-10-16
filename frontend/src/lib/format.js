@@ -117,6 +117,24 @@ export const sinceStart = (ts, startsAt) => {
   return `${said} ${d > 0 ? 'after' : 'before'} the class started`;
 };
 
+/* What a present-mark's timestamp actually is, by the screen that wrote it.
+ *
+ * `checked_in_at` had two writers and one label. `check_in_booking()` stamps
+ * the instant the client was at the door; the session page's Present stamps
+ * the instant somebody took the roster, which for a class marked up at the
+ * end is an hour or more later. The academy has no scanner on the desk yet,
+ * so almost every mark is the second kind -- and the gap was reported three
+ * times as the app adding an hour to a check-in. It is not an hour added to
+ * anything; it is a different event. */
+export const CHECKIN_SOURCE = {
+  kiosk: { prefix: '', said: 'checked in at the desk' },
+  roster: { prefix: 'marked ', said: 'marked present on the session page — when the roster was taken, not when they arrived' },
+  sheet: { prefix: 'sheet ', said: 'imported from the roster sheet, which records the day and not the minute' },
+};
+
+export const checkinSource = by =>
+  CHECKIN_SOURCE[by] || { prefix: '', said: 'source not recorded — this row predates the app telling a desk check-in from a roster mark' };
+
 export const initials = n =>
   (n || '?').split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
 
