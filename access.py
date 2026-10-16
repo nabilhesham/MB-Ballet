@@ -51,6 +51,13 @@ def _deny(message, detail=None, severity="stop", code=None, **base):
     `code` names the refusal for the one screen that needs to act on which
     refusal it was, rather than only show it: "no_session_today" is what puts
     the manual check-in button on the kiosk.
+
+    **A time in a refusal travels as an epoch in `base`, never as text.**
+    `message` is a sentence reception reads aloud, and formatting a clock
+    time into it here would render it in the *server's* timezone while every
+    other screen renders the same instant in the browser's -- one check-in
+    printed as two different times. `already_checked_in` carries
+    `checked_in_at` for that reason and the kiosk appends it.
     """
     return {**base, "granted": False, "severity": severity, "code": code,
             "message": message, "detail": detail}
@@ -1028,17 +1035,26 @@ def _decide(repo, client, cred, base, t, rows, sub):
         # and "checked in today at 19:24" would then name an hour nobody was
         # here for; older rows may carry no stamp at all.
         at = done["checked_in_at"]
-        when = (f" at {time.strftime('%H:%M', time.localtime(at))}"
-                if at and start <= at <= end else "")
+        # **The epoch travels; the kiosk renders it.** This used to be
+        # `time.strftime(... time.localtime(at))` -- the *server's* timezone
+        # -- which made this the one place in the app that printed a clock
+        # time from anywhere but the browser in front of the person. Every
+        # other screen renders an instant with `toLocaleTimeString`, so a
+        # server process one hour off the browser (the app under WSL with no
+        # TZ while Chrome has Egypt's summer offset is exactly that shape)
+        # printed one check-in as two different times on two screens, with
+        # nothing wrong with the clock at all -- and it reads as the app
+        # adding an hour when it saves. One instant, one renderer.
+        when = at if at and start <= at <= end else None
         _log(repo, cid, cred_id, None, "deny", "already checked in today")
         # The code is what puts the door on this one refusal -- see the note
         # in reception.html's show(). A client who is already checked in today
         # has a spent slot proving they belong inside; stepping out and coming
         # back is not a second visit to be charged for, and it is not a reason
         # to make them wait at a locked door either.
-        return _deny(f"Already checked in today{when} for {done['class_name']}",
+        return _deny(f"Already checked in today for {done['class_name']}",
                      detail="nothing was deducted", severity="warn",
-                     code="already_checked_in", **base)
+                     code="already_checked_in", checked_in_at=when, **base)
 
     # The card's own plan: freezing the ballet plan must not turn away a
     # client arriving for the flexibility class she is paid up in. Passed in

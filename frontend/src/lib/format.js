@@ -92,6 +92,31 @@ export const thisMonthBounds = () => {
   return [first, last];
 };
 
+/* How long after a session started a stamp falls, in words.
+ *
+ * This is the one reading of a check-in that **no timezone can change and no
+ * wrong clock can hide**: it is the difference between two epochs, so it
+ * carries no offset at all. An absolute "03:22 PM" is only as true as the
+ * clock and the zone rendering it, and "the CHECKED IN column is one hour
+ * out" has been reported three times with no way to tell a fast clock from a
+ * misread one from the screen. "1 hour 2 minutes after the class started"
+ * against a client who walked in two minutes late is the same fact with
+ * nothing left to interpret.
+ *
+ * It goes in the cell's tooltip rather than the cell: every ordinary row
+ * would carry it, and the column people scan is the time. */
+export const sinceStart = (ts, startsAt) => {
+  if (!ts || !startsAt) return '';
+  const d = Math.round(ts - startsAt);
+  if (Math.abs(d) < 60) return 'as the class started';
+  const m = Math.round(Math.abs(d) / 60);
+  const said = m < 60
+    ? `${m} minute${m === 1 ? '' : 's'}`
+    : `${Math.floor(m / 60)} hour${Math.floor(m / 60) === 1 ? '' : 's'}`
+      + (m % 60 ? ` ${m % 60} minute${m % 60 === 1 ? '' : 's'}` : '');
+  return `${said} ${d > 0 ? 'after' : 'before'} the class started`;
+};
+
 export const initials = n =>
   (n || '?').split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
 

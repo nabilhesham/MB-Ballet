@@ -865,7 +865,12 @@ function show(r, opts){
     ? (soft?'var(--warn)':'var(--ok)') : (mild?'var(--warn)':'var(--bad)');
 
   let note = '';
-  if(!r.granted) note = r.message;
+  /* A refusal that names a time sends the instant, not the words: this
+     browser is the clock the person is standing in front of, and the server
+     rendering it in its own timezone is how one check-in came to be printed
+     as two different times on two screens. See access._deny(). */
+  if(!r.granted) note = r.message
+    + (r.checked_in_at ? ' at ' + fmtTime(r.checked_in_at) : '');
   else if(r.low_balance) note = 'Running low — offer a renewal';
   $('reason').textContent = note;
 
