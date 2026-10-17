@@ -66,6 +66,36 @@ def phone_key(phone) -> str | None:
     return d[-10:] if len(d) >= 10 else d
 
 
+def search_needle(q) -> str | None:
+    """
+    What a search box typed as a number should *also* look for, or None.
+
+    A search matches the stored text, and the stored text is whatever was
+    written down — so typing `01129200365` finds the client stored that way
+    and misses the same person stored as `+201129200365` or, with Excel
+    having eaten the leading zero, `1129200365`. That is the whole reason
+    `phone_key()` exists, applied to the one place it was not: reception
+    reads a number off a card or a phone screen and has to find the person
+    whatever shape it was entered in.
+
+    So this is the last ten digits again — a substring every one of those
+    three forms contains — and the caller ORs it beside the plain match
+    rather than replacing it, since a query is not always a number and a
+    name must go on working.
+
+    None when the query is not worth treating as a number: fewer than
+    MIN_DIGITS digits is a prefix somebody is part-way through typing, and
+    the plain match already covers that. It is also None when the digits are
+    already what the plain match looks for, so an ordinary query costs
+    nothing extra.
+    """
+    d = digits(q)
+    if len(d) < MIN_DIGITS:
+        return None
+    key = d[-10:]
+    return key if key != str(q or "").strip() else None
+
+
 def name_key(name) -> str:
     """
     A name folded for comparison: collapsed whitespace, lower case.

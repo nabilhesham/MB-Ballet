@@ -112,6 +112,12 @@ class SqliteClasses(ClassesPort):
             "  (SELECT COUNT(*) FROM ("
             "     SELECT b.client_id FROM bookings b"
             "       JOIN sessions s ON s.id=b.session_id"
+            # The client, only so that an archived one is left out. This is
+            # the join class_students() has had all along and this count had
+            # not, which is exactly how the card read one more than the page
+            # it opens: archiving a client takes them off the roster and was
+            # leaving them in the number beside it.
+            "       JOIN clients cl ON cl.id=b.client_id AND cl.active=1"
             "       LEFT JOIN subscriptions sub ON sub.id = b.subscription_id"
             "       LEFT JOIN plan_end pe ON pe.sub_id = b.subscription_id"
             "      WHERE s.class_id=c.id"
@@ -291,12 +297,20 @@ class SqliteClients(ClientsPort):
         "  LEFT JOIN instructors i ON i.id = s.instructor_id")
 
     def search_clients(self, active, q):
+        # The plain match is against the stored text, which is whatever was
+        # written down. identity.search_needle() is the second needle that
+        # reconciles the three shapes one mobile arrives in -- see there --
+        # and is None for anything not worth treating as a number, so an
+        # ordinary search is the query it always was.
         like = f"%{q}%"
+        key = identity.search_needle(q)
+        bykey = f"%{key}%" if key else like
         return [dict(r) for r in self.conn.execute(
             "SELECT c.* FROM clients c"
             " WHERE c.active = ? AND (? = '' OR c.name_en LIKE ? OR c.phone LIKE ?"
-            "   OR c.school LIKE ?)"
-            " ORDER BY c.name_en, c.id", (active, q, like, like, like)).fetchall()]
+            "   OR c.school LIKE ? OR c.phone LIKE ?)"
+            " ORDER BY c.name_en, c.id",
+            (active, q, like, like, like, bykey)).fetchall()]
 
     def clients_by_phone_key(self, key):
         # The comparison is the last ten digits, which no index can answer:

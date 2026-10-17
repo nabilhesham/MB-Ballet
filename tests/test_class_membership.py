@@ -93,3 +93,41 @@ def test_a_booking_with_no_plan_behind_it_still_counts(academy):
     roster = [r["id"] for r in repo.class_students(academy.flex, "1900-01-01")]
 
     assert academy.planless in roster
+
+
+def test_an_archived_client_leaves_the_card_count_too(academy):
+    """
+    The Classes list's number and the class page's roster are two queries
+    answering one question, so every rule has to be in both. This one was in
+    only one: `class_students()` joined `clients` and dropped an archived
+    row, `classes_with_counts()` never joined it at all -- so archiving
+    somebody took them off the roster and left them in the number on the
+    card above it, and the two disagreed by one for ever after.
+    """
+    repo = academy.repo
+    cutoff = access.lapsed_cutoff()
+
+    def both():
+        card = [c for c in repo.classes_with_counts(1, cutoff)
+                if c["id"] == academy.ballet][0]["students"]
+        return len(repo.class_students(academy.ballet, cutoff)), card
+
+    roster, card = both()
+    assert roster == card and roster > 1
+
+    repo.update("clients", academy.solo_ballet, {"active": 0})
+
+    assert both() == (roster - 1, card - 1)
+
+
+def test_restoring_the_client_puts_them_back_in_both(academy):
+    """Archiving is reversible, and nothing here deletes a booking."""
+    repo = academy.repo
+    cutoff = access.lapsed_cutoff()
+    repo.update("clients", academy.solo_ballet, {"active": 0})
+    repo.update("clients", academy.solo_ballet, {"active": 1})
+
+    card = [c for c in repo.classes_with_counts(1, cutoff)
+            if c["id"] == academy.ballet][0]["students"]
+
+    assert len(repo.class_students(academy.ballet, cutoff)) == card

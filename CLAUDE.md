@@ -164,6 +164,14 @@ page reception opens most — the same reasoning that moved the attention
 list off it. `on=` defaults to today and takes any ISO day, so the same
 popup answers "what did we take last Thursday" without a second endpoint.
 
+**Every name in it closes the popup on the way out.** A HashRouter link
+changes the route and nothing else — the modal is not routed, so clicking a
+student left the till sitting on top of her profile with no way back but
+Close. Routing away from a screen is finishing with it, so the link is what
+dismisses this rather than a second gesture after it. The product a sale
+names is a link now too, for the same reason it is worth having at all: the
+question after "who paid that" is usually "what is it".
+
 **Each of its two lists scrolls on its own** (`.listcap`), rather than
 letting the veil scroll the whole modal. Two unbounded lists in one popup
 means reaching the second scrolls the first past, and the totals at the top
@@ -1356,6 +1364,31 @@ system and everything else follows from it:
   quantity/price/date logic is how the two would drift). That is the same
   reason booking a session lives on the profile and not on the session page.
 
+  **`GET /api/products/history` is what went over the counter between two
+  dates**, and it is the question neither existing screen answers: the
+  product page says who bought *this one* and the profile says what *she*
+  bought. It is **dated by `paid_on`**, the same column TAKEN TODAY reads,
+  so a day in the list and a day in the till are the same day's money — and
+  the cost of that is stated on the screen rather than discovered: a sale
+  nobody has dated yet falls in no range at all, and is chased from the
+  profile and the product page where it still sits. Both bounds are
+  inclusive, either works alone, and the range applies on a button in the
+  table's own bar — a date input fires on every edit, so binding the fetch
+  to it reloads the list for a half-typed year.
+
+  It is declared **above `/api/products/{pid}`** and has to be: that route
+  takes an `int`, so the other order matches `history` against it and
+  answers a 422 about a path parameter — a route that exists and cannot be
+  reached, which reads as a frontend bug for an hour.
+  `tests/test_purchase_history.py` holds that ordering along with the rest.
+
+  **A product with no picture gets a drawn frame, not the words "no
+  photo".** `NoImage` in `Products.jsx` is that frame — inline SVG, taking
+  the page's own tokens so it is right in both themes. The text it replaced
+  was not even styled (`ph` is not a class in `style.css`), and in a grid of
+  cards the eye is scanning pictures: a block of words where every other
+  card has an image is the one thing that stops the scan.
+
   **`product_stock` is sizes, and a product with no sizes has one row with
   `size` NULL rather than no rows at all.** A leotard comes in 34, 36 and 38
   and a hairnet comes in none, so sizes are per product — but representing
@@ -1456,7 +1489,15 @@ the plan that paid for it, the session's own roster and her profile's
 history are all exactly as they were. It is one filter on one read.
 `class_students()` and `classes_with_counts()` both carry it and must: a
 list saying 12 students beside a page showing 11 is worse than either
-number on its own. A booking with **no** plan behind it (older rows,
+number on its own. **That is two queries answering one question, so every
+rule has to be in both — and one was not.** `class_students()` joins
+`clients` and drops an archived row (`cl.active=1`, and
+`people[cid]["active"]` on Mongo); `classes_with_counts()` never joined
+that table at all. So archiving a client took them off the roster and left
+them in the number on the card above it, and the two disagreed by one for
+ever after, on both backends. The count joins `clients` now;
+`tests/test_class_membership.py` holds that archiving and restoring move
+both figures together. A booking with **no** plan behind it (older rows,
 `subscription_id` NULL) still counts, because the session's class is the
 only answer there is for it — the same fallback the lapsed cutoff makes.
 
@@ -1603,6 +1644,27 @@ same `identity.phone_key()` the seed merges the roster sheets on (see
 "Clients are identified by phone" below) — though the seed stops there,
 matching on the number alone, which is the divergence recorded under that
 heading.
+
+**The search box reconciles the same three shapes, and that is the one
+place `phone_key()` had not reached.** A search matches the *stored* text —
+whatever was written down — so reception reading `01129200365` off a card
+found the client entered that way and missed the same person stored as
+`+201129200365` or, with Excel having eaten the leading zero, as
+`1129200365`. `identity.search_needle()` is the second needle: the last ten
+digits, ORed beside the plain match so a name goes on working, and `None`
+for anything not worth treating as a number (fewer than `MIN_DIGITS`
+digits is a prefix somebody is still typing, which the plain match already
+answers). It costs nothing on an ordinary query and no round trip on
+either backend, since it is one more `LIKE` rather than a second read.
+
+It lives in `search_clients()` rather than in any one screen, because the
+Clients page, the kiosk's name lookup and the shop's sell modal all go
+through it — a second search with its own idea of a match would eventually
+disagree with the first, which is the rule the kiosk section already
+states. What it cannot do is reconcile a stored number with spaces or
+dashes *inside* it, since the match is still a contiguous substring; the
+academy's own numbers are contiguous, and the alternative is reading every
+client's phone on a path the kiosk waits on.
 
 **Neither backend can express "the last ten digits of a column" as a
 filter**, so `clients_by_phone_key()` is a port method and both
