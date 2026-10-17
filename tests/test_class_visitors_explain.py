@@ -13,6 +13,7 @@ and no filter will ever remove it.
 """
 
 import sqlite3
+from datetime import date
 
 import pytest
 
@@ -99,6 +100,44 @@ def test_sqlite_cannot_hold_a_plan_id_pointing_at_nothing(academy):
 
     with pytest.raises(sqlite3.IntegrityError):
         repo.update("bookings", moved["id"], {"subscription_id": 99999})
+
+
+def test_a_lapsed_student_is_named_with_the_day_she_drops_off(academy):
+    """The academy's actual report. She has no live plan in the class and no
+    cross-class booking either -- she is a former student inside the grace
+    month, which on the roster reads as a filter that failed. The date is
+    what tells the two apart without anybody working the calendar."""
+    repo = academy.repo
+    her = academy.solo_ballet
+    plan = repo.find_one("subscriptions", {"client_id": her,
+                                           "class_id": academy.ballet})
+    repo.update("subscriptions", plan["id"], {"active": 0})
+
+    out = _run(academy, academy.ballet)
+
+    assert "no live plan in this class" in out
+    assert "grace keeps her on the roster until" in out
+    assert "not the filter failing" in out
+    assert "Excluded by the filter" not in out, \
+        "she is not a visitor -- every booking of hers here is this class's"
+
+
+def test_a_live_plan_says_so_instead_of_a_date(academy):
+    out = _run(academy, academy.ballet)
+
+    assert "a live plan in this class: she is a student of it outright" in out
+    assert "grace keeps her" not in out
+
+
+def test_the_drop_off_day_is_the_first_the_cutoff_passes_her_end(academy):
+    """Asked of access.lapsed_cutoff() itself rather than by adding a month
+    here: a second copy of the clamped-calendar-month rule is what agrees
+    until February."""
+    assert class_visitors.drops_off("2026-09-18", date(2026, 10, 17)) == "2026-10-19"
+    assert class_visitors.drops_off("2026-09-18", date(2026, 10, 18)) == "2026-10-19"
+    # The short-month clamp, which is the whole reason this is not arithmetic.
+    assert class_visitors.drops_off("2026-01-31", date(2026, 2, 1)) == "2026-03-01"
+    assert class_visitors.drops_off("", date(2026, 10, 17)) == "unknown"
 
 
 def test_a_class_can_be_named_rather_than_numbered(academy):

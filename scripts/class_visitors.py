@@ -39,7 +39,7 @@ explain it.
 
 import pathlib
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 # This script lives in scripts/ -- apart from the app itself, so nobody has to
 # work out which files are the app and which are run by hand. The app's own
@@ -201,7 +201,18 @@ def explain(repo, class_id: int) -> int:
     is a bug in the filter; a name both agree on, with a reason printed
     beside it, is the filter working and the reason being something else.
 
-    Four reads, whatever the size of the class.
+    **It also says when each name goes away by itself**, which is the other
+    half of the same question and the half the first version left out. A
+    client stays for one calendar month after her last plan in the class
+    ends (`access.lapsed_cutoff()`), so a roster can legitimately hold
+    somebody with no live plan here at all -- her row reads `no plan` in
+    LEFT and names a *different* class under CLASS, because those two
+    columns answer different questions (this class's live plan, and all her
+    live plans). That looks exactly like a filter that has failed, and it is
+    the grace month doing what it is for. Printing the date she drops off is
+    what tells the two apart without anybody having to work the calendar.
+
+    Six reads, whatever the size of the class.
     """
     cl = repo.get("classes", class_id)
     if cl is None:
@@ -218,6 +229,25 @@ def explain(repo, class_id: int) -> int:
     classes = {c["id"]: c for c in repo.find("classes")}
     people = {c["id"]: c for c in repo.find("clients")}
 
+    # When each plan behind this roster ends, which is what the cutoff is
+    # measured against: the later of its own ENDS ON and the last session it
+    # pays for, wherever that session sits. One round trip for all of them
+    # rather than access.plan_end() per plan, which is three each -- see
+    # last_session_ts_bulk() and "Round trips are the unit of cost".
+    behind = sorted({b["subscription_id"] for b in booked
+                     if b.get("subscription_id")})
+    last_ts = repo.last_session_ts_bulk(behind) if behind else {}
+    ends = {}
+    for sub_id in behind:
+        q = plans.get(sub_id)
+        if q is None:
+            continue
+        ts = last_ts.get(sub_id)
+        ends[sub_id] = max(x for x in (q.get("expires_on"),
+                                       date.fromtimestamp(ts).isoformat()
+                                       if ts else None, "")
+                           if x is not None)
+
     print(f"  {config.describe()}")
     print(f"\n  {cl['name']}  (class {class_id})")
     print(f"  The roster the screen shows: {len(roster)} student(s), "
@@ -232,11 +262,13 @@ def explain(repo, class_id: int) -> int:
 
     counted, excluded = [], []
     for cid, bs in sorted(by_client.items(), key=lambda kv: name(kv[0])):
-        lines, keeps = [], False
+        lines, keeps, roster_end = [], False, ""
         for b in sorted(bs, key=lambda x: mine[x["session_id"]]["starts_at"]):
             sub_id = b.get("subscription_id")
             sub = plans.get(sub_id) if sub_id else None
             when = _said(mine[b["session_id"]]["starts_at"], b["status"])
+            own_day = date.fromtimestamp(
+                mine[b["session_id"]]["starts_at"]).isoformat()
             if sub_id and sub is None:
                 # A plan id pointing at nothing is **not** the fallback: both
                 # backends read the class off the plan and get nothing, so
@@ -247,11 +279,16 @@ def explain(repo, class_id: int) -> int:
                              f"there is no class to read: excluded")
             elif sub is None:
                 keeps = True
+                # With no plan there is nothing to read an end off either,
+                # so the booking's own session day is what the cutoff is
+                # measured against -- the same fallback _booking_end() makes.
+                roster_end = max(roster_end, own_day)
                 lines.append(f"{when} — no plan behind it, so this class is "
                              f"the only answer there is: KEEPS her on the "
                              f"roster")
             elif sub["class_id"] == class_id:
                 keeps = True
+                roster_end = max(roster_end, ends.get(sub_id, ""))
                 lines.append(f"{when} — plan {sub_id} is for this class: "
                              f"KEEPS her on the roster")
             else:
@@ -259,27 +296,42 @@ def explain(repo, class_id: int) -> int:
                     "name", f"class {sub['class_id']}")
                 lines.append(f"{when} — plan {sub_id} is for {other}: "
                              f"a visit, not membership (excluded)")
-        (counted if keeps else excluded).append((cid, lines))
+        (counted if keeps else excluded).append((cid, lines, roster_end))
 
-    for cid, lines in counted:
+    for cid, lines, roster_end in counted:
         shown = cid in on_screen
         mark = "" if shown else "   <- NOT on the roster (the lapsed cutoff)"
         print(f"\n    {name(cid)}  (client {cid}){mark}")
         for line in lines:
             print(f"        {line}")
+        if shown:
+            live = any(q["class_id"] == class_id and q.get("active")
+                       and q["client_id"] == cid for q in plans.values())
+            if live:
+                print("        -> a live plan in this class: she is a student "
+                      "of it outright")
+            else:
+                gone = drops_off(roster_end)
+                print(f"        -> no live plan in this class. Her last one "
+                      f"here ran to {roster_end or 'no date'}, and the "
+                      f"one-month")
+                print(f"           grace keeps her on the roster until "
+                      f"{gone} — this is not the filter failing,")
+                print(f"           it is access.lapsed_cutoff() doing what it "
+                      f"is for.")
 
     if excluded:
         print(f"\n  Excluded by the filter — every booking of theirs here is "
               f"funded by\n  another class's plan, so they are visitors and "
               f"not students:")
-        for cid, lines in excluded:
+        for cid, lines, _ in excluded:
             still = "   <- STILL on the roster: that is the bug" \
                 if cid in on_screen else ""
             print(f"\n    {name(cid)}  (client {cid}){still}")
             for line in lines:
                 print(f"        {line}")
 
-    unaccounted = set(on_screen) - {cid for cid, _ in counted}
+    unaccounted = set(on_screen) - {cid for cid, _, _ in counted}
     if unaccounted:
         print("\n  On the roster with nothing here to explain it — that is a "
               "bug in the\n  filter rather than in the data:")
@@ -288,6 +340,27 @@ def explain(repo, class_id: int) -> int:
 
     print("\n  Nothing was written.")
     return 0
+
+
+def drops_off(roster_end: str, today: date = None) -> str:
+    """
+    The first day this roster stops listing somebody whose last plan here
+    ended on `roster_end`.
+
+    Found by asking `access.lapsed_cutoff()` itself, one day at a time,
+    rather than adding a month here: a second copy of "one calendar month
+    back, with the day clamped to a shorter month" is exactly the kind of
+    arithmetic that agrees until February. It can never scan far -- a month
+    is a month -- and this is a script somebody runs by hand.
+    """
+    if not roster_end:
+        return "unknown"
+    d = today or date.today()
+    for _ in range(70):
+        if access.lapsed_cutoff(d) > roster_end:
+            return d.isoformat()
+        d += timedelta(days=1)
+    return "unknown"
 
 
 def find_class(repo, needle: str):

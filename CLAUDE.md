@@ -1497,6 +1497,21 @@ read the class off the plan and get nothing, so the row is *excluded*.
 SQLite's foreign key makes that state impossible there; MongoDB has no such
 constraint, which is the whole reason the branch exists.
 
+**And the second cause of that report is the grace month, which is why
+`--explain` prints the day each name goes away by itself.** A client stays
+for one calendar month after her last plan *in this class* ends, so a roster
+legitimately holds somebody with no live plan here at all — and her row then
+reads `no plan` under LEFT and names a **different** class under CLASS,
+because those two columns answer different questions (this class's live
+plan, and all her live plans). Three questions on one row, and only one of
+them is membership. That combination looks exactly like a filter that has
+failed, and it is `access.lapsed_cutoff()` doing precisely what it is for;
+the academy's first report of "the filter did not work" was this, not a
+cross-class visit at all. The drop-off day is found by asking
+`lapsed_cutoff()` itself one day at a time rather than adding a month in the
+script — a second copy of "one calendar month back, with the day clamped to
+a shorter month" is the kind of arithmetic that agrees until February.
+
 **The roster carries each student's balance for this class** — a LEFT column
 beside SLOTS and ATTENDED, reading `expired`, `0 left`, `n left`, `n
 unassigned` or `frozen to <date>` through the same `<BalancePill>` the
