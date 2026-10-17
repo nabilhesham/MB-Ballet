@@ -17,6 +17,12 @@ import { fmtISODay, withSize } from '../lib/format';
  * a class and a sale names a quantity — and the question reception is
  * answering is usually about one or the other.
  *
+ * **Every name in here closes the popup on the way out.** A HashRouter link
+ * changes the route and nothing else — the modal is not routed, so it sat
+ * on top of the client's profile with the till still in it, and the only
+ * way back was Close. Routing away from a screen is finishing with it, so
+ * the link is what dismisses this rather than a second gesture after it.
+ *
  * **Each list scrolls on its own** (`.listcap`), rather than letting the
  * veil scroll the whole modal. Two unbounded lists in one modal means
  * reaching the second one scrolls the first one past, and the totals at the
@@ -63,7 +69,9 @@ export default function TillDetail({ on }) {
           <div className="listcap">
           {data.plans.length ? data.plans.map(p => row(
             <span key="l">
-              <a href={`#/client/${p.client_id}`}>{p.client_name}</a>
+              <a href={`#/client/${p.client_id}`} onClick={close}>
+                {p.client_name}
+              </a>
               <span className="sub" style={{ display: 'block' }}>
                 {p.colour && <span className="dot" style={{ background: p.colour }} />}
                 {p.class_name || 'no class'} · {p.plan}
@@ -84,9 +92,14 @@ export default function TillDetail({ on }) {
           <div className="listcap">
           {data.products.length ? data.products.map(s => row(
             <span key="l">
-              <a href={`#/client/${s.client_id}`}>{s.client_name}</a>
+              <a href={`#/client/${s.client_id}`} onClick={close}>
+                {s.client_name}
+              </a>
               <span className="sub" style={{ display: 'block' }}>
-                {s.qty} × {withSize(s.product_name, s.size)}
+                {s.qty} ×{' '}
+                <a href={`#/product/${s.product_id}`} onClick={close}>
+                  {withSize(s.product_name, s.size)}
+                </a>
               </span>
             </span>,
             <span key="r" className="num" style={{ fontFamily: 'var(--mono)' }}>

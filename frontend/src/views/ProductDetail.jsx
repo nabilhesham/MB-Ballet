@@ -12,7 +12,7 @@ import DataTable from '../components/DataTable';
 import Empty from '../components/Empty';
 import ProductForm from '../modals/ProductForm';
 import SellProduct from '../modals/SellProduct';
-import { StockPill, money } from './Products';
+import { NoImage, StockPill, money } from './Products';
 
 export default function ProductDetail() {
   const { id } = useParams();
@@ -90,11 +90,7 @@ export default function ProductDetail() {
                 borderRadius: 'var(--r-sm)',
               }}
             />
-          ) : (
-            <div className="ph" style={{ width: 88, height: 88, fontSize: 11 }}>
-              no photo
-            </div>
-          )}
+          ) : <NoImage size={88} />}
           <div>
             <h1>{p.name}</h1>
             <div className="sub" style={{ fontFamily: 'var(--mono)' }}>{money(p.price)}</div>

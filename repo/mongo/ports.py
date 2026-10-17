@@ -311,13 +311,20 @@ class MongoClasses(ClassesPort, _Helpers):
         starts = {s["id"]: s["starts_at"] for s in sessions}
         bookings = self._projected(
             "bookings", ["client_id", "session_id", "subscription_id"])
+        # Who is still on the books. class_students() has always dropped an
+        # archived client (`cl.active=1` on SQLite, `people[cid]["active"]`
+        # here) and this count had not, so the card read one more than the
+        # page it opens -- archiving somebody took them off the roster and
+        # left them in the number beside it. One read, not one per class.
+        live = {c["id"] for c in
+                self._projected("clients", ["active"], {"active": 1})}
         # Both collections are already in hand, so the last session per plan
         # is arithmetic rather than a query -- see _plan_ends().
         plan_ends, sub_class = self._plan_ends(sessions, bookings)
         latest = {}
         for b in bookings:
             cid = sess_class.get(b["session_id"])
-            if cid is None:
+            if cid is None or b["client_id"] not in live:
                 continue
             # The booking's plan's class, not the session's: a slot moved
             # into this class to cover a missed one elsewhere is attendance,
@@ -723,9 +730,15 @@ class MongoClients(ClientsPort, _Helpers):
     def search_clients(self, active, q):
         flt = {"active": active}
         if q:
+            # The same two needles the SQLite side uses, in the same order:
+            # the stored text as typed, then the last ten digits that
+            # reconcile the three shapes one mobile arrives in. See
+            # identity.search_needle().
+            key = identity.search_needle(q)
             flt = {"$or": [{"name_en": {"like": f"%{q}%"}},
                            {"phone": {"like": f"%{q}%"}},
-                           {"school": {"like": f"%{q}%"}}],
+                           {"school": {"like": f"%{q}%"}}]
+                          + ([{"phone": {"like": f"%{key}%"}}] if key else []),
                    "active": active}
         # Sorted by the server, not in Python: this returns the whole client
         # table and the new name_en index carries the order. name_en is NOT

@@ -9,6 +9,7 @@ and the shop tables in db.py.
 """
 
 import os
+from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
@@ -134,6 +135,56 @@ def list_products(status: str = None):
                 shelves.get(r["id"], []),
                 key=lambda x: (x["size"] is not None, x["size"] or 0, x["id"]))
         return rows
+    finally:
+        repo.close()
+
+
+@router.get("/api/products/history")
+def purchase_history(start: str = None, end: str = None):
+    """
+    Everything sold in a date range, named: the product, the size, who
+    bought it, when, and what it came to.
+
+    **Declared above `/api/products/{pid}` on purpose.** That route takes an
+    `int`, so FastAPI would match this path against it first and answer a
+    422 about a path parameter -- a route that exists and cannot be reached,
+    which is the kind of thing that looks like a frontend bug for an hour.
+
+    **Dated by `paid_on`, the same column TAKEN TODAY reads**, so a day in
+    this list and a day in the till are the same day's money. The cost,
+    which the screen says rather than hiding: a sale nobody has dated yet
+    has no day to fall in and is in no range at all. It is still on the
+    client's profile and on the product's own page, which is where an
+    unpaid sale is chased from.
+
+    Both bounds are **inclusive**, because that is what a receptionist
+    typing two dates into a form means by "between" -- the same rule the
+    Clients list's joining range follows. `end` is pushed to the day after
+    for the half-open window the port wants.
+    """
+    for value in (start, end):
+        if value is None:
+            continue
+        try:
+            date.fromisoformat(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "Pick a day, or clear the date filter.")
+
+    repo = data.connect()
+    try:
+        # No bound given is the whole history rather than nothing: a range
+        # with one end open is a real question ("everything since September"),
+        # and the ISO strings sort, so the extremes are plain sentinels.
+        rows = repo.purchases_between(start or "0000-01-01",
+                                      access.next_day(end) if end
+                                      else "9999-12-31")
+        return {"start": start, "end": end, "sales": rows,
+                "items": sum(r["qty"] or 0 for r in rows),
+                "paid": round(sum((r["qty"] or 0) * (r["unit_price"] or 0)
+                                  for r in rows), 2),
+                # Counted, never folded in as zero -- the same treatment an
+                # unpriced plan gets on the dashboard.
+                "unpriced": sum(1 for r in rows if r["unit_price"] is None)}
     finally:
         repo.close()
 
