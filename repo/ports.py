@@ -238,11 +238,20 @@ class BookingsPort(ABC):
         """
 
     @abstractmethod
-    def settle_absences(self, now: int, frozen_sub_ids: list) -> int:
+    def settle_absences(self, now: int, frozen_sub_ids: list,
+                        ends_before: int) -> int:
         """
-        Sweep still-booked slots of finished sessions to absent, skipping
-        plans that are frozen — a paused client must never lose a session.
-        Returns how many were settled.
+        Sweep still-booked slots to absent, skipping plans that are frozen —
+        a paused client must never lose a session. Returns how many were
+        settled.
+
+        `ends_before` is the cutoff a session's `ends_at` must fall before,
+        and `now` is only what `settled_at` is stamped with. They are two
+        arguments because they are no longer the same instant: the day a
+        session belongs to is what decides whether its no-shows are written
+        off, so access.py passes the start of today and nothing is settled
+        until the day it happened in is over. See "Past sessions settle
+        themselves" in CLAUDE.md.
         """
 
 

@@ -561,7 +561,7 @@ class MongoBookings(BookingsPort, _Helpers):
             session=self.session)
         return res.matched_count > 0
 
-    def settle_absences(self, now, frozen_sub_ids):
+    def settle_absences(self, now, frozen_sub_ids, ends_before):
         # Driven from the bookings, not from the sessions. Reading the id of
         # every finished session and sending the lot back as an `$in` was two
         # round trips whose payload grew with the academy's whole history --
@@ -580,8 +580,11 @@ class MongoBookings(BookingsPort, _Helpers):
                 "from": "sessions", "localField": "session_id",
                 "foreignField": "_id", "as": "_s",
                 "pipeline": [
+                    # `ends_before`, not `now` -- see the port for why the
+                    # cutoff and the stamp are two arguments.
                     {"$match": {"status": {"$ne": "cancelled"},
-                                "ends_at": {"$lt": now, "$ne": None}}},
+                                "ends_at": {"$lt": ends_before,
+                                            "$ne": None}}},
                     {"$project": {"_id": 1}}]}},
             {"$match": {"_s": {"$ne": []}}},
             {"$project": {"_id": 1}},

@@ -266,7 +266,7 @@ class SqliteBookings(BookingsPort):
             "       checked_in_by='kiosk'"
             " WHERE id=? AND status != 'present'", (at, booking_id)).rowcount > 0
 
-    def settle_absences(self, now, frozen_sub_ids):
+    def settle_absences(self, now, frozen_sub_ids, ends_before):
         # The frozen plans are fetched separately and passed in rather than
         # joined, because Mongo has no cross-collection update and there are
         # never more than a handful of them.
@@ -274,11 +274,12 @@ class SqliteBookings(BookingsPort):
         # An absence has no other timestamp -- checked_in_at stays NULL --
         # so without it there is no way to tell an absence written at the
         # session's real end from one written an hour early.
+        # `ends_before` is the caller's cutoff, not `now`: see the port.
         sql = ("UPDATE bookings SET status='absent', settled_at=?"
                " WHERE status='booked'"
                "   AND session_id IN (SELECT id FROM sessions"
                "        WHERE status != 'cancelled' AND ends_at < ?)")
-        params = [now, now]
+        params = [now, ends_before]
         if frozen_sub_ids:
             sql += (f" AND (subscription_id IS NULL"
                     f"      OR subscription_id NOT IN ({_marks(frozen_sub_ids)}))")
