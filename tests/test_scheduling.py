@@ -153,9 +153,10 @@ def test_a_booking_on_a_cancelled_session_is_not_swept_absent(empty):
 
 
 def test_the_sweep_returns_how_many_bookings_it_settled(empty):
+    """Yesterday's sessions -- an absence waits for the end of its own day."""
     repo = empty.repo
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
-    for offset in (4, 8):
+    for offset in (28, 32):
         sid = add(empty, empty.ballet, db.now() - offset * 3600, 1.0)
         _ins(repo, "bookings", client_id=cid, session_id=sid,
              status="booked", created_at=db.now())
@@ -165,7 +166,7 @@ def test_the_sweep_returns_how_many_bookings_it_settled(empty):
 def test_the_sweep_is_idempotent(empty):
     repo = empty.repo
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
-    sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.0)
+    sid = add(empty, empty.ballet, db.now() - 28 * 3600, 1.0)
     _ins(repo, "bookings", client_id=cid, session_id=sid,
          status="booked", created_at=db.now())
     assert access.settle_past_sessions(repo) == 1

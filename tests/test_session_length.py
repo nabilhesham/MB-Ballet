@@ -9,9 +9,14 @@ sitting in.
 `sessions.duration_hours` is copied from the class when the session is
 created and was never touched again, so a class corrected from 1 hour to
 1.5 left every session already on the timetable one hour long -- and
-`ends_at`, which is what `complete_finished_sessions()` and
-`settle_absences()` compare against, is written from the *session's* own
-length. The sweep was firing at exactly the moment it was told to.
+`ends_at`, which is what `complete_finished_sessions()` compares against, is
+written from the *session's* own length. The sweep was firing at exactly the
+moment it was told to.
+
+The absence half of that is now answered twice over: an absence waits for
+the end of the day its session ran in (see access._start_of_today), which a
+length an hour short cannot reach past. The status half still turns on the
+session's own end, so this cascade is still what keeps it honest.
 
 `_repair_running_sessions()` cannot see this and in fact cements it: it
 makes `ends_at` agree with `duration_hours`, which is the number that is
@@ -158,8 +163,15 @@ def test_the_class_edit_is_what_applies_it(client):
 
 def test_a_relengthened_class_stops_closing_early(academy):
     """
-    The whole point, end to end: a session an hour into a 1.5-hour class is
-    still running, and its no-show is still booked rather than written off.
+    The whole point, end to end: a session an hour into a 1.5-hour class
+    reads `completed` while it is being taught, and the correction puts it
+    back to `scheduled`.
+
+    The no-show half of that failure is gone by construction now -- an
+    absence waits for the end of the day the session ran in, so the slot is
+    booked throughout and a length an hour short cannot write anybody off
+    mid-class. It is asserted at both ends anyway, because the status going
+    wrong is what used to drag the absence with it.
     """
     repo = academy.repo
     started = db.now() - 70 * 60
@@ -168,19 +180,18 @@ def test_a_relengthened_class_stops_closing_early(academy):
                              "subscription_id": None, "status": "booked",
                              "created_at": db.now()})
 
-    # As it stands the session is over and the latecomer is absent.
+    # As it stands the session reads as over, in a room with students in it.
     access.sweep_invalidate()
     access.settle_past_sessions(repo)
     assert repo.get("sessions", sid)["status"] == "completed"
-    assert repo.find_one("bookings", {"session_id": sid})["status"] == "absent"
+    assert repo.find_one("bookings", {"session_id": sid})["status"] == "booked"
 
     # The class is corrected to the length it really runs.
     access.relength_sessions(repo, academy.ballet, 1.5)
     access.sweep_invalidate()
     access.settle_past_sessions(repo)
 
-    # It is running again, and the slot is back -- the repair gives an
-    # absence back on a session it reopens.
+    # It is running again, and the slot is still the client's.
     assert repo.get("sessions", sid)["status"] == "scheduled"
     b = repo.find_one("bookings", {"session_id": sid})
     assert b["status"] == "booked"
@@ -193,7 +204,7 @@ def test_the_sweep_stamps_when_it_wrote_an_absence(academy):
     """
     An absence had no timestamp of its own -- `checked_in_at` stays NULL --
     so "marked absent too early" was unanswerable from the data. This is the
-    stamp, read against the session's own end.
+    stamp, read against the day the session ran in.
     """
     repo = academy.repo
     started = db.now() - 5 * 86400

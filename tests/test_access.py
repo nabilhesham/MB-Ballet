@@ -7,7 +7,7 @@ by querying whichever term was last seeded.
 """
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 
 import access
 import db
@@ -147,9 +147,10 @@ def test_only_present_and_absent_are_accepted(academy):
 
 
 def test_an_unattended_past_session_is_swept_to_absent(academy):
+    """Yesterday's, because an absence waits for the end of its own day."""
     repo = academy.repo
     past = add_session(repo, academy.ballet, academy.ana,
-                       db.now() - 4 * 3600, 1.5, status="scheduled")
+                       db.now() - 28 * 3600, 1.5, status="scheduled")
     repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
                              "subscription_id": None, "status": "booked",
                              "created_at": db.now()})
@@ -157,6 +158,63 @@ def test_an_unattended_past_session_is_swept_to_absent(academy):
     access.settle_past_sessions(repo)
 
     assert repo.find_one("bookings", {"session_id": past})["status"] == "absent"
+
+
+def test_a_session_that_ended_today_leaves_its_no_show_booked(academy, monkeypatch):
+    """
+    The day boundary, which is the whole of the rule. A session finished four
+    hours ago has ended by any reading of the clock -- and its no-show stays
+    booked until the day it ran in is over, so no wrong `ends_at` and no fast
+    clock can write somebody off while they are sitting in the class.
+
+    The clock is pinned to the afternoon rather than taken from the machine:
+    "four hours ago, and still today" is not true at half past midnight, and
+    a test whose answer depends on the hour it is run at is the thing
+    fixtures.py already guards against.
+    """
+    repo = academy.repo
+    monkeypatch.setattr(db, "now", lambda: int(
+        datetime.combine(date.today(), time(16, 0)).timestamp()))
+
+    past = add_session(repo, academy.ballet, academy.ana,
+                       db.now() - 4 * 3600, 1.5, status="scheduled")
+    repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
+                             "subscription_id": None, "status": "booked",
+                             "created_at": db.now()})
+    access.sweep_invalidate()
+
+    access.settle_past_sessions(repo)
+
+    b = repo.find_one("bookings", {"session_id": past})
+    assert b["status"] == "booked"
+    assert b["settled_at"] is None
+    # The session's own status is not on the day boundary -- the Sessions
+    # list and the dashboard tell a finished class from a running one.
+    assert repo.get("sessions", past)["status"] == "completed"
+
+
+def test_the_same_session_a_day_back_is_settled(academy, monkeypatch):
+    """
+    The other side of the boundary, so the test above cannot pass by the
+    sweep simply not running: the identical session dated a day earlier is
+    written off, with a stamp.
+    """
+    repo = academy.repo
+    monkeypatch.setattr(db, "now", lambda: int(
+        datetime.combine(date.today(), time(16, 0)).timestamp()))
+
+    past = add_session(repo, academy.ballet, academy.ana,
+                       db.now() - 28 * 3600, 1.5, status="scheduled")
+    repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
+                             "subscription_id": None, "status": "booked",
+                             "created_at": db.now()})
+    access.sweep_invalidate()
+
+    access.settle_past_sessions(repo)
+
+    b = repo.find_one("bookings", {"session_id": past})
+    assert b["status"] == "absent"
+    assert b["settled_at"] == db.now()
 
 
 def test_the_sweep_also_completes_the_session(academy):
