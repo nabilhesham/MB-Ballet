@@ -27,25 +27,13 @@ export default function ClassForm({ existing, instructors = [], onSaved }) {
     try {
       if (existing) {
         const r = await api(`/classes/${existing.id}`, { method: 'PUT', body });
-        // Both of the class's defaults cascade onto its upcoming sessions,
-        // and the length one has to be said out loud: it moves when each of
-        // those sessions ends, which is when the class closes itself and
-        // its no-shows become absent. A clash is named rather than failing
-        // the save, the same way repeating a term names a taken evening.
-        const clashes = r.length_clashes || [];
-        const did = [];
-        if (r.cascaded_sessions) {
-          did.push(`${r.cascaded_sessions} upcoming session${r.cascaded_sessions === 1 ? '' : 's'} now show this instructor`);
-        }
-        if (r.relengthened) {
-          did.push(`${r.relengthened} now run${r.relengthened === 1 ? 's' : ''} ${body.duration_hours}h`);
-        }
-        if (clashes.length) {
-          toast(`Saved${did.length ? ` — ${did.join(', ')}` : ''}. ${clashes.length} kept the old length — ${clashes[0]}`
-            + (clashes.length > 1 ? ` (and ${clashes.length - 1} more)` : ''), 'bad');
-        } else {
-          toast(did.length ? `Saved — ${did.join(', ')}` : 'Saved');
-        }
+        // The instructor cascades onto the class's upcoming sessions. The
+        // length deliberately does not — see api/classes.py — so there is
+        // one thing to report rather than two, and a saved length is only
+        // the value the session form will offer next time.
+        toast(r.cascaded_sessions
+          ? `Saved — ${r.cascaded_sessions} upcoming session${r.cascaded_sessions === 1 ? '' : 's'} now show this instructor`
+          : 'Saved');
       } else {
         await api('/classes', { method: 'POST', body });
         toast('Class created');
@@ -59,9 +47,10 @@ export default function ClassForm({ existing, instructors = [], onSaved }) {
     <>
       <h3>{existing ? 'Edit class' : 'New class'}</h3>
       {existing
-        ? <div className="mh">The length and the instructor also apply to every
-            upcoming session of this class — the length is what decides when each
-            one closes and its no-shows become absent.</div>
+        ? <div className="mh">The instructor also applies to every upcoming
+            session of this class. The length does not — each session keeps
+            the one it was scheduled with, and that is what decides when it
+            closes and its no-shows become absent.</div>
         : <div className="mh">Sessions are scheduled separately once the class exists.</div>}
       <label>NAME</label>
       <input value={name} onChange={e => setName(e.target.value)} placeholder="Ballet" />
@@ -69,9 +58,14 @@ export default function ClassForm({ existing, instructors = [], onSaved }) {
       <textarea value={description} onChange={e => setDescription(e.target.value)} />
       <div className="fieldrow">
         <div>
-          <label>LENGTH (HOURS)</label>
+          {/* The usual length, offered when somebody schedules a session of
+              this class. It is not the length of any session already on the
+              timetable: each of those carries its own, and changing this
+              leaves every one of them exactly as it is. */}
+          <label>USUAL LENGTH (HOURS)</label>
           <input type="number" step="0.25" min="0.25" value={duration}
                  onChange={e => setDuration(e.target.value)} />
+          <div className="mh">Offered when you schedule a session. Sessions already on the timetable keep their own length.</div>
         </div>
         <div>
           <label>LEVEL</label>

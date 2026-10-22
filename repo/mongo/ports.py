@@ -175,13 +175,28 @@ class MongoSessions(SessionsPort, _Helpers):
                 "duration_hours": s["duration_hours"],
                 "class_name": k["name"] if k else None}
 
-    def complete_finished_sessions(self, now):
-        return self.db["sessions"].update_many(
-            {"status": "scheduled", "ends_at": {"$lt": now, "$ne": None}},
-            {"$set": {"status": "completed"}},
-            session=self.session).modified_count
+    def due_sessions(self, now):
+        # Either write still outstanding counts as due -- see the SQLite side
+        # for the hand-completed session that still holds booked slots. Two
+        # reads rather than one aggregate: the second is driven from the
+        # still-`booked` bookings, which are the bounded set (what is left to
+        # settle plus what is yet to happen), never the whole history. This
+        # runs on the watcher and at startup, not on a read anybody waits on.
+        past = {"status": {"$ne": "cancelled"},
+                "ends_at": {"$lt": now, "$ne": None}}
+        due = {d["_id"]: d["ends_at"] for d in self.db["sessions"].find(
+            {**past, "status": "scheduled"}, {"ends_at": 1}, session=self.session)}
+        held = [i for i in self.db["bookings"].distinct(
+            "session_id", {"status": "booked"}, session=self.session)
+            if i not in due]
+        if held:
+            due.update({d["_id"]: d["ends_at"] for d in self.db["sessions"].find(
+                {**past, "_id": {"$in": held}}, {"ends_at": 1},
+                session=self.session)})
+        return [{"id": i, "ends_at": due[i]}
+                for i in sorted(due, key=lambda i: (due[i], i))]
 
-    def next_sweep_deadline(self, now):
+    def next_session_end(self, now):
         doc = self.db["sessions"].find_one(
             {"status": {"$ne": "cancelled"}, "ends_at": {"$gte": now, "$ne": None}},
             {"ends_at": 1}, sort=[("ends_at", 1)], session=self.session)
@@ -561,41 +576,22 @@ class MongoBookings(BookingsPort, _Helpers):
             session=self.session)
         return res.matched_count > 0
 
-    def settle_absences(self, now, frozen_sub_ids, ends_before):
-        # Driven from the bookings, not from the sessions. Reading the id of
-        # every finished session and sending the lot back as an `$in` was two
-        # round trips whose payload grew with the academy's whole history --
-        # on the path a client waits through at the desk. Still-`booked`
-        # bookings are the bounded set: what is left to settle plus what is
-        # yet to happen, never what has already been settled once.
-        match = {"status": "booked"}
+    def settle_session_absences(self, session_id, now, frozen_sub_ids):
+        # One update_many over one session's bookings, and no $lookup at all.
+        # It used to join sessions to find every finished one -- a payload
+        # that grew with the academy's whole history, on a query the kiosk
+        # waited through. Naming the session the event fired for removes both
+        # the join and the time comparison; see the port.
+        match = {"status": "booked", "session_id": session_id}
         if frozen_sub_ids:
             # `$nin` matches a null subscription_id correctly here *because*
             # every document carries the field explicitly (see schema.py) and
             # None is not in the list.
             match["subscription_id"] = {"$nin": list(frozen_sub_ids)}
-        due = [d["_id"] for d in self.db["bookings"].aggregate([
-            {"$match": match},
-            {"$lookup": {
-                "from": "sessions", "localField": "session_id",
-                "foreignField": "_id", "as": "_s",
-                "pipeline": [
-                    # `ends_before`, not `now` -- see the port for why the
-                    # cutoff and the stamp are two arguments.
-                    {"$match": {"status": {"$ne": "cancelled"},
-                                "ends_at": {"$lt": ends_before,
-                                            "$ne": None}}},
-                    {"$project": {"_id": 1}}]}},
-            {"$match": {"_s": {"$ne": []}}},
-            {"$project": {"_id": 1}},
-        ], session=self.session)]
-        if not due:
-            return 0
         # settled_at says this is what wrote the row off, and when -- see
         # the SQLite side for why an absence needs a timestamp of its own.
         return self.db["bookings"].update_many(
-            {"_id": {"$in": due}},
-            {"$set": {"status": "absent", "settled_at": now}},
+            match, {"$set": {"status": "absent", "settled_at": now}},
             session=self.session).modified_count
 
 

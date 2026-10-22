@@ -224,137 +224,6 @@ def slot_taken_message(row) -> str:
             f"is already taken by {row['class_name']}")
 
 
-def relength_sessions(repo, class_id: int, duration_hours: float) -> dict:
-    """
-    Make this class's upcoming sessions as long as the class now says.
-
-    **The class's length is a cascade, not only a default for the next
-    session created.** It was only the second of those, and that is the bug
-    this exists for: a class seeded at 1 hour (seed.py gives the
-    flexibility sheet `duration_hours: 1.0`) and later corrected to 1.5 or 2
-    on the class page left every session already on the timetable one hour
-    long. `sessions.ends_at` is written from the *session's* own duration, so
-    those sessions went on ending at the old hour — which is
-    `complete_finished_sessions()` marking the class completed while it was
-    still running, and, back when an absence was written at the session's own
-    end, `settle_absences()` marking a client who arrived at 1h05 absent in a
-    room they were sitting in. Both were reported as bugs in the sweep; the
-    sweep was reading the length it was given. The absence half is answered
-    twice over now that an absence waits for the end of the day
-    (_start_of_today), and the status half is still this.
-
-    `_repair_running_sessions()` cannot fix it, and in fact cements it: it
-    makes `ends_at` agree with the session's own `duration_hours`, which is
-    the number that is wrong. The repair is for a row that disagrees with
-    itself. This is for a row that disagrees with its class.
-
-    It follows the instructor cascade exactly (see api/classes.py), including
-    overwriting a session someone had set to a different, specific length:
-    two rules for one field is how the timetable and the class drift apart
-    again. Finished and cancelled sessions are never touched -- a finished
-    session's length is the record of how long it ran, and relengthening it
-    would rewrite who was absent at the end of it. A session running *now*
-    is not finished, and is the one this was reported from: see the window
-    below.
-
-    **A session that cannot be lengthened is named, never forced.** One
-    session at a time is academy-wide (`slot_conflict()`), so making a class
-    longer can run it into whatever is on next; that one keeps the length it
-    has and comes back in `skipped`, the same way repeating a term skips a
-    taken evening rather than failing the whole batch. The sessions being
-    changed are tested against each other too, in start order, or a class
-    whose own sessions sit back to back would be laid over itself.
-    """
-    # Everything of this class's that has not finished under the new length:
-    # `starts_at > now - new_length` is exactly "its new end is still ahead".
-    #
-    # **"Not finished" rather than "not started", and that is the point.** A
-    # class running right now is the case this was reported from -- a session
-    # an hour into a 1.5-hour class, already `completed`, with its latecomer
-    # already `absent`. Asking `starts_at > now` would skip the one session
-    # reception is standing in front of, and asking `status = 'scheduled'`
-    # (which is what the instructor cascade asks, correctly, an instructor
-    # not being changeable retroactively) would skip it a second time over,
-    # since the early end is what marked it completed.
-    # `_repair_running_sessions()` puts that status and those absences back
-    # on the next sweep, once this has given the row the right end.
-    #
-    # Shortening leaves a session the new length says is already over at the
-    # length it ran, by the same arithmetic: an edit must not write somebody
-    # off retroactively.
-    cutoff = db.now() - int(duration_hours * 3600)
-    rows = [r for r in repo.find("sessions",
-                                 {"class_id": class_id,
-                                  "status": {"ne": "cancelled"},
-                                  "starts_at": {"gt": cutoff}})
-            if r["duration_hours"] != duration_hours]
-    if not rows:
-        return {"relengthened": 0, "skipped": []}
-
-    span_from = min(r["starts_at"] for r in rows)
-    span_to = max(max(ends_at_of(r["starts_at"], duration_hours),
-                      ends_at_of(r["starts_at"], r["duration_hours"]))
-                  for r in rows)
-    # Everything that could overlap the span, academy-wide -- the same
-    # predicate repo.slot_conflict() uses, widened from one slot to the whole
-    # run of sessions, so this costs two reads rather than one per session.
-    mine = {r["id"] for r in rows}
-    occupied = [(x["starts_at"], ends_at_of(x["starts_at"], x["duration_hours"]),
-                 x["id"], x["class_id"])
-                for x in repo.find("sessions", {"status": {"ne": "cancelled"},
-                                                "starts_at": {"lt": span_to},
-                                                "ends_at": {"gt": span_from}})
-                if x["id"] not in mine]
-
-    done, skipped = [], []
-    for r in sorted(rows, key=lambda r: (r["starts_at"], r["id"])):
-        ts, end = r["starts_at"], ends_at_of(r["starts_at"], duration_hours)
-        # Half-open, matching repo.slot_conflict().
-        hits = [o for o in occupied if o[0] < end and o[1] > ts]
-        if hits:
-            clash = min(hits, key=lambda o: (o[0], o[2]))
-            skipped.append((r, clash))
-            # It keeps the length it has, and still occupies that.
-            occupied.append((ts, session_end(r), r["id"], class_id))
-            continue
-        occupied.append((ts, end, r["id"], class_id))
-        done.append(r)
-
-    # One write per session, because `ends_at` is `starts_at` plus the new
-    # length and so differs on every row -- the filter dialect carries no
-    # computed values on purpose (see repo/filters.py). It is charged to a
-    # class edit, against the handful of sessions that class has ahead of it.
-    for r in done:
-        repo.update("sessions", r["id"],
-                    {"duration_hours": duration_hours,
-                     "ends_at": ends_at_of(r["starts_at"], duration_hours)})
-
-    names = {}
-    if skipped:
-        # A clash is the (starts_at, ends_at, id, class_id) tuple the
-        # occupied list carries, not a row.
-        names = {c["id"]: c["name"] for c in repo.find(
-            "classes", {"id": {"in": sorted({c[3] for _, c in skipped})}})}
-    return {"relengthened": len(done),
-            "skipped": [_kept_length_message(r, c, names.get(c[3]))
-                        for r, c in skipped]}
-
-
-def _kept_length_message(row, clash, clash_name) -> str:
-    """Why one session was left at the length it had, in plain language."""
-    starts = time.localtime(row["starts_at"])
-    return (f"{time.strftime('%a %d %b', starts)} "
-            f"{time.strftime('%H:%M', starts)} stayed at "
-            f"{_hours_said(row['duration_hours'])} — a longer one would run "
-            f"into {clash_name or 'another class'} at "
-            f"{time.strftime('%H:%M', time.localtime(clash[0]))}")
-
-
-def _hours_said(h: float) -> str:
-    """1.5 as "1.5h", 2.0 as "2h" -- the length as somebody would say it."""
-    return f"{h:g}h"
-
-
 # ---------------------------------------------------------------- plans
 def _iso_day(ts: int) -> str:
     """The local calendar day a unix timestamp falls on."""
@@ -676,236 +545,137 @@ def plan_end(repo, sub) -> str:
     return max(x for x in (sub.get("expires_on"), last, "") if x is not None)
 
 
-# ---------------------------------------------------------------- auto-absent
+# ------------------------------------------------------- end-of-session event
 #
-# The sweep runs before every read that touches attendance -- nine endpoints
-# -- and against a networked backend it cost about 400ms of those reads, which
-# was a fifth to a third of every page in the admin.
+# **A session's no-shows are written off by an event at that session's own
+# end, and by nothing else.** There is one moment it can happen and the
+# process waits for it: server.py's watcher sleeps until `next_session_end()`
+# and calls `session_ended()` for each session that has arrived. No window is
+# scanned, no read endpoint settles anything on the way past, and no cutoff
+# is compared against a clock anywhere below this line.
 #
-# It does not have to. What the sweep acts on is wall-clock time crossing a
-# session's `ends_at` (both the booked->absent and the scheduled->completed
-# halves), or a date boundary (lift_expired_freezes, which compares
-# `frozen_until` to today). So once it has run, it is *provably* unable to do
-# anything again until the earlier of the next session end and the next
-# midnight. `_sweep_deadline` is that moment, and before it the sweep costs
-# zero round trips.
+# That replaced a sweep, and the two things the sweep had grown are both
+# gone with it:
 #
-# **This is an exact skip, not a throttle.** The distinction is the whole
-# point: a throttle trades the "nothing on screen is stale" invariant for
-# speed, and was deliberately declined for exactly that reason. Skipping until
-# a moment nothing can happen before loses nothing at all.
+# * It ran at the top of nine read endpoints -- about 400ms of every admin
+#   page against Atlas -- so it had to be given a cached deadline to skip
+#   itself. An event needs neither: nothing is stale between two moments
+#   when nothing can have happened.
+# * Deciding *whether* a session had ended meant comparing `ends_at` against
+#   `now` on every pass, which made every way of `ends_at` being wrong a way
+#   of writing somebody off in a room they were sitting in. The comparison
+#   happens once now, when the watcher picks its next deadline, and the only
+#   input is the session's own stored end.
 #
-# The one thing the deadline cannot see is a write -- a session created in the
-# past, an edited start, a new freeze. server.py's middleware calls
-# sweep_invalidate() on any non-GET request, which is the single place where
-# "something may have changed" is knowable, and cannot be forgotten by an
-# endpoint added later.
-_sweep_deadline = 0
+# The one thing an event cannot see is a write that moves the moment -- a
+# session created in the past, an edited start or length, a new freeze. The
+# middleware in server.py wakes the watcher on any non-GET request, which is
+# the single place in the app where "something may have changed" is knowable,
+# so a write endpoint added later is covered without anyone remembering to.
 
-
-def sweep_invalidate():
-    """
-    Forget the cached deadline: a write may have moved it. The next
-    settle_past_sessions() sweeps and recomputes.
-    """
-    global _sweep_deadline
-    _sweep_deadline = 0
-
-
-# How long the background sweep waits between passes. It used to be a flat
-# hour, which meant the loop woke on its own cadence rather than on the
-# timetable's -- and on a laptop sitting on the kiosk screen that loop is the
-# only thing applying any of the sweep's rules, because nothing there reads
-# attendance.
+# The watcher's bounds, and the second it waits past its deadline.
 #
-# The deadline above already knows the exact moment there can be work -- the
-# next session end for a completion, or midnight for a freeze and for the
-# day's absences -- so the loop waits for that instead. The floor keeps a
-# session ending this very second from spinning the loop (`next_sweep_deadline`
-# answers `ends_at >= now` while both writes want `<`, so the pass landing
-# exactly on an end has nothing to do); the ceiling keeps the old hourly pass
-# as a heartbeat for the things a deadline cannot see -- a suspended laptop, a
-# clock jump, a write made while the loop was already asleep.
-SWEEP_WAIT_MIN = 5
-SWEEP_WAIT_MAX = 3600
-
-
-def seconds_to_next_sweep() -> float:
-    """How long until the sweep could next have something to do."""
-    return max(SWEEP_WAIT_MIN, min(_sweep_deadline - db.now(), SWEEP_WAIT_MAX))
+# `next_session_end()` answers `ends_at >= now` while `due_sessions()` wants
+# `<`, so a pass landing *exactly* on a session's end finds nothing to do.
+# Sleeping to the deadline therefore fired the event one floor-length late --
+# measured at 5s against a running server, which is 5s of a slot reading
+# `booked` after the class is over. WATCH_LAG is the fix: wake a second
+# after the moment, not on it, and the comparison is satisfied on the first
+# pass. The floor is then only a spin guard and can be the same second.
+#
+# The ceiling is a heartbeat for what a sleeping process cannot see -- a
+# suspended laptop, a clock jump -- and never delays an event: each wake
+# recomputes the deadline, so the nearest one still wins to the second.
+WATCH_LAG = 1
+WATCH_WAIT_MIN = 1
+WATCH_WAIT_MAX = 3600
 
 
 def _next_midnight(now: int) -> int:
     """
-    The start of tomorrow, local time. The deadline is capped at this because
-    two of the sweep's four jobs act on a *date* rather than on an instant:
-    lift_expired_freezes() compares `frozen_until` against today, and
-    settle_absences() is given the start of today as its cutoff (below). A
-    freeze ending tomorrow, and this evening's no-shows, both become due at
-    tomorrow's midnight, which no session's ends_at need coincide with.
+    The start of tomorrow, local time.
+
+    The watcher's deadline is capped at this because one job in it is about a
+    *date* rather than an instant: lift_expired_freezes() compares
+    `frozen_until` against today, so a freeze ending tomorrow becomes due at
+    tomorrow's midnight, which no session's end need coincide with.
     """
     return int(datetime.combine(
         date.fromtimestamp(now) + timedelta(days=1), _t.min).timestamp())
 
 
-def _start_of_today(now: int) -> int:
+def _frozen_plan_ids(repo) -> list:
+    """The plans a settle must skip. One read, passed down."""
+    return [r["id"] for r in repo.find("subscriptions", {"frozen_on": {"ne": None}})]
+
+
+def session_ended(repo, session_id: int, frozen=None) -> int:
     """
-    Midnight at the top of today, local time -- the cutoff a session's
-    `ends_at` has to fall before for its no-shows to be written off.
+    One session's duration has run out: write off whoever never checked in,
+    and close the session. Returns how many slots were settled.
 
-    **A no-show is settled at the end of the day their session ran, not at
-    the end of the session.** That is a reversal, and the reason is written
-    down because the earlier reasoning is still in this file's history: the
-    session's own end is the exactly-right moment *if* `ends_at` is right,
-    and three separate ways of it being an hour out have been reported from
-    the academy as "it marked them absent after one hour" -- a stored end
-    short of the class (_repair_running_sessions), a session shorter than its
-    class (relength_sessions), and the machine's clock an hour fast
-    (/api/clock). Each was fixed; each left the same report coming back,
-    because every one of them is invisible from the screen it is reported on.
+    **This is the event, and it is the only thing that creates an absence.**
+    Being called *is* the statement that the session has finished, so nothing
+    here re-derives that from `ends_at`, a duration, or a date -- which is
+    what makes a wrong stored end a wrong *alarm time* rather than a client
+    marked absent while the class is still being taught.
 
-    The day boundary is the one cutoff none of those three can cross. An
-    `ends_at` an hour wrong, or a clock an hour fast, moves a session's end
-    by an hour and moves the start of its day by nothing at all, so a client
-    sitting in a class can no longer be written off while they are in it --
-    which is the whole of the complaint. The price, stated so it is not
-    discovered: SESSIONS LEFT reads one too many for the rest of the day
-    after a no-show, and a slot shows `booked` all evening for a class that
-    has finished.
-
-    `complete_finished_sessions()` is deliberately **not** moved with it. A
-    session's *status* is what the Sessions list and the dashboard use to
-    tell a class that has ended from one still running, and a whole day of
-    `scheduled` after the fact is what got an earlier end-of-day version of
-    this reverted. One of the two is about the timetable and the other is
-    about a person's balance; only the second one was being complained about.
+    A frozen plan is skipped so a paused client never loses a session;
+    `frozen` is those ids when the caller has already read them, because
+    working through a backlog must not be one read of that collection per
+    session. The status goes to `completed` whether or not there was anybody
+    to settle. Running it twice is harmless: the second pass finds no
+    `booked` slots and a session already `completed`.
     """
-    return int(datetime.combine(date.fromtimestamp(now), _t.min).timestamp())
-
-
-def settle_past_sessions(repo) -> int:
-    """
-    Any booking never checked in becomes absent once the *day* its session
-    ran in is over, and any session whose own end has passed becomes
-    completed. Called on startup and before anything that reads attendance,
-    so what is on screen is never stale.
-
-    The two halves use two different cutoffs on purpose -- see
-    _start_of_today() for why an absence waits for the end of the day while a
-    status does not.
-
-    Dated freezes are lifted first: a plan that came out of a freeze last week
-    should have its slots settled normally, and one still frozen is skipped
-    entirely so a paused client never loses a session.
-
-    Returns 0 without touching the database while the cached deadline above
-    has not passed, because nothing it looks at can have changed yet.
-    """
-    global _sweep_deadline
-    if db.now() < _sweep_deadline:
-        return 0
-    settled = _sweep(repo)
-    # After the sweep, not before: `now` has to be read after the writes so a
-    # session that ended during them is not skipped over until tomorrow.
-    now = db.now()
-    nxt = repo.next_sweep_deadline(now)
-    _sweep_deadline = min(_next_midnight(now), nxt) if nxt else _next_midnight(now)
-    return settled
-
-
-# How far back a repair looks for a session that is still running. One
-# marked completed that started more than a day ago cannot be, whatever its
-# duration column says.
-REPAIR_WINDOW_S = 86400
-
-
-def _repair_running_sessions(repo, now: int) -> int:
-    """
-    Put a session that is still running back to `scheduled`, and give its
-    no-shows their slots back. Returns how many were reopened.
-
-    **This is a repair for a state the app can reach and cannot otherwise
-    leave.** A session whose stored `ends_at` is earlier than its own
-    duration says gets completed early: the dashboard shows the class as
-    `completed` while it is visibly running, and nothing afterwards puts the
-    status back. It used to cost the clients in the room their slots as well
-    -- `settle_absences()` wrote every no-show absent at that wrong moment,
-    mid-class -- which is no longer reachable, since an absence waits for the
-    end of the day (see _start_of_today). The repair stays for the status,
-    and because slot_conflict() reads `ends_at` when somebody schedules over
-    the slot.
-
-    Two writes, in that order:
-
-    * **`ends_at` is rewritten wherever it disagrees with
-      `starts_at + duration_hours*3600`.** That column is supposed to have
-      one writer (`ends_at_of()`, through the four paths named there) and
-      `db.migrate()` fills it where it is NULL -- but NULL is not the only
-      way to be wrong, and a row that is wrong by an hour is invisible: the
-      session simply ends early, every time, with nothing on any screen to
-      say why. Repairing it here means the next sweep is working from the
-      duration the session itself carries, which is the whole point.
-    * **A `completed` session whose corrected end is still ahead goes back to
-      `scheduled`**, and its `absent` bookings back to `booked`.
-
-    It gives back *every* absence on such a session, including one reception
-    marked by hand during the class. That is deliberate rather than careless:
-    nothing distinguishes the two (`set_status` leaves `checked_in_at` NULL
-    for both), and the sweep will write the hand-marked one again at the real
-    end of the class, so the record converges on the same answer. What it
-    will not do is hold a late arrival out of a class that is still running.
-
-    The cost is one read per sweep, scoped to the window above plus
-    everything still ahead -- and the sweep only runs once a session's end
-    has passed (see the deadline in settle_past_sessions).
-    """
-    reopened = []
-    for s in repo.find("sessions", {"starts_at": {"gte": now - REPAIR_WINDOW_S}}):
-        fields = {}
-        true_end = ends_at_of(s["starts_at"], s["duration_hours"])
-        if s["ends_at"] != true_end:
-            fields["ends_at"] = true_end
-        # A cancelled session has its ends_at kept honest -- slot_conflict()
-        # reads it when somebody un-cancels -- but is never reopened: it
-        # occupies nothing on purpose.
-        if (s["status"] == "completed"
-                and s["starts_at"] <= now < true_end):
-            fields["status"] = "scheduled"
-            reopened.append(s["id"])
-        if fields:
-            repo.update("sessions", s["id"], fields)
-    if reopened:
-        repo.update_where("bookings",
-                          {"session_id": {"in": reopened}, "status": "absent"},
-                          {"status": "booked", "settled_at": None})
-    return len(reopened)
-
-
-def _sweep(repo) -> int:
     with repo.begin():
-        # The repair runs first, because both writes below read `ends_at`: a
-        # row whose stored end is wrong would otherwise be completed again in
-        # this same pass, and the two would take turns for ever.
-        _repair_running_sessions(repo, db.now())
-        # The frozen plans are read first and passed in rather than joined:
-        # Mongo has no cross-collection update, and there are never more than
-        # a handful of them. One read, not two -- lift_expired_freezes() asks
-        # the same collection the same question, narrowed, so it is handed
-        # the rows instead of fetching its own. This runs before every read
-        # that touches attendance, so each round trip here is one a client
-        # waits through at the desk.
-        frozen = repo.find("subscriptions", {"frozen_on": {"ne": None}})
-        lifted = lift_expired_freezes(repo, frozen)
-        now = db.now()
-        still_frozen = [r["id"] for r in frozen if r["id"] not in lifted]
-        # Two instants, not one: `now` is what settled_at is stamped with,
-        # and the start of today is the cutoff a session's end has to fall
-        # before. See _start_of_today() for why they parted company.
-        settled = repo.settle_absences(now, still_frozen, _start_of_today(now))
-        # Still the session's own end. A status says whether a class is
-        # running, which is a question about the clock and not about the day.
-        repo.complete_finished_sessions(now)
+        if frozen is None:
+            frozen = _frozen_plan_ids(repo)
+        settled = repo.settle_session_absences(session_id, db.now(), frozen)
+        repo.update("sessions", session_id, {"status": "completed"})
         return settled
+
+
+def settle_due_sessions(repo) -> int:
+    """
+    Fire the event for every session whose end has already passed and which
+    nobody has closed. Returns how many slots were settled in total.
+
+    Normally there is nothing to do, because the watcher fires each event on
+    time. This is the backlog: the laptop was off overnight, the process was
+    restarted, or a write has just put a session in the past. It is what
+    startup runs, and what each wake of the watcher runs before working out
+    when to sleep until.
+
+    Dated freezes are lifted first -- a plan that came out of a freeze last
+    week should have its slots settled normally, and one still frozen is
+    skipped entirely. The frozen plans are read once for the whole backlog
+    rather than once per session.
+
+    Each session is its own transaction deliberately: a backlog is not one
+    change, and one session that cannot be settled must not take the other
+    forty with it.
+    """
+    frozen = _frozen_plan_ids(repo)
+    with repo.begin():
+        lifted = lift_expired_freezes(repo, repo.find(
+            "subscriptions", {"frozen_on": {"ne": None}}))
+    still_frozen = [i for i in frozen if i not in lifted]
+    return sum(session_ended(repo, s["id"], still_frozen)
+               for s in repo.due_sessions(db.now()))
+
+
+def seconds_to_next_end(repo) -> float:
+    """
+    How long until the next session end -- or the next midnight, whichever is
+    sooner, since a dated freeze comes due on one of those.
+
+    Read after the backlog has been worked through, never before: a session
+    settled a moment ago must not still be the answer.
+    """
+    now = db.now()
+    nxt = repo.next_session_end(now)
+    due = min(_next_midnight(now), nxt) if nxt else _next_midnight(now)
+    return max(WATCH_WAIT_MIN, min(due - now + WATCH_LAG, WATCH_WAIT_MAX))
 
 
 # ---------------------------------------------------------------- scanning
@@ -1000,9 +770,15 @@ def _client_payload(repo, client, sub, rows, class_id=None) -> dict:
 
 
 def verify(repo, raw_token: str) -> dict:
-    """Read-only. Works out who this is and which session they are here for."""
-    settle_past_sessions(repo)
+    """
+    Read-only. Works out who this is and which session they are here for.
 
+    It settles nothing on the way past, and used not to: the sweep ran here
+    first so a no-show's slot could not still read `booked`. The end-of-
+    session event has already done that by the time anybody scans -- see the
+    note above session_ended() -- which takes four round trips off the one
+    path with a client standing at the desk.
+    """
     try:
         tokens.parse(raw_token, max_age=None)
     except tokens.TokenError as e:
@@ -1197,7 +973,6 @@ def _decide(repo, client, cred, base, t, rows, sub):
 
 def verify_by_client(repo, client_id: int) -> dict:
     """Member-number lookup. Same rules; no card, so no class filter."""
-    settle_past_sessions(repo)
     client = repo.get("clients", client_id)
     if client is None:
         return _deny(f"No client with number {client_id:05d}")
@@ -1251,7 +1026,6 @@ def swap_options(repo, client_id: int) -> dict:
     can say which is which, because giving up a future date and reclaiming a
     missed one are different decisions.
     """
-    settle_past_sessions(repo)
     start, end = day_bounds()
     now = db.now()
 
@@ -1435,8 +1209,8 @@ def move_booking(repo, client_id: int, from_session: int, to_session: int,
 
     `status` writes the final attendance state in the same breath, so
     "mark present on the session they actually attended" is one transaction
-    rather than a move that settle_past_sessions() could flip to absent
-    before the status lands.
+    rather than a move the end-of-session event could flip to absent before
+    the status lands.
     """
     with repo.begin():
         b = repo.find_one("bookings", {"client_id": client_id,
@@ -2103,9 +1877,13 @@ def delete_client(repo, client_id: int, hard: bool = False) -> dict:
     record of who attended what is worse than a cluttered list.
     """
     with repo.begin():
-        # So a booking whose session has already finished counts as history
-        # rather than as something still upcoming in the guard below.
-        settle_past_sessions(repo)
+        # The one read path that still works the backlog of session ends
+        # itself, rather than leaving it to the event. The hard-delete guard
+        # below counts bookings that are no longer `booked`, so a no-show
+        # nobody has written off yet reads as a client with no history at
+        # all -- and this is a destructive, irreversible path that nobody is
+        # waiting on. It costs one indexed read that normally finds nothing.
+        settle_due_sessions(repo)
 
         client = repo.get("clients", client_id)
         if not client:
@@ -2552,7 +2330,7 @@ def month_intake(repo, month: str = None, month_to: str = None) -> dict:
 #
 # The day is passed in rather than read off the clock, so the Cards screen
 # can ask about any date and opens on today. Same shape as
-# `sessions_in_range(start, end)` and `settle_absences(now, ..., ends_before)`.
+# `sessions_in_range(start, end)` and `settle_session_absences(sid, now, ...)`.
 # ======================================================================
 
 def next_day(iso: str) -> str:
@@ -2733,9 +2511,8 @@ def set_product_sizes(repo, product_id: int, sizes) -> dict:
     run -- but removing the row would leave a sale pointing at a shelf that
     does not exist, and `unsell_product()` would then have nowhere to put the
     thing back. Such a size is kept at zero and **named** in `kept`, the same
-    treatment `relength_sessions()` gives a session it cannot lengthen: the
-    screen says what it did instead of the edit silently doing less than it
-    said.
+    treatment `repeat_sessions()` gives a date it cannot use: the screen says
+    what it did instead of the edit silently doing less than it said.
 
     A quantity below what has already been sold is not refused. Stock is what
     is on the shelf *now*, and a sale is a receipt for something that left
@@ -3018,8 +2795,8 @@ def archive_product(repo, product_id: int, hard: bool = False) -> dict:
 # happen, and missing any one of them makes the freeze worthless:
 #
 #   1. The sessions they are booked into during the pause are released. If
-#      they stayed booked, settle_past_sessions() would mark every one absent
-#      and the client would come back to a plan with nothing left in it.
+#      they stayed booked, each one's end-of-session event would mark it
+#      absent and the client would come back to a plan with nothing left.
 #   2. Those slots go back to unassigned, so on return they are reassigned to
 #      real dates through the normal picker.
 #   3. The expiry date moves out by the number of days paused. They paid for
@@ -3141,19 +2918,21 @@ def unfreeze_plan(repo, sub_id: int, on_date: str = None) -> dict:
 
 def lift_expired_freezes(repo, frozen=None) -> set:
     """
-    A freeze with an end date lifts itself. Called wherever plans are read, so
-    a laptop left off over the whole freeze still comes back correct. Returns
-    the ids it lifted.
+    A freeze with an end date lifts itself. Returns the ids it lifted.
 
-    This sits inside settle_past_sessions(), which runs before every read
-    that touches attendance -- so it is the hottest path in the app and must
-    not go through unfreeze_plan(). That would re-read a row already in hand
-    and then build a plan_state() nothing here looks at: four round trips per
-    due freeze instead of the two writes it actually takes.
+    A freeze comes due on a *date* rather than at a session's end, so this is
+    the one job in settle_due_sessions() that is not an event: the watcher
+    caps its sleep at the next local midnight for it, and a laptop left off
+    over the whole freeze still comes back correct because startup runs the
+    same pass.
+
+    It must not go through unfreeze_plan(): that would re-read a row already
+    in hand and then build a plan_state() nothing here looks at -- four round
+    trips per due freeze instead of the two writes it actually takes.
 
     `frozen` is every currently frozen plan, when the caller has already read
-    them -- settle_past_sessions() needs the same rows one line later, and
-    two reads of one collection is one round trip more than the answer costs.
+    them -- settle_due_sessions() has them in hand, and two reads of one
+    collection is one round trip more than the answer costs.
     """
     today = date.today().isoformat()
     if frozen is None:

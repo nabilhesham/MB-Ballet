@@ -35,9 +35,18 @@ export default function SessionForm({
     return '';
   });
   const [when, setWhen] = useState(localInput(session?.starts_at ?? presetTs));
+  // This session's own length. The class offers a starting value and that is
+  // the whole of its involvement — nothing on the server reads the class's
+  // length for a session any more, so what is in this box is what the
+  // session will run for and when its end-of-session event will fire.
   const [duration, setDuration] = useState(
     session?.duration_hours ?? (classes.find(c => c.id === classId)?.duration_hours || 1.5),
   );
+  // Whether anybody has typed in that box. Changing the class re-offers the
+  // new class's usual length, but only while the field is still the offered
+  // one: typing 2 and then correcting the class used to silently throw the 2
+  // away, which is the sort of thing nobody notices until the term is wrong.
+  const [lengthTyped, setLengthTyped] = useState(false);
   const [notes, setNotes] = useState(session?.notes || '');
 
   const onClassChange = e => {
@@ -45,13 +54,19 @@ export default function SessionForm({
     setClassId(id);
     if (!editing) {
       const k = classes.find(c => c.id === id);
-      if (k) setDuration(k.duration_hours);
+      if (k && !lengthTyped) setDuration(k.duration_hours);
       setInstructorId(k?.instructor_id != null ? String(k.instructor_id) : '');
     }
   };
 
   const save = async () => {
     if (!when) return toast('Pick a date and time', 'bad');
+    // The same refusal the endpoint makes, in the same words — a session of
+    // no length ends the moment it starts, so its event would write off
+    // everybody booked into it straight away. See api/sessions.py's _length.
+    if (!(Number(duration) > 0)) {
+      return toast('How long is the class? Give a length in hours.', 'bad');
+    }
     const ins = instructorId === '' ? null : Number(instructorId);
     try {
       if (editing) {
@@ -108,7 +123,7 @@ export default function SessionForm({
         <div>
           <label>LENGTH (HOURS)</label>
           <input type="number" step="0.25" min="0.25" value={duration}
-                 onChange={e => setDuration(e.target.value)} />
+                 onChange={e => { setLengthTyped(true); setDuration(e.target.value); }} />
         </div>
       </div>
       <label>NOTES</label>

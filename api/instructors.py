@@ -43,7 +43,6 @@ def list_instructors(status: str = "active"):
     """
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         active = 0 if status == "archived" else 1
         out = repo.find("instructors", {"active": active}, sort=[("name", 1)])
         # Two queries for the list rather than one per instructor.
@@ -93,7 +92,6 @@ def get_instructor(iid: int, from_: Optional[str] = Query(None, alias="from"), t
     """
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         i = repo.get("instructors", iid)
         if not i:
             raise HTTPException(404, "no such instructor")

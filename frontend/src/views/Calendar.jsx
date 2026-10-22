@@ -34,7 +34,7 @@ function weekStartOf(d) {
 function assignLanes(list) {
   const out = []; const lanes = [];
   list.forEach(s => {
-    const s1 = s.starts_at; const s2 = s.starts_at + s.duration_hours * 3600;
+    const s1 = s.starts_at; const s2 = s.ends_at;
     let idx = lanes.findIndex(end => end <= s1);
     if (idx === -1) { lanes.push(s2); idx = lanes.length - 1; } else lanes[idx] = s2;
     out.push({ lane: idx });
@@ -102,7 +102,11 @@ function WeekGrid({ days, sessions, hours, todayStr, lo, hi, onSlotClick, onEven
               {mine.map((s, idx) => {
                 const d = new Date(s.starts_at * 1000);
                 const top = ((d.getHours() - lo) + d.getMinutes() / 60) * ROW_PX;
-                const evH = Math.max(20, s.duration_hours * ROW_PX - 2);
+                // The block is as tall as the session is long, from the
+                // same `ends_at` the grid's own range comes from -- so a
+                // block and the hours it covers can never disagree.
+                const evH = Math.max(
+                  20, ((s.ends_at - s.starts_at) / 3600) * ROW_PX - 2);
                 const { lane, of } = lanes[idx];
                 const w = 100 / of;
                 return (
@@ -199,7 +203,7 @@ function AgendaList({ days, sessions, todayStr, onRowClick, onAddClick }) {
                 <div className="tm">
                   {fmtTime(s.starts_at)}<br />
                   <span style={{ color: 'var(--dim)' }}>
-                    {fmtTime(s.ends_at ?? s.starts_at + s.duration_hours * 3600)}
+                    {fmtTime(s.ends_at)}
                   </span>
                 </div>
                 <div className="bd">
@@ -306,7 +310,13 @@ export default function Calendar() {
     for (const s of sessions) {
       const d = new Date(s.starts_at * 1000);
       lo = Math.min(lo, d.getHours());
-      hi = Math.max(hi, Math.ceil(d.getHours() + (d.getMinutes() / 60) + s.duration_hours));
+      // How far down the grid has to reach. The length comes from `ends_at`
+      // -- the one column that says when a session finishes -- but as a span
+      // added to the start, never as the end's own clock hour: a class
+      // running to 00:30 has an end hour of 0, which would *shrink* the grid
+      // rather than grow it. Math.min below clamps the overflow to 24.
+      hi = Math.max(hi, Math.ceil(d.getHours() + (d.getMinutes() / 60)
+                                  + (s.ends_at - s.starts_at) / 3600));
     }
     lo = Math.max(0, lo - 1); hi = Math.min(24, hi + 1);
     const hours = []; for (let h = lo; h < hi; h++) hours.push(h);

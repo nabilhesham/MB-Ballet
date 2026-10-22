@@ -34,7 +34,7 @@ def _clear_history(repo, plan_id, now):
     Leave the plan with nothing used — as if today were its first session.
 
     The past bookings are deleted rather than set back to 'booked': every
-    verify() runs settle_past_sessions() first, which would immediately mark
+    verify() used to run the sweep first, which would immediately mark
     a finished session absent again and undo the setup.
     """
     for b in repo.find("bookings", {"subscription_id": plan_id}):

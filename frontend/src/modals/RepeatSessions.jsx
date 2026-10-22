@@ -26,6 +26,15 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
   const [start, setStart] = useState(localInput());
   const [weeks, setWeeks] = useState(8);
   const [days, setDays] = useState([]);
+  // How long every session in the term runs. It is a field rather than a
+  // number taken quietly off the class, because this writes up to ninety-six
+  // sessions and each one's length is its own from the moment it is created
+  // — correcting the class afterwards changes none of them. The class's
+  // usual length is the starting value and nothing more.
+  const [duration, setDuration] = useState(
+    () => classes.find(c => c.id === initialClassId)?.duration_hours ?? 1.5,
+  );
+  const [lengthTyped, setLengthTyped] = useState(false);
 
   const toggleDay = i => setDays(d => (d.includes(i) ? d.filter(x => x !== i) : [...d, i]));
 
@@ -34,17 +43,20 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
     setClassId(id);
     const k = classes.find(c => c.id === id);
     setInstructorId(k?.instructor_id != null ? String(k.instructor_id) : '');
+    if (k && !lengthTyped) setDuration(k.duration_hours);
   };
 
   const save = async () => {
-    const cls = classes.find(c => c.id === classId);
+    if (!(Number(duration) > 0)) {
+      return toast('How long is the class? Give a length in hours.', 'bad');
+    }
     try {
       const r = await api('/sessions/repeat', { method: 'POST', body: {
         class_id: classId,
         instructor_id: instructorId === '' ? null : Number(instructorId),
         starts_at: Math.floor(new Date(start).getTime() / 1000),
         weeks: Number(weeks), weekdays: days,
-        duration_hours: cls ? cls.duration_hours : null,
+        duration_hours: Number(duration),
       } });
       close();
       // A term is generated in one go, so a clash is reported rather than
@@ -84,6 +96,9 @@ export default function RepeatSessions({ presetClassId, classes, instructors, on
           <input type="number" value={weeks} min="1" max="52" onChange={e => setWeeks(e.target.value)} />
         </div>
       </div>
+      <label>LENGTH (HOURS)</label>
+      <input type="number" step="0.25" min="0.25" value={duration}
+             onChange={e => { setLengthTyped(true); setDuration(e.target.value); }} />
       <label>DAYS (LEAVE EMPTY FOR THE SAME WEEKDAY)</label>
       <div className="row">
         {DAYS.map((d, i) => (

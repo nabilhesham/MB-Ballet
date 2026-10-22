@@ -58,20 +58,35 @@ class SessionsPort(ABC):
         """
 
     @abstractmethod
-    def complete_finished_sessions(self, now: int) -> int:
-        """Mark every scheduled session whose end has passed completed."""
+    def due_sessions(self, now: int) -> list:
+        """
+        Every session whose own end has passed and which still needs either
+        of the end-of-session event's two writes, oldest end first:
+        `{"id", "ends_at"}`.
+
+        **Either write, not just the status.** A session marked `completed`
+        by hand from the session page can still hold `booked` slots, and
+        testing the status alone would leave those slots sitting there for
+        ever — so a session still holding one is due whatever its status
+        says.
+
+        This is the backlog of ends nobody has acted on yet — normally
+        empty, because `access.session_ended()` fires the moment each one
+        arrives. It fills while the app is not running, so the answer here
+        is what startup has to work through. A cancelled session occupies
+        nothing and ends nothing; a NULL `ends_at` is excluded because there
+        is no moment to have passed.
+        """
 
     @abstractmethod
-    def next_sweep_deadline(self, now: int):
+    def next_session_end(self, now: int):
         """
         The earliest `ends_at` at or after `now` among sessions that are not
         cancelled, or None when nothing is left to end.
 
-        This is the next moment `access.settle_past_sessions()` could
-        possibly have work to do, which is what lets it skip itself entirely
-        until then -- see the deadline note there. NULL `ends_at` is excluded
-        for the same reason the sweep itself excludes it: a row the sweep
-        cannot act on cannot be the reason to wake it up.
+        This is the instant the end-of-session event next fires, and the
+        whole of what the watcher in server.py sleeps until. NULL `ends_at`
+        is excluded for the same reason `due_sessions()` excludes it.
         """
 
     @abstractmethod
@@ -238,20 +253,22 @@ class BookingsPort(ABC):
         """
 
     @abstractmethod
-    def settle_absences(self, now: int, frozen_sub_ids: list,
-                        ends_before: int) -> int:
+    def settle_session_absences(self, session_id: int, now: int,
+                                frozen_sub_ids: list) -> int:
         """
-        Sweep still-booked slots to absent, skipping plans that are frozen —
-        a paused client must never lose a session. Returns how many were
-        settled.
+        Mark **this one session's** still-booked slots absent, stamped
+        `settled_at = now`. Returns how many were settled.
 
-        `ends_before` is the cutoff a session's `ends_at` must fall before,
-        and `now` is only what `settled_at` is stamped with. They are two
-        arguments because they are no longer the same instant: the day a
-        session belongs to is what decides whether its no-shows are written
-        off, so access.py passes the start of today and nothing is settled
-        until the day it happened in is over. See "Past sessions settle
-        themselves" in CLAUDE.md.
+        One session, not a window, because the caller is the event for that
+        session's own end (`access.session_ended()`): the moment it runs is
+        the answer to "has this session finished", so there is nothing left
+        here to compare a time against. That is the whole of why no date
+        arithmetic survives in this layer.
+
+        Frozen plans are skipped — a paused client must never lose a
+        session — and the ids are passed in rather than joined, because
+        Mongo has no cross-collection update and there are never more than a
+        handful of them.
         """
 
 

@@ -127,6 +127,16 @@ async def _lifespan(app):
         shelved = access.ensure_stock_rows(starter)
         if shelved:
             print(f"  Gave {shelved} product(s) a shelf to be counted on.")
+
+        # Every session that ended while this was not running. The
+        # end-of-session event is in-process, so an app that was off over a
+        # class has an end nobody acted on -- and nothing settles on a read
+        # any more, so it has to be caught up here rather than by whoever
+        # opens the first screen. Before `yield`, so the first request is
+        # already looking at a settled database.
+        caught = access.settle_due_sessions(starter)
+        if caught:
+            print(f"  Caught up {caught} booking(s) from sessions that have ended.")
     finally:
         starter.close()
 
@@ -158,13 +168,16 @@ async def _lifespan(app):
 
     # Held in a local: asyncio keeps only a weak reference to a running
     # task, so a bare create_task() may be collected mid-sweep.
-    settle = asyncio.create_task(_settle_loop())
+    global _rescan
+    _rescan = asyncio.Event()
+    settle = asyncio.create_task(_session_end_watcher(_rescan))
     try:
         yield
     finally:
         settle.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await settle
+        _rescan = None
 
 
 app = FastAPI(title="MB Ballet Academy", lifespan=_lifespan)
@@ -278,41 +291,67 @@ def _log_startup_failure(exc: BaseException) -> str:
     return path
 
 
-async def _settle_loop():
-    """
-    Mark past no-shows absent, as each session ends.
+# A write may have moved the moment the next session ends -- a session
+# created in the past, an edited start or length, a new freeze. The watcher
+# below is asleep until the deadline it last computed, so it has to be told.
+# An asyncio.Event rather than a flag in access.py, because waking a sleeping
+# task is this file's business and access.py holds no event loop.
+#
+# **Created in the lifespan, not here at import.** An Event binds to the
+# first running loop that touches it and then refuses every other one
+# ("bound to a different event loop"). One module-level Event is therefore
+# fine for the single uvicorn process and breaks the moment the app is
+# served twice in one interpreter -- which is exactly what the test suite
+# does, a TestClient per test, each with its own loop. It is a global so the
+# middleware can reach it, and None until there is a loop to bind to.
+_rescan = None
 
-    The same call runs before every read that depends on attendance, so a
-    screen being used is never stale whatever this loop does. What it covers
-    is the laptop left on the kiosk, where nothing reads attendance for hours
-    at a time -- and that is where the wait between passes stopped being a
-    detail. It was a flat hour, so a client who did not turn up became absent
-    at some point in the hour after their class rather than when the class
-    finished, and the session page said "booked" in between.
 
-    `access.seconds_to_next_sweep()` is that wait now: the next session end,
-    or midnight for a dated freeze, bounded at both ends -- see the note
-    beside it. A failed pass waits a minute and tries again rather than
-    inheriting a deadline the exception may have left half-computed -- long
-    enough that a database that is down (an Atlas backend with no internet) is
-    retried rather than hammered, short enough that a blip costs one session's
-    worth of lateness at most.
+async def _wait(rescan: asyncio.Event, seconds: float):
+    """Sleep, but wake early if a write says the timetable moved."""
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(rescan.wait(), timeout=seconds)
+        # A burst of writes -- repeating a term is one request but editing a
+        # week is several -- coalesces into one rescan rather than one each.
+        await asyncio.sleep(1)
+    rescan.clear()
+
+
+async def _session_end_watcher(rescan: asyncio.Event):
     """
-    await asyncio.sleep(15)
+    Fire the end-of-session event the moment each session's duration runs out.
+
+    **This is the only thing in the app that creates an absence**, and the
+    moment it runs is the whole of the decision: `access.session_ended()`
+    re-derives nothing about whether the class has finished. Reads do not
+    settle anything on the way past any more, so on the machine that matters
+    -- a laptop sitting on the kiosk, where nothing reads attendance for
+    hours -- this loop is not a backstop, it is the mechanism.
+
+    Each pass works through whatever ends have already arrived
+    (`settle_due_sessions`, normally nothing, and the backlog after the
+    laptop has been off), then sleeps until the next one. A failed pass waits
+    a minute and tries again rather than inheriting a deadline the exception
+    may have left half-computed -- long enough that a database that is down
+    (an Atlas backend with no internet) is retried rather than hammered,
+    short enough that a blip costs one session's worth of lateness at most.
+    """
     while True:
         wait = 60
         try:
             repo = data.connect()
             try:
-                n = access.settle_past_sessions(repo)
+                n = access.settle_due_sessions(repo)
                 if n:
-                    print(f"[settle] {n} booking(s) marked absent")
-                wait = access.seconds_to_next_sweep()
+                    print(f"[sessions] {n} booking(s) marked absent")
+                # After the writes, never before: a session settled a moment
+                # ago must not still be the answer to "when is the next end".
+                wait = access.seconds_to_next_end(repo)
             finally:
                 repo.close()
         except Exception as e:
-            print(f"[settle] skipped: {e}")
-        await asyncio.sleep(wait)
+            print(f"[sessions] skipped: {e}")
+        await _wait(rescan, wait)
 
 
 # ================================================================ caching
@@ -344,17 +383,18 @@ HASHED_ASSETS = "/static/app/assets/"
 
 @app.middleware("http")
 async def cache_policy(request, call_next):
-    # A write may have moved the moment the absent-sweep next has work to do
-    # -- a session created in the past, an edited start time, a new freeze --
-    # and the sweep skips itself until that moment to keep it off the read
-    # path (see the deadline note in access.py). This is the one place where
-    # "something may have changed" is knowable for the whole app, so a write
-    # endpoint added later is covered without anyone remembering to.
+    # A write may have moved the moment a session next ends -- one created in
+    # the past, an edited start or length, a new freeze -- and the watcher is
+    # asleep until the deadline it last worked out. This is the one place
+    # where "something may have changed" is knowable for the whole app, so a
+    # write endpoint added later is covered without anyone remembering to.
     #
-    # A rejected write invalidates too. That costs one extra sweep and
-    # nothing else, which is the right way round for a guess to be wrong.
-    if request.method != "GET":
-        access.sweep_invalidate()
+    # A rejected write wakes it too. That costs one indexed read that finds
+    # nothing, which is the right way round for a guess to be wrong.
+    # None before the lifespan has run, which is only reachable in a test
+    # driving the middleware without starting the app.
+    if request.method != "GET" and _rescan is not None:
+        _rescan.set()
     r = await call_next(request)
     if request.url.path.startswith(HASHED_ASSETS):
         r.headers["Cache-Control"] = "public, max-age=31536000, immutable"

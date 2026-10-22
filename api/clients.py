@@ -103,7 +103,6 @@ def list_clients(q: str = "", status: str = "all", on: str = None,
             raise HTTPException(400, "Pick a day, or clear the date filter.")
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         active = 0 if status == "archived" else 1
         out = repo.search_clients(active, q)
         if joined_from or joined_to:
@@ -199,7 +198,6 @@ def create_client(body: ClientIn):
 def get_client(cid: int):
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         c = repo.get("clients", cid)
         if not c:
             raise HTTPException(404, "no such client")
@@ -301,7 +299,6 @@ def plan_sessions(cid: int, pid: int):
     """Every session paid for by one plan — the popup on a payment row."""
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         return repo.plan_sessions(cid, pid)
     finally:
         repo.close()

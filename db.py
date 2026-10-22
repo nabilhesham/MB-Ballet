@@ -42,18 +42,22 @@ CREATE TABLE IF NOT EXISTS sessions (
     instructor_id  INTEGER REFERENCES instructors(id),
     starts_at      INTEGER NOT NULL,          -- unix seconds
     duration_hours REAL NOT NULL DEFAULT 1.5,
-    -- starts_at + duration_hours*3600, written rather than derived.
+    -- starts_at + duration_hours*3600, written rather than derived. It is
+    -- the session's own length that decides this and nothing else -- the
+    -- class it belongs to has a length too, and that one is only what the
+    -- form offers when somebody schedules a session (see api/classes.py).
     --
-    -- "Has this session ended?" is asked on nearly every request:
-    -- settle_past_sessions() runs at the top of about a dozen read
-    -- endpoints, and slot_conflict() guards every create, edit, repeat and
-    -- un-cancel. Computed in the WHERE clause it is a full table scan,
+    -- Stored because two things read it on a path that must not scan:
+    -- slot_conflict() guards every create, edit, repeat and un-cancel, and
+    -- repo.next_session_end() is the alarm clock the end-of-session event
+    -- is set by. Computed in the WHERE clause it is a full table scan,
     -- because a predicate wrapping a column cannot use an index. Stored, it
     -- is a range scan on ix_sess_ends.
     --
     -- access.ends_at_of() is its only writer. Any new path that sets
     -- starts_at or duration_hours must set this too -- see
-    -- tests/test_scheduling.py, which asserts no row ever disagrees.
+    -- tests/test_scheduling.py, which asserts no row ever disagrees, and
+    -- migrate() below, which puts any row that does back in step.
     ends_at        INTEGER,
     status         TEXT NOT NULL DEFAULT 'scheduled',  -- scheduled|completed|cancelled
     notes          TEXT
@@ -147,13 +151,13 @@ CREATE TABLE IF NOT EXISTS bookings (
     subscription_id INTEGER REFERENCES subscriptions(id),
     status          TEXT NOT NULL DEFAULT 'booked',
     checked_in_at   INTEGER,
-    -- When the absent sweep wrote this row off, and nothing else: NULL on a
-    -- booking it has never touched, including one entered absent by hand or
-    -- born absent with a back-dated plan. "The session ended and they had
-    -- not checked in" was the one fact about an absence with no record of
-    -- when it was decided, which is exactly what made three reports of
-    -- "marked absent too early" impossible to settle from the data -- the
-    -- stamp beside the session's own end is the whole answer.
+    -- When the end-of-session event wrote this row off, and nothing else:
+    -- NULL on a booking it has never touched, including one entered absent
+    -- by hand or born absent with a back-dated plan. "The session ended and
+    -- they had not checked in" was the one fact about an absence with no
+    -- record of when it was decided, which is exactly what made three
+    -- reports of "marked absent too early" impossible to settle from the
+    -- data -- the stamp beside the session's own end is the whole answer.
     settled_at      INTEGER,
     -- Which screen wrote `checked_in_at`, because the two mean different
     -- things and one label was covering both. 'kiosk' is the instant the
@@ -408,9 +412,10 @@ CREATE INDEX IF NOT EXISTS ix_pstock_product ON product_stock(product_id);
 CREATE INDEX IF NOT EXISTS ix_sess_class  ON sessions(class_id);
 CREATE INDEX IF NOT EXISTS ix_sess_instr  ON sessions(instructor_id);
 CREATE INDEX IF NOT EXISTS ix_cred_client ON credentials(client_id, class_id);
--- settle_absences() updates `WHERE status='booked' AND session_id IN (...)`
--- and runs before every read that touches attendance. Without this it was a
--- full scan of bookings on every page view. Status first: it is the equality.
+-- settle_session_absences() updates `WHERE status='booked' AND session_id=?`
+-- when a session's end-of-session event fires. Without this it was a full
+-- scan of bookings. Status first: it is the more selective equality, and the
+-- same index still serves the session-id lookups behind every roster.
 CREATE INDEX IF NOT EXISTS ix_bk_status   ON bookings(status, session_id);
 -- search_clients and class_students both order by name; active_plans_for
 -- orders by expires_on.
@@ -453,7 +458,7 @@ def tx(conn):
 
     **Re-entrant.** The outermost block owns the transaction and the inner
     ones are no-ops, because the calls genuinely nest: swap_and_check_in()
-    calls move_booking() and check_in(), and settle_past_sessions() calls
+    calls move_booking() and check_in(), and settle_due_sessions() calls
     lift_expired_freezes(), which calls unfreeze_plan() once per due row.
     Each of those used to commit on its own, so one user action was three
     transactions and a sweep was one per row. Nesting is detected with
@@ -568,15 +573,24 @@ def migrate(conn) -> None:
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
-    # Fill in any session whose end is not recorded. Deliberately not guarded
-    # by a one-shot marker like the expiry backfill below: it is targeted at
-    # exactly the rows that are wrong, costs nothing when there are none, and
-    # so doubles as a repair for any write path that forgets to set it. A
-    # NULL here is invisible to slot_conflict() and to the absent sweep,
-    # which is a silent wrong answer rather than a loud one.
+    # Put every session's end back in step with its own start and length.
+    # Deliberately not guarded by a one-shot marker like the expiry backfill
+    # below: it is targeted at exactly the rows that are wrong, costs nothing
+    # when there are none, and so doubles as a repair for any write path that
+    # forgets to set it.
+    #
+    # **NULL is not the only way to be wrong, and this used to only fix
+    # NULL.** A row wrong by an hour is invisible -- slot_conflict() reads
+    # the wrong slot and the end-of-session event is set for the wrong
+    # moment, with nothing on any screen to say why. The sweep used to
+    # re-check this on every pass (access._repair_running_sessions); there is
+    # no sweep now, so it is checked here, once, where the one thing that can
+    # produce such a row is an older database.
     conn.execute(
-        "UPDATE sessions SET ends_at = CAST(starts_at + duration_hours * 3600 AS INTEGER)"
-        " WHERE ends_at IS NULL")
+        "UPDATE sessions"
+        "   SET ends_at = CAST(starts_at + duration_hours * 3600 AS INTEGER)"
+        " WHERE ends_at IS NULL"
+        "    OR ends_at != CAST(starts_at + duration_hours * 3600 AS INTEGER)")
 
     # One-shot. expires_on used to be a floor that plan_state() raised at
     # read time to the last session a plan covers; it is now the value

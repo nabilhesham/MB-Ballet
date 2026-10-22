@@ -1,7 +1,7 @@
 """
 One session at a time, academy-wide — and the sweep that settles the past.
 
-These pin `slot_conflict()` and `settle_past_sessions()` before their
+These pin `slot_conflict()` and the end-of-session event before their
 `starts_at + duration_hours*3600` predicate is replaced by a stored
 `ends_at` column. Both are boundary logic, so the cases that matter are the
 exact ones: back-to-back, one second of overlap, a cancelled session, and a
@@ -115,62 +115,119 @@ def test_a_fractional_duration_is_respected(empty):
     assert access.slot_conflict(empty.repo, at(1, 19, 30), 0.5) is None
 
 
-# -------------------------------------------------- settle_past_sessions
+# ------------------------------------------- the end-of-session event
+#
+# `settle_due_sessions()` fires the event for every end that has already
+# arrived, which is what startup and each wake of the watcher run. A session
+# length of 1.5 with a start four hours ago is an end that has passed by any
+# reading of the clock, at any hour of the day.
 
 def test_a_session_that_has_ended_becomes_completed(empty):
     sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.5)
-    access.settle_past_sessions(empty.repo)
+    access.settle_due_sessions(empty.repo)
     assert empty.repo.get("sessions", sid)["status"] == "completed"
 
 
 def test_a_session_still_running_is_left_alone(empty):
-    """Its start has passed but its end has not."""
+    """
+    Its start has passed and its own end has not -- which is the whole of the
+    test, and the reason a length is never read off the class: a 1.5-hour
+    session is not over at one hour, whatever anything else says it usually
+    runs for.
+    """
     sid = add(empty, empty.ballet, db.now() - 600, 1.5)
-    access.settle_past_sessions(empty.repo)
+    access.settle_due_sessions(empty.repo)
     assert empty.repo.get("sessions", sid)["status"] == "scheduled"
+
+
+def test_a_long_session_is_not_over_after_an_hour(empty):
+    """
+    An hour and ten minutes into a two-hour class, with somebody booked in
+    who has not arrived yet. Both the status and the slot have to survive it;
+    this is the report that was made three times.
+    """
+    repo = empty.repo
+    sid = add(empty, empty.ballet, db.now() - 70 * 60, 2.0)
+    cid = _ins(repo, "clients", name_en="Late", created_at=db.now(), active=1)
+    _ins(repo, "bookings", client_id=cid, session_id=sid,
+         status="booked", created_at=db.now())
+
+    assert access.settle_due_sessions(repo) == 0
+
+    assert repo.get("sessions", sid)["status"] == "scheduled"
+    b = repo.find_one("bookings", {"session_id": sid})
+    assert b["status"] == "booked"
+    assert b["settled_at"] is None
 
 
 def test_a_future_session_is_left_alone(empty):
     sid = add(empty, empty.ballet, at(2, 18), 1.5)
-    access.settle_past_sessions(empty.repo)
+    access.settle_due_sessions(empty.repo)
     assert empty.repo.get("sessions", sid)["status"] == "scheduled"
 
 
-def test_a_cancelled_session_is_never_completed_by_the_sweep(empty):
+def test_a_cancelled_session_never_ends(empty):
+    """It occupies nothing and finishes nothing -- there is no event for it."""
     sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.5, status="cancelled")
-    access.settle_past_sessions(empty.repo)
+    access.settle_due_sessions(empty.repo)
     assert empty.repo.get("sessions", sid)["status"] == "cancelled"
 
 
-def test_a_booking_on_a_cancelled_session_is_not_swept_absent(empty):
+def test_a_booking_on_a_cancelled_session_is_not_settled(empty):
     repo = empty.repo
     sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.5, status="cancelled")
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
     _ins(repo, "bookings", client_id=cid, session_id=sid,
          status="booked", created_at=db.now())
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
     assert repo.find_one("bookings", {"session_id": sid})["status"] == "booked"
 
 
-def test_the_sweep_returns_how_many_bookings_it_settled(empty):
-    """Yesterday's sessions -- an absence waits for the end of its own day."""
+def test_the_backlog_returns_how_many_bookings_it_settled(empty):
     repo = empty.repo
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
-    for offset in (28, 32):
+    for offset in (4, 8):
         sid = add(empty, empty.ballet, db.now() - offset * 3600, 1.0)
         _ins(repo, "bookings", client_id=cid, session_id=sid,
              status="booked", created_at=db.now())
-    assert access.settle_past_sessions(repo) == 2
+    assert access.settle_due_sessions(repo) == 2
 
 
-def test_the_sweep_is_idempotent(empty):
+def test_the_backlog_is_idempotent(empty):
+    """
+    The second pass finds no session still `scheduled` with its end behind
+    it, so there is nothing to fire for. Running it twice is what startup
+    plus the watcher's first wake actually does.
+    """
     repo = empty.repo
     cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
-    sid = add(empty, empty.ballet, db.now() - 28 * 3600, 1.0)
+    sid = add(empty, empty.ballet, db.now() - 4 * 3600, 1.0)
     _ins(repo, "bookings", client_id=cid, session_id=sid,
          status="booked", created_at=db.now())
-    assert access.settle_past_sessions(repo) == 1
-    assert access.settle_past_sessions(repo) == 0
+    assert access.settle_due_sessions(repo) == 1
+    assert access.settle_due_sessions(repo) == 0
+
+
+def test_the_event_names_the_session_rather_than_working_it_out(empty):
+    """
+    `session_ended()` settles the session it is given and no other. That is
+    the shape of the whole mechanism: being called is the statement that the
+    class has finished, so a session still running is not protected by a
+    comparison here -- it is simply not the one the event fired for.
+    """
+    repo = empty.repo
+    cid = _ins(repo, "clients", name_en="X", created_at=db.now(), active=1)
+    ended = add(empty, empty.ballet, db.now() - 4 * 3600, 1.0)
+    other = add(empty, empty.ballet, db.now() - 2 * 3600, 1.0)
+    for sid in (ended, other):
+        _ins(repo, "bookings", client_id=cid, session_id=sid,
+             status="booked", created_at=db.now())
+
+    assert access.session_ended(repo, ended) == 1
+
+    assert repo.find_one("bookings", {"session_id": ended})["status"] == "absent"
+    assert repo.find_one("bookings", {"session_id": other})["status"] == "booked"
+    assert repo.get("sessions", other)["status"] == "scheduled"
 
 
 # ------------------------------------------------------------------- ends_at

@@ -104,7 +104,6 @@ def dashboard(month_from: str = None, month_to: str = None):
     """
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         midnight, tomorrow = access.day_bounds()
 
         today_sessions = repo.sessions_in_range(midnight, tomorrow)

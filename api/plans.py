@@ -65,7 +65,6 @@ def auto_sessions(body: AutoSessionsIn):
         raise HTTPException(400, "A plan needs at least one session.")
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         return access.sessions_from_start(
             repo, body.class_id, body.client_id, body.starts_on,
             body.sessions_total, plan_id=body.plan_id)

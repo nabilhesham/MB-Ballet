@@ -195,12 +195,11 @@ def test_a_successful_swap_moves_the_booking_and_checks_in(academy):
                                    "session_id": give_up}) == 0
 
 
-def test_the_sweep_and_the_freezes_it_lifts_are_one_transaction(academy, monkeypatch):
+def test_a_freeze_lift_that_fails_goes_back_whole(academy, monkeypatch):
     """
-    settle_past_sessions() calls lift_expired_freezes(), which called
+    settle_due_sessions() calls lift_expired_freezes(), which called
     unfreeze_plan() once per due row — each committing on its own. A failure
-    partway through left some plans unfrozen and others not, with the sweep
-    that triggered it not applied at all.
+    partway through left some plans unfrozen and others not.
     """
     from datetime import date, timedelta
     a = academy
@@ -219,10 +218,10 @@ def test_the_sweep_and_the_freezes_it_lifts_are_one_transaction(academy, monkeyp
 
     monkeypatch.setattr(access, "lift_expired_freezes", lift_then_fail)
     with pytest.raises(RuntimeError):
-        access.settle_past_sessions(repo)
+        access.settle_due_sessions(repo)
 
     assert access.plan_state(repo, a.dual_ballet_plan)["frozen"] is True, \
-        "the lift went back with the sweep"
+        "the lift went back whole"
 
 
 def test_refresh_expiry_is_committed_by_whoever_opened_the_block(academy):

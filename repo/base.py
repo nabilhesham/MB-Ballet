@@ -62,7 +62,7 @@ class Repo(ABC):
         Commits on the way out, rolls back if anything raises, and is
         **re-entrant** — the outermost block owns the transaction and inner
         ones are no-ops. Re-entrancy is not optional: swap_and_check_in()
-        calls move_booking() and check_in(), and settle_past_sessions()
+        calls move_booking() and check_in(), and settle_due_sessions()
         calls lift_expired_freezes(), which calls unfreeze_plan() per row.
 
         No savepoints. An inner block that raises rolls the whole outermost

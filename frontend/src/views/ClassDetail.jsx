@@ -91,9 +91,9 @@ export default function ClassDetail() {
           <div className="n">sessions completed</div>
         </div>
         <div className="box kpi">
-          <div className="k">DURATION</div>
+          <div className="k">USUAL LENGTH</div>
           <div className="v" style={{ fontSize: 20, paddingTop: 8 }}>{hrs(c.duration_hours)}</div>
-          <div className="n">default per session</div>
+          <div className="n">offered when scheduling</div>
         </div>
       </div>
 
