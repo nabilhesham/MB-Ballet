@@ -31,8 +31,12 @@ const window_ = () => {
    backwards turns up three weeks more of them, so they are dropped here. */
 const live = list => list.filter(s => s.status !== 'cancelled');
 
-/** Has this session already finished? The same test the server books by. */
-export const isPast = s => s.starts_at + s.duration_hours * 3600 < Date.now() / 1000;
+/**
+ * Has this session already finished? The same column the server books by --
+ * `ends_at`, read rather than recomputed from the length beside it, so a
+ * long class is not called finished while it is still being taught.
+ */
+export const isPast = s => s.ends_at < Date.now() / 1000;
 
 /** One class's sessions — what a plan's own slots may be filled from. */
 export async function fetchPlanSessions(classId, clientId) {

@@ -26,9 +26,7 @@ export default function SessionDetail() {
   if (error) return <Empty>Could not load: {error.message}</Empty>;
 
   const now = Date.now() / 1000;
-  const ended = s.starts_at + s.duration_hours * 3600 < now;
-  // What the end *should* be, for a row whose `ends_at` was never written.
-  const endOf = r => r.starts_at + r.duration_hours * 3600;
+  const ended = s.ends_at < now;
   const present = s.roster.filter(m => m.status === 'present').length;
   const absent = s.roster.filter(m => m.status === 'absent').length;
   const pending = s.roster.filter(m => m.status === 'booked').length;
@@ -118,16 +116,13 @@ export default function SessionDetail() {
           <div className="eyebrow">Session</div>
           <h1><span className="dot" style={{ background: s.colour, width: 13, height: 13 }} />{s.class_name}</h1>
           <div className="sub">
-            {/* The end time, from the stored `ends_at` rather than from the
-                duration beside it — and those are two different things on
-                purpose. That column is what the sweep compares against to
-                complete the session and mark its no-shows absent (see
-                db.py), so a row where it disagrees with the duration ends
-                the class early, every time, with nothing on screen to say
-                so. Printing it is what makes such a row visible on the one
-                screen somebody opens to ask why. access._repair_running_
-                sessions() corrects it; this is how you can tell it did. */}
-            {fmtFull(s.starts_at)} – {fmtTime(s.ends_at ?? endOf(s))} ·{' '}
+            {/* The end time, from the stored `ends_at` and nothing else.
+                That column is the alarm the end-of-session event is set by
+                (see db.py), so it is the one number that decides when this
+                class closes and its no-shows are written off. Printing it
+                beside the length is what makes a row where the two
+                disagree visible on the screen somebody opens to ask why. */}
+            {fmtFull(s.starts_at)} – {fmtTime(s.ends_at)} ·{' '}
             {hrs(s.duration_hours)} ·{' '}
             <a href={`#/class/${s.class_id}`} style={{ color: 'var(--brand-deep)' }}>view class</a>
           </div>
@@ -215,12 +210,12 @@ export default function SessionDetail() {
               // altogether. A bare "08:11 PM" beside a 3:30 class reads as a
               // fault in the app rather than as a mark made last night.
               //
-              // An absence the sweep wrote carries its own stamp, and it
+              // An absence the event wrote carries its own stamp, and it
               // belongs here beside the session's end time in the header:
               // "absent 03:20 PM" against a class running to 05:00 PM is the
               // whole of what three reports of "marked absent too early" had
               // no way to show. Blank on an absence marked by hand or born
-              // with a back-dated plan — neither is the sweep's.
+              // with a back-dated plan — neither is the event's.
               //
               // The tooltip carries the full stamp and how long after this
               // session started it falls, which is the one reading a wrong

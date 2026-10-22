@@ -1,27 +1,23 @@
 """
-A session is as long as its class says, and an absence says when it was written.
+A session is as long as *it* says, and an absence says when it was written.
 
 Both halves of one bug, reported three times as different things: "the
 session completes after one hour however the duration is 1:30 or 2 hours",
 and the client who walked in at 1h05 marked absent in a room they were
 sitting in.
 
-`sessions.duration_hours` is copied from the class when the session is
-created and was never touched again, so a class corrected from 1 hour to
-1.5 left every session already on the timetable one hour long -- and
-`ends_at`, which is what `complete_finished_sessions()` compares against, is
-written from the *session's* own length. The sweep was firing at exactly the
-moment it was told to.
+`sessions.duration_hours` used to be copied from the class when the session
+was created, and the class's length then cascaded back over it on every
+class edit -- so the one number that decides when a class closes could be
+rewritten behind a dozen already-scheduled sessions' backs, and a session
+that could not be lengthened without running into the next one was left
+behind anyway, leaving the timetable holding both answers.
 
-The absence half of that is now answered twice over: an absence waits for
-the end of the day its session ran in (see access._start_of_today), which a
-length an hour short cannot reach past. The status half still turns on the
-session's own end, so this cascade is still what keeps it honest.
-
-`_repair_running_sessions()` cannot see this and in fact cements it: it
-makes `ends_at` agree with `duration_hours`, which is the number that is
-wrong. That repair is for a row disagreeing with itself; this is for a row
-disagreeing with its class.
+Neither direction exists now. A session's length is its own from the moment
+it is scheduled; the class's is the value the *form* offers and nothing
+reads it afterwards. So `ends_at` can only move when somebody edits that
+session, and the end-of-session event -- the only thing that writes an
+absence -- is an alarm set by that one number.
 """
 
 import pytest
@@ -49,105 +45,15 @@ def _class_body(repo, clid, **over):
     return body
 
 
-# --------------------------------------------------- the cascade
+# --------------------------------------------------- no cascade
 
-def test_lengthening_a_class_lengthens_its_upcoming_sessions(academy):
-    repo = academy.repo
-    starts = db.now() + 3 * 86400
-    sid = add_session(repo, academy.ballet, academy.ana, starts, 1.0)
-
-    out = access.relength_sessions(repo, academy.ballet, 1.5)
-
-    assert out["relengthened"] == 1
-    assert out["skipped"] == []
-    s = repo.get("sessions", sid)
-    assert s["duration_hours"] == 1.5
-    # The column the sweep actually reads moves with it, or the class still
-    # closes itself at the old hour.
-    assert s["ends_at"] == access.ends_at_of(starts, 1.5)
-
-
-def test_a_session_already_the_right_length_is_not_written(academy):
-    """Re-saving a class with nothing changed costs one read and no writes."""
-    repo = academy.repo
-    add_session(repo, academy.ballet, academy.ana, db.now() + 3 * 86400, 1.5)
-
-    assert access.relength_sessions(repo, academy.ballet, 1.5) == {
-        "relengthened": 0, "skipped": []}
-
-
-def test_a_past_session_keeps_the_length_it_ran(academy):
+def test_a_class_edit_leaves_its_sessions_lengths_alone(client):
     """
-    A past session's length is the record of how long it ran, and
-    relengthening it would rewrite who was absent at the end of it.
+    The length on the class screen is what the session form will offer next
+    time and nothing else. It used to cascade: saving a class rewrote
+    `duration_hours` and `ends_at` on every upcoming session, which moved the
+    moment each of them closes and wrote off their latecomers.
     """
-    repo = academy.repo
-    starts = db.now() - 10 * 86400
-    sid = add_session(repo, academy.ballet, academy.ana, starts, 1.0,
-                      status="completed")
-
-    access.relength_sessions(repo, academy.ballet, 2.0)
-
-    assert repo.get("sessions", sid)["duration_hours"] == 1.0
-
-
-def test_a_cancelled_session_is_left_alone(academy):
-    repo = academy.repo
-    sid = add_session(repo, academy.ballet, academy.ana,
-                      db.now() + 3 * 86400, 1.0, status="cancelled")
-
-    access.relength_sessions(repo, academy.ballet, 2.0)
-
-    assert repo.get("sessions", sid)["duration_hours"] == 1.0
-
-
-def test_a_session_that_would_run_into_another_keeps_its_length(academy):
-    """
-    One session at a time is academy-wide, so making a class longer can run
-    it into whatever is on next. That one is named, never forced, and the
-    rest of the batch still goes through -- the same treatment repeating a
-    term gives a taken evening.
-    """
-    repo = academy.repo
-    # Clear of the fixture's own two series, so the only thing in the way is
-    # the one this test puts there.
-    day = db.now() + 40 * 86400
-    blocked = add_session(repo, academy.ballet, academy.ana, day, 1.0)
-    add_session(repo, academy.flex, academy.bea, day + 3600, 1.0)
-    free = add_session(repo, academy.ballet, academy.ana, day + 4 * 86400, 1.0)
-
-    out = access.relength_sessions(repo, academy.ballet, 1.5)
-
-    assert repo.get("sessions", blocked)["duration_hours"] == 1.0
-    assert repo.get("sessions", free)["duration_hours"] == 1.5
-    assert len(out["skipped"]) == 1
-    # A sentence naming what is in the way, not a code.
-    assert "Flexibility" in out["skipped"][0]
-    assert "stayed at 1h" in out["skipped"][0]
-
-
-def test_the_classs_own_sessions_are_tested_against_each_other(academy):
-    """
-    Back-to-back sessions of one class lengthened together would be laid
-    over each other -- nothing is written until the end, so each accepted
-    one has to join the occupied list as it goes.
-    """
-    repo = academy.repo
-    day = db.now() + 7 * 86400
-    first = add_session(repo, academy.ballet, academy.ana, day, 1.0)
-    second = add_session(repo, academy.ballet, academy.ana, day + 3600, 1.0)
-
-    out = access.relength_sessions(repo, academy.ballet, 1.5)
-
-    assert out["relengthened"] == 1
-    assert repo.get("sessions", first)["duration_hours"] == 1.5
-    assert repo.get("sessions", second)["duration_hours"] == 1.0
-    assert len(out["skipped"]) == 1
-
-
-def test_the_class_edit_is_what_applies_it(client):
-    """The cascade reaches the sessions through the one screen the length is
-    typed on, beside the instructor cascade it matches."""
     a = client.academy
     starts = db.now() + 3 * 86400
     sid = add_session(a.repo, a.ballet, a.ana, starts, 1.0)
@@ -156,55 +62,109 @@ def test_the_class_edit_is_what_applies_it(client):
                    json=_class_body(a.repo, a.ballet, duration_hours=2.0))
 
     assert r.status_code == 200
-    assert r.json()["relengthened"] >= 1
-    assert r.json()["length_clashes"] == []
-    assert a.repo.get("sessions", sid)["ends_at"] == access.ends_at_of(starts, 2.0)
+    assert "relengthened" not in r.json()
+    row = a.repo.get("sessions", sid)
+    assert row["duration_hours"] == 1.0
+    assert row["ends_at"] == access.ends_at_of(starts, 1.0)
+    # The class itself did take the new value -- it is just not a cascade.
+    assert a.repo.get("classes", a.ballet)["duration_hours"] == 2.0
 
 
-def test_a_relengthened_class_stops_closing_early(academy):
+def test_the_instructor_still_cascades(client):
     """
-    The whole point, end to end: a session an hour into a 1.5-hour class
-    reads `completed` while it is being taught, and the correction puts it
-    back to `scheduled`.
+    So the test above is read as "the length does not" rather than "nothing
+    does". Who teaches a date is a fact about the class's staffing; how long
+    a dated session runs is a fact about that session.
+    """
+    a = client.academy
+    sid = add_session(a.repo, a.ballet, a.ana, db.now() + 3 * 86400, 1.0)
 
-    The no-show half of that failure is gone by construction now -- an
-    absence waits for the end of the day the session ran in, so the slot is
-    booked throughout and a length an hour short cannot write anybody off
-    mid-class. It is asserted at both ends anyway, because the status going
-    wrong is what used to drag the absence with it.
+    r = client.put(f"/api/classes/{a.ballet}",
+                   json=_class_body(a.repo, a.ballet, instructor_id=a.bea))
+
+    assert r.status_code == 200
+    assert r.json()["cascaded_sessions"] >= 1
+    assert a.repo.get("sessions", sid)["instructor_id"] == a.bea
+
+
+def test_a_session_is_created_at_the_length_it_was_given(client):
+    """
+    Not at the class's. The class usually runs 1.5h in the fixture; this one
+    is a two-hour makeup class and stays one.
+    """
+    a = client.academy
+    starts = db.now() + 4 * 86400
+    r = client.post("/api/sessions", json={
+        "class_id": a.ballet, "starts_at": starts, "duration_hours": 2.0})
+
+    assert r.status_code == 200, r.text
+    row = a.repo.get("sessions", r.json()["id"])
+    assert row["duration_hours"] == 2.0
+    assert row["ends_at"] == access.ends_at_of(starts, 2.0)
+
+
+def test_a_session_with_no_length_is_refused_in_words(client):
+    """
+    It used to fall back to the class's length, which is how a session's end
+    became a number nobody on that screen had chosen. There is no fallback,
+    and the refusal is a sentence rather than pydantic's list of dicts.
+    """
+    a = client.academy
+    r = client.post("/api/sessions", json={
+        "class_id": a.ballet, "starts_at": db.now() + 4 * 86400})
+    assert r.status_code == 422
+
+    r = client.post("/api/sessions", json={
+        "class_id": a.ballet, "starts_at": db.now() + 4 * 86400,
+        "duration_hours": 0})
+    assert r.status_code == 400
+    assert "how long" in r.json()["detail"].lower(), r.text
+
+
+def test_a_term_is_repeated_at_the_length_it_was_given(client):
+    """
+    Up to ninety-six sessions in one request, every one of them carrying the
+    length the form sent rather than the class's at that moment.
+    """
+    a = client.academy
+    r = client.post("/api/sessions/repeat", json={
+        "class_id": a.ballet, "starts_at": db.now() + 40 * 86400,
+        "weeks": 3, "duration_hours": 2.0})
+
+    assert r.status_code == 200, r.text
+    made = [s for s in a.repo.find("sessions", {"class_id": a.ballet})
+            if s["duration_hours"] == 2.0]
+    assert len(made) == r.json()["created"] >= 1
+    for row in made:
+        assert row["ends_at"] == access.ends_at_of(row["starts_at"], 2.0)
+
+
+def test_editing_a_session_moves_its_own_end_and_no_other(academy):
+    """
+    `ends_at` travels with a start or a length, which is the only way the
+    alarm moves now. The class's other sessions are untouched.
     """
     repo = academy.repo
-    started = db.now() - 70 * 60
-    sid = add_session(repo, academy.ballet, academy.ana, started, 1.0)
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
-                             "subscription_id": None, "status": "booked",
-                             "created_at": db.now()})
+    a, b = (add_session(repo, academy.ballet, academy.ana,
+                        db.now() + d * 86400, 1.0) for d in (20, 21))
+    before = repo.get("sessions", b)["ends_at"]
 
-    # As it stands the session reads as over, in a room with students in it.
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-    assert repo.get("sessions", sid)["status"] == "completed"
-    assert repo.find_one("bookings", {"session_id": sid})["status"] == "booked"
+    from api.sessions import SessionEdit, edit_session
+    edit_session(a, SessionEdit(duration_hours=2.0))
 
-    # The class is corrected to the length it really runs.
-    access.relength_sessions(repo, academy.ballet, 1.5)
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    # It is running again, and the slot is still the client's.
-    assert repo.get("sessions", sid)["status"] == "scheduled"
-    b = repo.find_one("bookings", {"session_id": sid})
-    assert b["status"] == "booked"
-    assert b["settled_at"] is None
+    row = repo.get("sessions", a)
+    assert row["duration_hours"] == 2.0
+    assert row["ends_at"] == access.ends_at_of(row["starts_at"], 2.0)
+    assert repo.get("sessions", b)["ends_at"] == before
 
 
 # --------------------------------------------------- when an absence was written
 
-def test_the_sweep_stamps_when_it_wrote_an_absence(academy):
+def test_the_event_stamps_when_it_wrote_an_absence(academy):
     """
     An absence had no timestamp of its own -- `checked_in_at` stays NULL --
     so "marked absent too early" was unanswerable from the data. This is the
-    stamp, read against the day the session ran in.
+    stamp, read against the session's own end.
     """
     repo = academy.repo
     started = db.now() - 5 * 86400
@@ -213,8 +173,7 @@ def test_the_sweep_stamps_when_it_wrote_an_absence(academy):
                              "subscription_id": None, "status": "booked",
                              "created_at": db.now()})
 
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
 
     b = repo.find_one("bookings", {"session_id": sid})
     assert b["status"] == "absent"
@@ -222,11 +181,11 @@ def test_the_sweep_stamps_when_it_wrote_an_absence(academy):
     assert abs(b["settled_at"] - db.now()) < 120
 
 
-def test_an_absence_nobody_swept_carries_no_stamp(academy):
+def test_an_absence_the_event_did_not_write_carries_no_stamp(academy):
     """
-    It means "the sweep wrote this off, then" and nothing else. A plan
+    It means "the event wrote this off, then" and nothing else. A plan
     written down after the client started coming books a finished session
-    straight to absent, which is not the sweep's doing.
+    straight to absent, which is not the event's doing.
     """
     repo = academy.repo
     sid = add_session(repo, academy.ballet, academy.ana, db.now() - 5 * 86400, 1.5)
@@ -234,8 +193,7 @@ def test_an_absence_nobody_swept_carries_no_stamp(academy):
                              "subscription_id": None, "status": "absent",
                              "created_at": db.now()})
 
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
 
     assert repo.find_one("bookings", {"session_id": sid})["settled_at"] is None
 
@@ -248,8 +206,7 @@ def test_marking_them_present_takes_the_stamp_off(academy):
     repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
                              "subscription_id": None, "status": "booked",
                              "created_at": db.now()})
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
     assert repo.find_one("bookings", {"session_id": sid})["settled_at"] is not None
 
     access.set_status(repo, sid, academy.planless, "present")
@@ -265,8 +222,7 @@ def test_the_roster_carries_it(academy):
     repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
                              "subscription_id": None, "status": "booked",
                              "created_at": db.now()})
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
 
     row = repo.session_roster(sid)[0]
     assert row["settled_at"] is not None

@@ -145,11 +145,13 @@ def repo(backend, tmp_path, monkeypatch, mongo_database):
     if backend == "mongo":
         # Documents only. The indexes were built once, for the session.
         mongo_clean(os.environ[TEST_MONGO_URI], mongo_database)
-    # The absent-sweep's deadline is module state, and the database under it
-    # has just been replaced -- a deadline computed from the *previous* test's
-    # sessions would make this one's sweep skip itself and every attendance
-    # assertion pass or fail on what the test before it happened to contain.
-    access.sweep_invalidate()
+    # Nothing to reset between tests: the end-of-session event holds no
+    # module state. It used to -- the sweep cached the deadline it next had
+    # work at, and a deadline computed from the *previous* test's sessions
+    # made this one's sweep skip itself, so every attendance assertion passed
+    # or failed on what the test before it happened to contain. The event is
+    # told which session ended rather than working it out, so there is no
+    # cache to go stale and no fixture line to remember.
     r = data.connect()
     if backend == "sqlite":
         r.init_schema()

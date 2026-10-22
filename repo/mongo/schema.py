@@ -128,7 +128,7 @@ INDEXES = {
     "product_stock": [(["product_id"], False)],
     "bookings": [(["client_id", "session_id"], True), (["client_id"], False),
                  (["session_id"], False), (["subscription_id"], False),
-                 # settle_absences() matches status first, then a session id
+                 # settle_session_absences() matches status first, then the id
                  # list, and runs before every read that touches attendance.
                  (["status", "session_id"], False)],
     "freezes": [(["subscription_id"], False)],

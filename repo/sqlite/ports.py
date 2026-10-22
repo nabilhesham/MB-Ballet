@@ -62,12 +62,22 @@ class SqliteSessions(SessionsPort):
             sql + " ORDER BY s.starts_at, s.id LIMIT 1", params).fetchone()
         return dict(row) if row else None
 
-    def complete_finished_sessions(self, now):
-        return self.conn.execute(
-            "UPDATE sessions SET status='completed'"
-            " WHERE status='scheduled' AND ends_at < ?", (now,)).rowcount
+    def due_sessions(self, now):
+        # Either write still outstanding counts as due: the status, or a slot
+        # nobody has settled. A session somebody marked `completed` by hand
+        # from the session page can still hold `booked` slots, and with only
+        # the status tested those slots would sit there for ever.
+        return [dict(r) for r in self.conn.execute(
+            "SELECT s.id, s.ends_at FROM sessions s"
+            " WHERE s.status != 'cancelled'"
+            "   AND s.ends_at IS NOT NULL AND s.ends_at < ?"
+            "   AND (s.status = 'scheduled'"
+            "        OR EXISTS (SELECT 1 FROM bookings b"
+            "                    WHERE b.session_id = s.id"
+            "                      AND b.status = 'booked'))"
+            " ORDER BY s.ends_at, s.id", (now,)).fetchall()]
 
-    def next_sweep_deadline(self, now):
+    def next_session_end(self, now):
         return self.conn.execute(
             "SELECT MIN(ends_at) t FROM sessions"
             " WHERE ends_at >= ? AND status != 'cancelled'", (now,)).fetchone()["t"]
@@ -266,20 +276,17 @@ class SqliteBookings(BookingsPort):
             "       checked_in_by='kiosk'"
             " WHERE id=? AND status != 'present'", (at, booking_id)).rowcount > 0
 
-    def settle_absences(self, now, frozen_sub_ids, ends_before):
-        # The frozen plans are fetched separately and passed in rather than
-        # joined, because Mongo has no cross-collection update and there are
-        # never more than a handful of them.
+    def settle_session_absences(self, session_id, now, frozen_sub_ids):
+        # One session named directly: no join onto sessions and no time
+        # comparison, because the caller running at all is the answer to
+        # "has it finished". See the port.
         # settled_at records that *this* is what wrote the row off, and when.
         # An absence has no other timestamp -- checked_in_at stays NULL --
         # so without it there is no way to tell an absence written at the
-        # session's real end from one written an hour early.
-        # `ends_before` is the caller's cutoff, not `now`: see the port.
+        # session's own end from one written by hand an hour earlier.
         sql = ("UPDATE bookings SET status='absent', settled_at=?"
-               " WHERE status='booked'"
-               "   AND session_id IN (SELECT id FROM sessions"
-               "        WHERE status != 'cancelled' AND ends_at < ?)")
-        params = [now, ends_before]
+               " WHERE status='booked' AND session_id=?")
+        params = [now, session_id]
         if frozen_sub_ids:
             sql += (f" AND (subscription_id IS NULL"
                     f"      OR subscription_id NOT IN ({_marks(frozen_sub_ids)}))")

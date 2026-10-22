@@ -1687,7 +1687,7 @@ async function refresh(){
 
     const now = Date.now()/1000;
     $('sched').innerHTML = d.today_sessions.length ? d.today_sessions.map(s=>{
-      const live = s.starts_at <= now && s.starts_at + s.duration_hours*3600 > now;
+      const live = s.starts_at <= now && s.ends_at > now;
       return `<div class="listrow" style="${live?'':'opacity:.5'}">
         <div><span class="dot" style="background:${esc(s.colour)}"></span>${esc(s.class_name)}
           <div class="sub">${fmtTime(s.starts_at)}${live?' · now':''}</div></div>

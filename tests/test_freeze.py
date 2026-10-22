@@ -52,7 +52,7 @@ def test_the_sweep_leaves_a_frozen_clients_session_alone(academy):
                              "subscription_id": plan, "status": "booked",
                              "created_at": db.now()})
 
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
 
     status = repo.find_one("bookings", {"session_id": past,
                                        "client_id": academy.dual})["status"]

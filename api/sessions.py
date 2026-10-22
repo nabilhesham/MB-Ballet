@@ -22,12 +22,35 @@ import repo as data
 router = APIRouter()
 
 
+def _length(hours) -> float:
+    """
+    The one check on a session's length, so the two create paths and the edit
+    cannot disagree about what a length is.
+
+    A zero or negative one is refused rather than stored: `ends_at` is
+    `starts_at + hours*3600`, so a session of no length ends at the moment it
+    begins -- it occupies no slot, which makes slot_conflict() blind to it,
+    and its end-of-session event fires the instant it is created, writing off
+    everybody booked into it. A sentence, not a 422 full of dicts.
+    """
+    if hours is None or hours <= 0:
+        raise HTTPException(400, "How long is the class? Give a length in hours.")
+    return float(hours)
+
+
 # ---------------------------------------------------------------- models
+# duration_hours is **required** on the two models that create a session,
+# and that is the point of it rather than strictness for its own sake. It was
+# optional, falling back to `classes.duration_hours` -- so a session's length
+# was the class's length at the moment it was created, and a class corrected
+# afterwards left the timetable disagreeing with itself. A session's length is
+# its own; the class's is a starting value the *form* offers, and nothing on
+# this side reads it.
 class SessionIn(BaseModel):
     class_id: int
     instructor_id: Optional[int] = None
     starts_at: int
-    duration_hours: Optional[float] = None
+    duration_hours: float
     notes: Optional[str] = None
 
 
@@ -46,7 +69,7 @@ class RepeatIn(BaseModel):
     starts_at: int
     weeks: int = 8
     weekdays: list[int] = []
-    duration_hours: Optional[float] = None
+    duration_hours: float
 
 
 class BookIn(BaseModel):
@@ -96,7 +119,6 @@ def list_sessions(start: int = 0, end: int = 0, class_id: int = 0, available_for
     """
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         # Half-open, where this was BETWEEN ... AND. `available_for` drops
         # sessions the client already holds a slot in.
         return repo.sessions_in_range(
@@ -116,7 +138,7 @@ def create_session(body: SessionIn):
         # No instructor named explicitly -> fall back to the class's default,
         # if it has one. Naming one, even a different one, always wins.
         instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
-        hours = body.duration_hours or cl["duration_hours"]
+        hours = _length(body.duration_hours)
         # The check and the insert under one lock. Deferred, the slot could
         # be taken between deciding it was free and writing into it.
         with repo.begin():
@@ -143,7 +165,7 @@ def repeat_sessions(body: RepeatIn):
         instructor_id = body.instructor_id if body.instructor_id is not None else cl["instructor_id"]
         base = datetime.fromtimestamp(body.starts_at)
         weekdays = body.weekdays or [base.weekday()]
-        hours = body.duration_hours or cl["duration_hours"]
+        hours = _length(body.duration_hours)
         # A term is generated as one change. Each date is still
         # skipped individually on a clash, but a failure partway
         # through must not leave half a term behind.
@@ -172,7 +194,6 @@ def repeat_sessions(body: RepeatIn):
 def get_session(sid: int):
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         s = repo.session_detail(sid)
         if not s:
             raise HTTPException(404, "no such session")
@@ -201,6 +222,8 @@ def edit_session(sid: int, body: SessionEdit, clear_instructor: bool = False):
         if not repo.exists("sessions", {"id": sid}):
             raise HTTPException(404, "no such session")
         fields = body.model_dump(exclude_none=True)
+        if "duration_hours" in fields:
+            fields["duration_hours"] = _length(fields["duration_hours"])
         if clear_instructor:
             fields["instructor_id"] = None
         if not fields:

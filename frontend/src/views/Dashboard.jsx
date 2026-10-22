@@ -175,7 +175,7 @@ export default function Dashboard() {
             {
               label: 'CLASS', sortValue: r => r.class_name,
               cell: r => {
-                const live = r.starts_at <= now && r.starts_at + r.duration_hours * 3600 > now;
+                const live = r.starts_at <= now && r.ends_at > now;
                 return (
                   <>
                     <span className="dot" style={{ background: r.colour }} />

@@ -18,6 +18,10 @@ class ClassIn(BaseModel):
     name: str
     description: Optional[str] = None
     colour: str = "#87438E"
+    # The length a session of this class *usually* runs, offered as the
+    # starting value in the session form and shown on the class page. It is
+    # not the length of any session: that is the session's own field, and
+    # nothing here writes it. See update_class below.
     duration_hours: float = 1.5
     level: Optional[str] = None
     # A default, not a lock: what a new session falls back to when no
@@ -76,16 +80,17 @@ def update_class(clid: int, body: ClassIn):
                 {"class_id": clid, "status": "scheduled",
                  "starts_at": {"gt": db.now()}},
                 {"instructor_id": body.instructor_id})
-            # The length cascades the same way, and for a sharper reason: a
-            # session an hour shorter than its class ends an hour early
-            # *every time*, so the sweep marks it completed and its
-            # latecomers absent while the class is still being taught. See
-            # access.relength_sessions() for why the sweep's own repair
-            # cannot reach this.
-            lengths = access.relength_sessions(repo, clid, body.duration_hours)
-        return {"ok": True, "cascaded_sessions": cascaded,
-                "relengthened": lengths["relengthened"],
-                "length_clashes": lengths["skipped"]}
+            # **The length does not cascade, and that is deliberate.** It
+            # used to: access.relength_sessions() rewrote every upcoming
+            # session's duration and its stored `ends_at` to match the
+            # class, which meant editing a class silently moved the moment
+            # a dozen already-scheduled sessions end -- and a session that
+            # could not be lengthened without running into the next one was
+            # left behind, so the timetable ended up holding both answers
+            # anyway. A session's length is its own from the moment it is
+            # scheduled; this field is only the value the form offers next
+            # time. Changing it changes nothing already on the timetable.
+        return {"ok": True, "cascaded_sessions": cascaded}
     finally:
         repo.close()
 
@@ -94,7 +99,6 @@ def update_class(clid: int, body: ClassIn):
 def get_class(clid: int):
     repo = data.connect()
     try:
-        access.settle_past_sessions(repo)
         c = repo.get("classes", clid)
         if not c:
             raise HTTPException(404, "no such class")

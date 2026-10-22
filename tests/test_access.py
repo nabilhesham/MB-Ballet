@@ -146,83 +146,63 @@ def test_only_present_and_absent_are_accepted(academy):
     assert access.set_status(repo, academy.today_ballet, academy.dual, "present")["ok"]
 
 
-def test_an_unattended_past_session_is_swept_to_absent(academy):
-    """Yesterday's, because an absence waits for the end of its own day."""
+def test_a_finished_session_writes_off_its_no_show(academy):
+    """The event, end to end: it ended, they never came, the slot is spent."""
     repo = academy.repo
-    past = add_session(repo, academy.ballet, academy.ana,
-                       db.now() - 28 * 3600, 1.5, status="scheduled")
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
-                             "subscription_id": None, "status": "booked",
-                             "created_at": db.now()})
-
-    access.settle_past_sessions(repo)
-
-    assert repo.find_one("bookings", {"session_id": past})["status"] == "absent"
-
-
-def test_a_session_that_ended_today_leaves_its_no_show_booked(academy, monkeypatch):
-    """
-    The day boundary, which is the whole of the rule. A session finished four
-    hours ago has ended by any reading of the clock -- and its no-show stays
-    booked until the day it ran in is over, so no wrong `ends_at` and no fast
-    clock can write somebody off while they are sitting in the class.
-
-    The clock is pinned to the afternoon rather than taken from the machine:
-    "four hours ago, and still today" is not true at half past midnight, and
-    a test whose answer depends on the hour it is run at is the thing
-    fixtures.py already guards against.
-    """
-    repo = academy.repo
-    monkeypatch.setattr(db, "now", lambda: int(
-        datetime.combine(date.today(), time(16, 0)).timestamp()))
-
     past = add_session(repo, academy.ballet, academy.ana,
                        db.now() - 4 * 3600, 1.5, status="scheduled")
     repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
                              "subscription_id": None, "status": "booked",
                              "created_at": db.now()})
-    access.sweep_invalidate()
 
-    access.settle_past_sessions(repo)
-
-    b = repo.find_one("bookings", {"session_id": past})
-    assert b["status"] == "booked"
-    assert b["settled_at"] is None
-    # The session's own status is not on the day boundary -- the Sessions
-    # list and the dashboard tell a finished class from a running one.
-    assert repo.get("sessions", past)["status"] == "completed"
-
-
-def test_the_same_session_a_day_back_is_settled(academy, monkeypatch):
-    """
-    The other side of the boundary, so the test above cannot pass by the
-    sweep simply not running: the identical session dated a day earlier is
-    written off, with a stamp.
-    """
-    repo = academy.repo
-    monkeypatch.setattr(db, "now", lambda: int(
-        datetime.combine(date.today(), time(16, 0)).timestamp()))
-
-    past = add_session(repo, academy.ballet, academy.ana,
-                       db.now() - 28 * 3600, 1.5, status="scheduled")
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
-                             "subscription_id": None, "status": "booked",
-                             "created_at": db.now()})
-    access.sweep_invalidate()
-
-    access.settle_past_sessions(repo)
+    access.settle_due_sessions(repo)
 
     b = repo.find_one("bookings", {"session_id": past})
     assert b["status"] == "absent"
     assert b["settled_at"] == db.now()
+    assert repo.get("sessions", past)["status"] == "completed"
 
 
-def test_the_sweep_also_completes_the_session(academy):
+def test_a_session_still_running_writes_nobody_off(academy):
+    """
+    Twenty minutes into a 1.5-hour class. Nothing about the length of the
+    class it belongs to is consulted, so there is no version of this where
+    the slot is spent at the one-hour mark.
+    """
+    repo = academy.repo
+    running = add_session(repo, academy.ballet, academy.ana,
+                          db.now() - 20 * 60, 1.5, status="scheduled")
+    repo.insert("bookings", {"client_id": academy.planless,
+                             "session_id": running,
+                             "subscription_id": None, "status": "booked",
+                             "created_at": db.now()})
+
+    assert access.settle_due_sessions(repo) == 0
+
+    b = repo.find_one("bookings", {"session_id": running})
+    assert b["status"] == "booked"
+    assert b["settled_at"] is None
+    assert repo.get("sessions", running)["status"] == "scheduled"
+
+
+def test_a_read_settles_nothing_on_the_way_past(academy):
+    """
+    Reading a screen does not settle anything any more, which is the other
+    half of "the event is the only mechanism". The sweep used to run at the
+    top of nine read endpoints; a read that still settled would hide the
+    watcher never firing.
+    """
     repo = academy.repo
     past = add_session(repo, academy.ballet, academy.ana,
                        db.now() - 4 * 3600, 1.5, status="scheduled")
-    access.settle_past_sessions(repo)
-    assert repo.get("sessions", past)["status"] == "completed"
+    repo.insert("bookings", {"client_id": academy.planless, "session_id": past,
+                             "subscription_id": None, "status": "booked",
+                             "created_at": db.now()})
+
+    access.verify_by_client(repo, academy.planless)
+    access.session_roster(repo, past)
+
+    assert repo.find_one("bookings", {"session_id": past})["status"] == "booked"
 
 
 def test_instructor_pay_is_hours_times_rate(academy):
@@ -325,168 +305,108 @@ def test_the_nearest_session_of_the_day_is_the_one_matched(academy):
     assert r["session"]["id"] == academy.today_ballet, "the nearer of the two"
 
 
-# ------------------------------------------------- a class that is still running
+# ------------------------------------------------- when the event is set for
 #
-# The failure these hold happened on the academy's own screen: a 3:30 class
-# showed as `completed` at twenty past three with two students already marked
-# absent, in a room they were sitting in. The cause is a stored `ends_at`
-# earlier than the session's own duration says -- the sweep then completes it
-# and settles its no-shows mid-class, and nothing afterwards puts either back.
-def test_a_short_stored_end_does_not_end_the_class_early(academy):
-    """
-    The column is the fast path for "has this ended?", not a second opinion on
-    it. One hour written against a 1.5-hour class ends the class half an hour
-    early, every single time, with nothing on screen to say why.
-    """
+# The event is an alarm, and `ends_at` is the time it is set to. Everything
+# below is about that one number: who writes it, that it is the session's own
+# length and never its class's, and that the watcher sleeps until it rather
+# than polling an hour at a time.
+#
+# This replaced a repair (`access._repair_running_sessions`), which existed
+# because the sweep re-asked "has this ended?" on every pass against a column
+# a class edit could silently rewrite -- so a 3:30 class showed `completed` at
+# twenty past three with two students marked absent in a room they were
+# sitting in. Nothing rewrites the column behind a session's back any more:
+# the class's length does not cascade, so the only way to move an end is to
+# edit the session.
+def test_the_stored_end_comes_from_the_sessions_own_length(academy):
     repo = academy.repo
-    started = db.now() - 70 * 60                      # 1h10 into a 1.5h class
-    sid = add_session(repo, academy.ballet, academy.ana, started, 1.5,
+    started = db.now() + 86400
+    sid = add_session(repo, academy.ballet, academy.ana, started, 2.5,
                       status="scheduled")
-    repo.update("sessions", sid, {"ends_at": started + 3600})   # an hour short
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
-                             "subscription_id": None, "status": "booked",
-                             "created_at": db.now()})
-
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    assert repo.get("sessions", sid)["status"] == "scheduled"
-    assert repo.find_one("bookings", {"session_id": sid})["status"] == "booked"
-    # And the column is corrected, so the next pass works from the duration.
-    assert repo.get("sessions", sid)["ends_at"] == access.ends_at_of(started, 1.5)
+    assert repo.get("sessions", sid)["ends_at"] == access.ends_at_of(started, 2.5)
 
 
-def test_a_session_still_running_is_put_back_to_scheduled(academy):
+def test_the_event_is_set_by_the_stored_end_not_by_an_hour(academy):
     """
-    The repair for the state already in the database. `completed` on a class
-    that is visibly running is what the dashboard prints instead of `now`, and
-    it cannot clear itself without this.
+    A class finishing in ten minutes is waited for, not slept past. The
+    background loop used to wake on a flat hour, so a no-show became absent
+    somewhere in the hour after their class rather than when it finished --
+    and on a laptop sitting on the kiosk that loop is the only thing there is.
     """
-    repo = academy.repo
-    started = db.now() - 20 * 60
-    sid = add_session(repo, academy.ballet, academy.ana, started, 1.5,
-                      status="completed")
-
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    assert repo.get("sessions", sid)["status"] == "scheduled"
-
-
-def test_reopening_gives_the_no_shows_their_slots_back(academy):
-    """
-    The half that matters at the counter: while the slot reads `absent` the
-    kiosk stops checking a latecomer in the ordinary way and offers the swap
-    instead, which is different work for the same person at the same door.
-    """
-    repo = academy.repo
-    started = db.now() - 20 * 60
-    sid = add_session(repo, academy.ballet, academy.ana, started, 1.5,
-                      status="completed")
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
-                             "subscription_id": None, "status": "booked",
-                             "created_at": db.now()})
-    repo.update_where("bookings", {"session_id": sid}, {"status": "absent"})
-
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    assert repo.find_one("bookings", {"session_id": sid})["status"] == "booked"
-
-
-def test_an_attendance_already_taken_survives_the_repair(academy):
-    """Present is a fact about somebody who turned up. Only absences, which
-    the sweep itself writes, are given back."""
-    repo = academy.repo
-    started = db.now() - 20 * 60
-    sid = add_session(repo, academy.ballet, academy.ana, started, 1.5,
-                      status="completed")
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
-                             "subscription_id": None, "status": "present",
-                             "checked_in_at": db.now(), "created_at": db.now()})
-
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    assert repo.find_one("bookings", {"session_id": sid})["status"] == "present"
-
-
-def test_a_finished_session_is_left_completed(academy):
-    """The repair is about a class that is still running. One that is over
-    stays over -- otherwise every settled session would reopen for ever."""
-    repo = academy.repo
-    sid = add_session(repo, academy.ballet, academy.ana,
-                      db.now() - 4 * 3600, 1.5, status="completed")
-    repo.insert("bookings", {"client_id": academy.planless, "session_id": sid,
-                             "subscription_id": None, "status": "absent",
-                             "created_at": db.now()})
-
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    assert repo.get("sessions", sid)["status"] == "completed"
-    assert repo.find_one("bookings", {"session_id": sid})["status"] == "absent"
-
-
-def test_a_cancelled_session_is_never_reopened(academy):
-    """Cancelling is how reception frees a slot up. Its end is still kept
-    honest, because un-cancelling asks slot_conflict() about it."""
-    repo = academy.repo
-    started = db.now() - 20 * 60
-    sid = add_session(repo, academy.ballet, academy.ana, started, 1.5,
-                      status="cancelled")
-    repo.update("sessions", sid, {"ends_at": started + 60})
-
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
-
-    row = repo.get("sessions", sid)
-    assert row["status"] == "cancelled"
-    assert row["ends_at"] == access.ends_at_of(started, 1.5)
-
-
-# ---------------------------------------------------------------- sweep cadence
-#
-# The absent rule has always been the session's own end (`ends_at < now`).
-# What was an hour is how often the background loop in server.py woke up to
-# apply it — and on a laptop sitting on the kiosk screen nothing else reads
-# attendance, so that loop was the only thing applying it. A no-show became
-# absent somewhere in the hour after their class instead of when it finished.
-# access.seconds_to_next_sweep() is what the loop waits now.
-def test_the_sweep_waits_for_the_session_to_end_not_an_hour(academy):
-    """A class finishing in ten minutes is waited for, not slept past."""
     repo = academy.repo
     add_session(repo, academy.ballet, academy.ana,
                 db.now() + 600 - int(1.5 * 3600), 1.5, status="scheduled")
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)          # recomputes the deadline
 
-    wait = access.seconds_to_next_sweep()
-    assert 540 <= wait <= 600, wait            # ~10 minutes, nothing like 3600
+    wait = access.seconds_to_next_end(repo)
+    assert 540 <= wait <= 601, wait            # ~10 minutes, nothing like 3600
+
+
+def test_a_two_hour_class_is_waited_for_in_full(academy):
+    """
+    The same question asked of a length longer than an hour, since "it marks
+    them absent after one hour even though the session is longer" is the
+    report all of this comes from. Ninety minutes into a two-hour class the
+    alarm is still half an hour out.
+
+    Compared against the next midnight too, for the reason the heartbeat test
+    below gives: the deadline is the *earlier* of the next end and the freeze
+    boundary, so run inside the last half hour of the day this is legitimately
+    nearer than the class's end and a flat assertion fails by the clock.
+    """
+    import time as _time
+    from datetime import date, datetime, time as _t, timedelta
+
+    repo = academy.repo
+    repo.update_where("sessions", {}, {"status": "cancelled"})
+    add_session(repo, academy.ballet, academy.ana,
+                db.now() - 90 * 60, 2.0, status="scheduled")
+
+    midnight = datetime.combine(date.today() + timedelta(days=1), _t.min).timestamp()
+    expected = min(30 * 60, midnight - _time.time())
+
+    wait = access.seconds_to_next_end(repo)
+    assert abs(wait - expected) <= 2, (wait, expected)
+    # Whatever the hour, it is nothing like the flat 3600 the loop used to
+    # sleep, and nothing like the one hour the report complains about.
+    assert wait > 60, wait
 
 
 def test_a_session_ending_this_second_does_not_spin_the_loop(academy):
     """
-    next_sweep_deadline answers `ends_at >= now` and settle_absences wants
-    `<`, so the pass that lands exactly on a session's end has nothing to do
-    and would be asked to wait zero seconds. The floor is what stops that
+    next_session_end() answers `ends_at >= now` and due_sessions() wants `<`,
+    so the pass that lands exactly on a session's end has nothing to do and
+    would be asked to wait zero seconds. The floor is what stops that
     becoming a busy loop.
     """
     repo = academy.repo
     add_session(repo, academy.ballet, academy.ana,
                 db.now() - int(1.5 * 3600), 1.5, status="scheduled")
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
 
-    assert access.seconds_to_next_sweep() >= access.SWEEP_WAIT_MIN
+    assert access.seconds_to_next_end(repo) >= access.WATCH_WAIT_MIN
 
 
-def test_a_quiet_timetable_still_gets_the_hourly_pass(academy):
+def test_the_wait_lands_just_past_the_end_not_on_it(academy):
+    """
+    Sleeping *to* the deadline made the first pass find nothing (`>= now`
+    against `<`) and the event fired a floor-length late -- 5s of a slot
+    still reading `booked` after the class was over, measured against a
+    running server. One second past the end is what makes it exact.
+    """
+    repo = academy.repo
+    repo.update_where("sessions", {}, {"status": "cancelled"})
+    ends_in = 600
+    add_session(repo, academy.ballet, academy.ana,
+                db.now() + ends_in - int(1.5 * 3600), 1.5, status="scheduled")
+
+    assert access.seconds_to_next_end(repo) == ends_in + access.WATCH_LAG
+
+
+def test_a_quiet_timetable_still_gets_the_hourly_heartbeat(academy):
     """
     With nothing ending for days the deadline is tomorrow's midnight — the
     freeze boundary — and the loop still wakes hourly as a heartbeat for what
-    a deadline cannot see: a suspended laptop, a clock jump, a write made
-    while it was already asleep.
+    a sleeping process cannot see: a suspended laptop, a clock jump.
 
     **The hour is a ceiling, not the answer**, which is why this compares
     against the midnight too: run inside the last hour of the day and the
@@ -499,10 +419,8 @@ def test_a_quiet_timetable_still_gets_the_hourly_pass(academy):
 
     repo = academy.repo
     repo.update_where("sessions", {}, {"status": "cancelled"})
-    access.sweep_invalidate()
-    access.settle_past_sessions(repo)
 
     midnight = datetime.combine(date.today() + timedelta(days=1), _t.min).timestamp()
-    expected = min(access.SWEEP_WAIT_MAX, midnight - _time.time())
+    expected = min(access.WATCH_WAIT_MAX, midnight - _time.time())
 
-    assert abs(access.seconds_to_next_sweep() - expected) <= 1
+    assert abs(access.seconds_to_next_end(repo) - expected) <= 2

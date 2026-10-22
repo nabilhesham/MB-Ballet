@@ -130,7 +130,7 @@ def _fill(repo, client_id, sub_id, session_ids):
 
     Past sessions are booked straight to a settled status so the fixture does
     not leave stray 'booked' rows behind now — anything that calls
-    settle_past_sessions() would sweep them, and a test watching the sweep
+    the end-of-session event would settle them, and a test watching it
     needs to own the only row it can touch.
     """
     now = db.now()

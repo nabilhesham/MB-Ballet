@@ -238,9 +238,12 @@ def test_the_port_methods_agree(built):
             [("2000-01", "2999-01"), ("2000-01", "2000-02")])),
         ("joined_counts none", lambda r: r.joined_counts([])),
         ("event_totals none", lambda r: r.event_totals(db.now() + 86400)),
-        ("next_sweep_deadline", lambda r: r.next_sweep_deadline(db.now())),
-        ("next_sweep_deadline far future",
-         lambda r: r.next_sweep_deadline(db.now() + 400 * 86400)),
+        ("next_session_end", lambda r: r.next_session_end(db.now())),
+        ("next_session_end far future",
+         lambda r: r.next_session_end(db.now() + 400 * 86400)),
+        ("due_sessions", lambda r: r.due_sessions(db.now())),
+        ("due_sessions far future",
+         lambda r: r.due_sessions(db.now() + 400 * 86400)),
         ("plan_sessions", lambda r: r.plan_sessions(a.dual, a.dual_ballet_plan)),
         ("client_bookings", lambda r: r.client_bookings(a.dual)),
         ("client_bookings none", lambda r: r.client_bookings(a.planless)),
@@ -441,7 +444,7 @@ def test_the_absent_sweep_agrees(built):
         r.insert("bookings", {"client_id": a.planless, "session_id": sid,
                               "subscription_id": None, "status": "booked",
                               "created_at": db.now()})
-    on_both(repos, access.settle_past_sessions, "settle_past_sessions")
+    on_both(repos, access.settle_due_sessions, "settle_due_sessions")
     on_both(repos, lambda r: r.find("bookings", {"client_id": a.planless}),
             "the swept booking")
 
